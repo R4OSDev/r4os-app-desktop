@@ -1,0 +1,317 @@
+const std = @import("std");
+const surface = @import("surface.zig");
+
+pub const SceneBuffer = struct {
+    memory: ?[]u8 = null,
+    pixels: ?[]u32 = null,
+    width: i32 = 0,
+    height: i32 = 0,
+    // During an incremental desktop present only this rectangle is repainted.
+    // Keeping it on the scene avoids replaying a whole hosted application for
+    // every cursor movement while the committed framebuffer remains complete.
+    paint_clip: ?surface.Rect = null,
+
+    pub fn requiredBytes(width: i32, height: i32) ?usize {
+        if (width <= 0 or height <= 0) return null;
+        const w: usize = @intCast(width);
+        const h: usize = @intCast(height);
+        const count = std.math.mul(usize, w, h) catch return null;
+        return std.math.mul(usize, count, @sizeOf(u32)) catch return null;
+    }
+
+    pub fn attach(self: *SceneBuffer, memory: []u8, width: i32, height: i32) bool {
+        const bytes = requiredBytes(width, height) orelse return false;
+        if (memory.len < bytes) return false;
+        const count = bytes / @sizeOf(u32);
+        const aligned: [*]align(@alignOf(u32)) u8 = @alignCast(memory.ptr);
+        const raw: [*]u32 = @ptrCast(aligned);
+        self.* = .{
+            .memory = memory,
+            .pixels = raw[0..count],
+            .width = width,
+            .height = height,
+        };
+        return true;
+    }
+
+    pub fn reset(self: *SceneBuffer) void {
+        self.* = .{};
+    }
+
+    pub fn setPaintClip(self: *SceneBuffer, rect: surface.Rect) void {
+        self.paint_clip = self.clipRect(rect);
+    }
+
+    pub fn clearPaintClip(self: *SceneBuffer) void {
+        self.paint_clip = null;
+    }
+
+    pub fn paintBounds(self: *const SceneBuffer) surface.Rect {
+        return self.paint_clip orelse self.fullRect();
+    }
+
+    pub fn matches(self: *const SceneBuffer, width: i32, height: i32) bool {
+        return self.pixels != null and self.width == width and self.height == height;
+    }
+
+    pub fn fullRect(self: *const SceneBuffer) surface.Rect {
+        return .{ .x = 0, .y = 0, .w = self.width, .h = self.height };
+    }
+
+    pub fn clipRect(self: *const SceneBuffer, rect: surface.Rect) ?surface.Rect {
+        if (self.pixels == null or rect.isEmpty() or self.width <= 0 or self.height <= 0) return null;
+        const left = @max(0, rect.x);
+        const top = @max(0, rect.y);
+        const right = @min(self.width, rect.right());
+        const bottom = @min(self.height, rect.bottom());
+        if (right <= left or bottom <= top) return null;
+        return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
+    }
+
+    fn paintClipRect(self: *const SceneBuffer, rect: surface.Rect) ?surface.Rect {
+        const surface_clip = self.clipRect(rect) orelse return null;
+        const paint_clip = self.paint_clip orelse return surface_clip;
+        const left = @max(surface_clip.x, paint_clip.x);
+        const top = @max(surface_clip.y, paint_clip.y);
+        const right = @min(surface_clip.right(), paint_clip.right());
+        const bottom = @min(surface_clip.bottom(), paint_clip.bottom());
+        if (right <= left or bottom <= top) return null;
+        return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
+    }
+
+    pub fn fillRect(self: *SceneBuffer, rect: surface.Rect, rgb: u32) void {
+        const clipped = self.paintClipRect(rect) orelse return;
+        const pixels = self.pixels orelse return;
+        const color = rgb & 0x00FF_FFFF;
+        const width: usize = @intCast(self.width);
+        const left: usize = @intCast(clipped.x);
+        const row_count: usize = @intCast(clipped.w);
+        var y: i32 = clipped.y;
+        while (y < clipped.bottom()) : (y += 1) {
+            const row: usize = @intCast(y);
+            const offset = row * width + left;
+            @memset(pixels[offset .. offset + row_count], color);
+        }
+    }
+
+    pub fn blitXrgb32(self: *SceneBuffer, x: i32, y: i32, w: u32, h: u32, source: []const u32) void {
+        if (w == 0 or h == 0) return;
+        if (w > @as(u32, @intCast(std.math.maxInt(i32))) or h > @as(u32, @intCast(std.math.maxInt(i32)))) return;
+        const src_w: i32 = @intCast(w);
+        const src_h: i32 = @intCast(h);
+        const needed = @as(usize, @intCast(w)) * @as(usize, @intCast(h));
+        if (source.len < needed) return;
+
+        const clipped = self.paintClipRect(.{ .x = x, .y = y, .w = src_w, .h = src_h }) orelse return;
+        const pixels = self.pixels orelse return;
+        const dst_stride: usize = @intCast(self.width);
+        const src_stride: usize = @intCast(w);
+        const copy_count: usize = @intCast(clipped.w);
+        const dst_x: usize = @intCast(clipped.x);
+        const src_x: usize = @intCast(clipped.x - x);
+        const src_y0: usize = @intCast(clipped.y - y);
+
+        var row: i32 = 0;
+        while (row < clipped.h) : (row += 1) {
+            const dst_y: usize = @intCast(clipped.y + row);
+            const src_y = src_y0 + @as(usize, @intCast(row));
+            const src_offset = src_y * src_stride + src_x;
+            const dst_offset = dst_y * dst_stride + dst_x;
+            @memcpy(pixels[dst_offset .. dst_offset + copy_count], source[src_offset .. src_offset + copy_count]);
+        }
+    }
+
+    /// Blends an Alpha8 coverage mask over the current XRGB scene.  The source
+    /// may contain row padding; clipping advances into the original stride.
+    pub fn blendAlpha8(self: *SceneBuffer, x: i32, y: i32, w: u32, h: u32, stride: u32, rgb: u32, alpha: []const u8) bool {
+        if (w == 0 or h == 0 or stride < w) return false;
+        if (w > @as(u32, @intCast(std.math.maxInt(i32))) or h > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
+        const preceding_rows = std.math.mul(usize, @as(usize, h - 1), @as(usize, stride)) catch return false;
+        const required = std.math.add(usize, preceding_rows, @as(usize, w)) catch return false;
+        if (alpha.len < required) return false;
+
+        const clipped = self.paintClipRect(.{ .x = x, .y = y, .w = @intCast(w), .h = @intCast(h) }) orelse return true;
+        const pixels = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const source_stride: usize = @intCast(stride);
+        const source_x: usize = @intCast(clipped.x - x);
+        const source_y: usize = @intCast(clipped.y - y);
+        const destination_x: usize = @intCast(clipped.x);
+        const copy_width: usize = @intCast(clipped.w);
+
+        var row: i32 = 0;
+        while (row < clipped.h) : (row += 1) {
+            const destination_y: usize = @intCast(clipped.y + row);
+            const source_row = (source_y + @as(usize, @intCast(row))) * source_stride + source_x;
+            const destination_row = destination_y * destination_stride + destination_x;
+            var column: usize = 0;
+            while (column < copy_width) : (column += 1) {
+                const coverage = alpha[source_row + column];
+                if (coverage == 0) continue;
+                pixels[destination_row + column] = blendXrgb(pixels[destination_row + column], rgb, coverage);
+            }
+        }
+        return true;
+    }
+
+    /// Blends a byte-exact, straight-alpha ARGB32 source over the current
+    /// XRGB scene. The caller supplies an explicit client clip; scaling uses
+    /// nearest-neighbour source pixels and never exposes transparent corners.
+    pub fn blendArgb32(self: *SceneBuffer, clip: surface.Rect, x: i32, y: i32, w: u32, h: u32, scale: u32, source: []const u8) bool {
+        if (w == 0 or h == 0 or scale == 0 or scale > 16) return false;
+        const pixel_count = std.math.mul(usize, @as(usize, w), @as(usize, h)) catch return false;
+        const required = std.math.mul(usize, pixel_count, @sizeOf(u32)) catch return false;
+        if (source.len != required) return false;
+        const pixels = self.pixels orelse return false;
+        const scene_clip = self.paintClipRect(clip) orelse return true;
+
+        const scaled_width = std.math.mul(i64, @as(i64, w), @as(i64, scale)) catch return false;
+        const scaled_height = std.math.mul(i64, @as(i64, h), @as(i64, scale)) catch return false;
+        const source_left: i64 = x;
+        const source_top: i64 = y;
+        const source_right = std.math.add(i64, source_left, scaled_width) catch return false;
+        const source_bottom = std.math.add(i64, source_top, scaled_height) catch return false;
+        const left = @max(@as(i64, scene_clip.x), source_left);
+        const top = @max(@as(i64, scene_clip.y), source_top);
+        const right = @min(@as(i64, scene_clip.right()), source_right);
+        const bottom = @min(@as(i64, scene_clip.bottom()), source_bottom);
+        if (right <= left or bottom <= top) return true;
+
+        const destination_stride: usize = @intCast(self.width);
+        var destination_y = top;
+        while (destination_y < bottom) : (destination_y += 1) {
+            const source_y: usize = @intCast(@divFloor(destination_y - source_top, @as(i64, scale)));
+            const destination_row = @as(usize, @intCast(destination_y)) * destination_stride;
+            var destination_x = left;
+            while (destination_x < right) : (destination_x += 1) {
+                const source_x: usize = @intCast(@divFloor(destination_x - source_left, @as(i64, scale)));
+                const source_index = (source_y * @as(usize, w) + source_x) * @sizeOf(u32);
+                const argb = @as(u32, source[source_index]) |
+                    (@as(u32, source[source_index + 1]) << 8) |
+                    (@as(u32, source[source_index + 2]) << 16) |
+                    (@as(u32, source[source_index + 3]) << 24);
+                const alpha: u8 = @truncate(argb >> 24);
+                if (alpha == 0) continue;
+                const destination_index = destination_row + @as(usize, @intCast(destination_x));
+                pixels[destination_index] = blendXrgb(pixels[destination_index], argb, alpha);
+            }
+        }
+        return true;
+    }
+};
+
+fn blendXrgb(destination: u32, source: u32, alpha: u8) u32 {
+    if (alpha == 0) return destination;
+    const src = source & 0x00FF_FFFF;
+    if (alpha == 255) return src;
+    const amount: u32 = alpha;
+    const inverse = 255 - amount;
+    const red = blendChannel(src >> 16, destination >> 16, amount, inverse);
+    const green = blendChannel(src >> 8, destination >> 8, amount, inverse);
+    const blue = blendChannel(src, destination, amount, inverse);
+    return (red << 16) | (green << 8) | blue;
+}
+
+fn blendChannel(source: u32, destination: u32, alpha: u32, inverse: u32) u32 {
+    return (((source & 0xFF) * alpha + (destination & 0xFF) * inverse + 127) / 255) & 0xFF;
+}
+
+test "scene buffer fills clipped rectangles" {
+    var pixels: [16]u32 = .{0} ** 16;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 4, 4));
+
+    buffer.fillRect(.{ .x = 1, .y = 1, .w = 5, .h = 2 }, 0x123456);
+
+    try std.testing.expectEqual(@as(u32, 0), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x123456), pixels[5]);
+    try std.testing.expectEqual(@as(u32, 0x123456), pixels[7]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[8]);
+}
+
+test "scene buffer paint clip preserves pixels outside incremental damage" {
+    var pixels: [16]u32 = .{0x112233} ** 16;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 4, 4));
+    buffer.setPaintClip(.{ .x = 1, .y = 1, .w = 2, .h = 2 });
+
+    buffer.fillRect(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, 0xABCDEF);
+
+    try std.testing.expectEqual(@as(u32, 0x112233), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0xABCDEF), pixels[5]);
+    try std.testing.expectEqual(@as(u32, 0xABCDEF), pixels[10]);
+    try std.testing.expectEqual(@as(u32, 0x112233), pixels[15]);
+    buffer.clearPaintClip();
+    try std.testing.expectEqual(buffer.fullRect(), buffer.paintBounds());
+}
+
+test "scene buffer copies clipped xrgb32 pixels" {
+    var pixels: [16]u32 = .{0} ** 16;
+    var source = [_]u32{
+        1, 2, 3,
+        4, 5, 6,
+        7, 8, 9,
+    };
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 4, 4));
+
+    buffer.blitXrgb32(2, 1, 3, 3, source[0..]);
+
+    try std.testing.expectEqual(@as(u32, 1), pixels[6]);
+    try std.testing.expectEqual(@as(u32, 2), pixels[7]);
+    try std.testing.expectEqual(@as(u32, 4), pixels[10]);
+    try std.testing.expectEqual(@as(u32, 5), pixels[11]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[12]);
+}
+
+test "scene buffer alpha8 source-over preserves zero and replaces full coverage" {
+    var pixels = [_]u32{ 0x112233, 0x204060, 0xABCDEF };
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 3, 1));
+    const alpha = [_]u8{ 0, 128, 255 };
+
+    try std.testing.expect(buffer.blendAlpha8(0, 0, 3, 1, 3, 0xE08020, alpha[0..]));
+    try std.testing.expectEqual(@as(u32, 0x112233), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x806040), pixels[1]);
+    try std.testing.expectEqual(@as(u32, 0xE08020), pixels[2]);
+}
+
+test "scene buffer alpha8 clipping advances through padded source rows" {
+    var pixels: [6]u32 = .{0} ** 6;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 3, 2));
+    const alpha = [_]u8{
+        0, 255, 128, 0xEE,
+        0, 128, 255, 0xDD,
+    };
+
+    try std.testing.expect(buffer.blendAlpha8(-1, 0, 3, 2, 4, 0xFFFFFF, alpha[0..]));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x808080), pixels[1]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[2]);
+    try std.testing.expectEqual(@as(u32, 0x808080), pixels[3]);
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), pixels[4]);
+    try std.testing.expectEqual(@as(u32, 0), pixels[5]);
+}
+
+test "scene buffer straight alpha ARGB32 clips scales and preserves transparency" {
+    var pixels = [_]u32{0x204060} ** 8;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(std.mem.sliceAsBytes(pixels[0..]), 4, 2));
+    const source = [_]u8{
+        0x00, 0x00, 0xFF, 0x00,
+        0x00, 0x00, 0xFF, 0x80,
+        0x00, 0xFF, 0x00, 0xFF,
+    };
+
+    try std.testing.expect(buffer.blendArgb32(.{ .x = 0, .y = 0, .w = 3, .h = 1 }, 0, 0, 3, 1, 1, source[0..]));
+    try std.testing.expectEqual(@as(u32, 0x204060), pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x902030), pixels[1]);
+    try std.testing.expectEqual(@as(u32, 0x00FF00), pixels[2]);
+    try std.testing.expectEqual(@as(u32, 0x204060), pixels[3]);
+
+    const opaque_white = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
+    try std.testing.expect(buffer.blendArgb32(.{ .x = 0, .y = 1, .w = 1, .h = 1 }, -1, 1, 1, 1, 2, opaque_white[0..]));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), pixels[4]);
+    try std.testing.expectEqual(@as(u32, 0x204060), pixels[5]);
+}

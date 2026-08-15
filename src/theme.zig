@@ -1,0 +1,26 @@
+pub const desktop_bg: u32 = 0x008080;
+pub const taskbar: u32 = 0xC0C0C0;
+pub const taskbar_hover: u32 = 0xD8D8D8;
+pub const taskbar_pressed: u32 = 0xA8A8A8;
+pub const taskbar_dark: u32 = 0x808080;
+pub const taskbar_light: u32 = 0xFFFFFF;
+pub const text: u32 = 0x000000;
+pub const title_active: u32 = 0x000080;
+pub const title_light: u32 = 0x1084D0;
+pub const title_inactive: u32 = 0x808080;
+pub const title_text: u32 = 0xFFFFFF;
+pub const window_bg: u32 = 0xD8D8D8;
+pub const client_bg: u32 = 0xFFFFFF;
+pub const select_bg: u32 = 0x000080;
+pub const shadow: u32 = 0x404040;
+
+pub const taskbar_h: i32 = 32;
+pub const start_w: i32 = 82;
+pub const start_h: i32 = 24;
+pub const menu_w: i32 = 236;
+pub const menu_h: i32 = 416;
+pub const menu_top_pad: i32 = 34;
+pub const menu_group_h: i32 = 18;
+pub const menu_item_h: i32 = 24;
+pub const title_h: i32 = 20;
+pub const button: i32 = 16;
