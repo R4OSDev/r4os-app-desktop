@@ -26,6 +26,31 @@ Fenster-, Console-, Clipboard-, ProgramStatus- und Power-Funktionen laufen
 ueber ihre aktuellen Gruppenfelder. Der Desktop besitzt keine eigene
 Kernel- oder API-Parallelstruktur.
 
+Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
+Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
+GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,
+Minimieren und Schliessen verwenden denselben Aktivierungspfad; normale
+Tastatur- und Mausereignisse bleiben weiterhin an genau das aktive Fenster
+gebunden.
+
+Das explizite Shellargument `/HEADLESS-SUBSYSTEM` gehoert zum Testprofil. Es
+wartet zunaechst auf den testweise aufgenommenen AUDSVC. Danach laedt R4DESK
+den installierten Subsystemkatalog, probt `SUBSYSTEM-A.BAS` und
+`SUBSYSTEM-B.BAS` und loest beide Dateien ueber dieselbe R4STD-
+Dateihandlerkette wie Explorer zu `test.basic` auf. Beide `R4SUBSYS1`-Starts
+laufen gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
+maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
+Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
+
+Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind,
+schreibt der Desktop die Video-/Eingabe- und Runtime-/Audio-Erfolgsmarkerdatei
+fuer AUTOEXEC. Fehler schreiben stattdessen einen konkreten Bootstrap- oder
+Fixture-Marker und wechseln ebenfalls in den seriell gespiegelten
+Terminalmodus, damit die restliche Suite Diagnosekontext liefern kann. Nach
+erfolgreicher Abnahme wartet der test-only Desktop kooperativ ohne weiteres
+Rendering bis zum kontrollierten Poweroff. Ohne `/HEADLESS-SUBSYSTEM` wird
+weder das Fixture noch AUTOEXEC vom Desktop gestartet.
+
 Konfiguration
 -------------
 

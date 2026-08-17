@@ -119,12 +119,25 @@ const RenderSnapshot = struct {
     layout_worker_completed: u32 = 0,
 };
 
+const HeadlessSubsystemLaunch = struct {
+    index: usize,
+    handle: r4os.abi.ProgramProcessHandle,
+};
+
 const menu_config_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\MENU.R4S";
 const desktop_config_path = r4std.settings.paths.desktop;
 const desktop_layout_path = r4std.settings.paths.desktop_layout;
 const time_config_path = r4std.settings.paths.time;
 const terminal_path = "/R4OS/SOFTWARE/TERMINAL/TERMINAL.R4X";
 const terminal_desktop_args = "/NOAUTOEXEC";
+const subsystem_host_test_path = "/R4OS/SUBSYSTEMS/test.basic/SUBSYSOK.R4X";
+const subsystem_guest_a_path = "C:\\TEMP\\SUBSYSTEM-A.BAS";
+const subsystem_guest_b_path = "C:\\TEMP\\SUBSYSTEM-B.BAS";
+const subsystem_host_test_marker_path = "C:\\TEMP\\SUBSYS.OK";
+const subsystem_audio_service = "AUDSVC";
+const subsystem_host_test_marker =
+    "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
+    "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -281,6 +294,9 @@ pub const App = struct {
     win_service_available: bool = false,
     window_service_mirrored: [4]bool = .{false} ** 4,
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
+    window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
+    window_completion_exit_codes: [4]i32 = .{0} ** 4,
+    headless_acceptance_terminal: bool = false,
     gui_frame_caches: [4]gui_frame_snapshot.Cache = .{gui_frame_snapshot.Cache{}} ** 4,
     window_launch_paths: [4][window_launch_path_max + 1]u8 = .{.{0} ** (window_launch_path_max + 1)} ** 4,
     last_display_revision: u32 = 0,
@@ -373,11 +389,23 @@ pub const App = struct {
         self.resetWindowServiceState();
         self.invalidateFull();
         self.redraw();
+        if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
+            if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
+            self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);
+            _ = self.syncProgramWindows();
+            self.enterTerminalModeWithArgs("");
+            if (!self.terminal_mode or self.windows[0].instance_id == 0) self.ctx.systemPoweroff();
+            self.headless_acceptance_terminal = true;
+        }
         if (hasKlickifaxSmokeArg(self.ctx.argsRaw())) self.runKlickifaxSmokeAndPoweroff();
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
         if (hasSmokeArg(self.ctx.argsRaw())) self.runSmokeAndPoweroff();
 
         while (true) {
+            if (self.headless_acceptance_terminal) {
+                self.ctx.sleepTicks(self.loop_sleep_ticks);
+                continue;
+            }
             var needs_redraw = false;
             const remote_input = self.pollRemoteInputEvent();
             if (remote_input and self.dispatchEvent()) needs_redraw = true;
@@ -1852,6 +1880,99 @@ pub const App = struct {
         }
     }
 
+    fn startHeadlessSubsystemAcceptance(self: *App) bool {
+        _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
+        self.window_completion_handles = .{r4os.abi.ProgramProcessHandle{}} ** self.window_completion_handles.len;
+        self.window_completion_exit_codes = .{0} ** self.window_completion_exit_codes.len;
+        if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
+        if (r4std.subsystem_runtime.load(&self.ctx.sys) != .loaded) return self.headlessSubsystemFailure("catalog-load");
+
+        const first = self.launchHeadlessSubsystemGuest(subsystem_guest_a_path) orelse return false;
+        const second = self.launchHeadlessSubsystemGuest(subsystem_guest_b_path) orelse return false;
+        if (first.index == second.index or sameProcessHandle(first.handle, second.handle)) return self.headlessSubsystemFailure("instance-identity");
+
+        self.toggleMaximizeWindow(first.index);
+        self.smokePumpCooperativeFrames(1);
+        if (sameProcessHandle(self.window_process_handles[first.index], first.handle)) self.toggleMaximizeWindow(first.index);
+        self.activateWindow(second.index, false);
+        self.pushGuiKeyEvent(first.index, 'P');
+        self.pushGuiKeyEvent(second.index, 'P');
+
+        const started = self.ctx.ticks();
+        const timeout_ticks = @as(u64, self.monotonic_hz) * 45;
+        while (sameProcessHandle(self.window_process_handles[first.index], first.handle) or
+            sameProcessHandle(self.window_process_handles[second.index], second.handle))
+        {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| started >= timeout_ticks) return self.headlessSubsystemFailure("runtime-timeout");
+        }
+
+        if (!sameProcessHandle(self.window_completion_handles[first.index], first.handle)) return self.headlessSubsystemFailure("completion-a-handle");
+        if (self.window_completion_exit_codes[first.index] != 0) return self.headlessSubsystemFailure("completion-a-exit");
+        if (!sameProcessHandle(self.window_completion_handles[second.index], second.handle)) return self.headlessSubsystemFailure("completion-b-handle");
+        if (self.window_completion_exit_codes[second.index] != 0) return self.headlessSubsystemFailure("completion-b-exit");
+        if (self.ctx.fileWrite(subsystem_host_test_marker_path, subsystem_host_test_marker) != @as(i32, @intCast(subsystem_host_test_marker.len))) return false;
+
+        self.enterTerminalModeWithArgs("");
+        if (!self.terminal_mode or self.windows[0].instance_id == 0) return self.headlessSubsystemFailure("terminal-mode");
+        self.headless_acceptance_terminal = true;
+        return true;
+    }
+
+    fn launchHeadlessSubsystemGuest(self: *App, guest_path: []const u8) ?HeadlessSubsystemLaunch {
+        const input = r4std.subsystem_runtime.probe(&self.ctx.sys, guest_path) catch return self.headlessSubsystemLaunchFailure("guest-probe");
+        var args_storage: [r4os.subsystem_launch.max_args_bytes]u8 = undefined;
+        var resolution: r4std.file_handler.Resolution = .{};
+        r4std.file_handler.resolve(&self.assoc, r4std.subsystem_runtime.catalog(), input, args_storage[0..], &resolution) catch return self.headlessSubsystemLaunchFailure("handler-resolve");
+        const target = resolution.target orelse return self.headlessSubsystemLaunchFailure("handler-missing");
+        if (target.kind != .subsystem) return self.headlessSubsystemLaunchFailure("handler-kind");
+        if (!equalsIgnoreCase(target.handler_id, "test.basic")) return self.headlessSubsystemLaunchFailure("handler-id");
+        if (!equalsIgnoreCase(target.format_id, "basic.qbasic-source")) return self.headlessSubsystemLaunchFailure("guest-format");
+        if (!equalsIgnoreCase(target.app_path, subsystem_host_test_path)) return self.headlessSubsystemLaunchFailure("host-path");
+        if (!r4std.subsystem_runtime.hostPresent(&self.ctx.sys, target.app_path)) return self.headlessSubsystemLaunchFailure("host-missing");
+        if (target.app_path.len > window_launch_path_max or target.args.len > r4os.subsystem_launch.max_args_bytes or target.title.len > console_title_max) return self.headlessSubsystemLaunchFailure("launch-limits");
+
+        const request = r4os.subsystem_launch.parse(target.args) catch return self.headlessSubsystemLaunchFailure("launch-request");
+        if (!equalsIgnoreCase(request.guest_path, guest_path)) return self.headlessSubsystemLaunchFailure("guest-identity");
+        const index = self.findFreeAppWindow() orelse return self.headlessSubsystemLaunchFailure("window-slot");
+        var path_z: [window_launch_path_max + 1]u8 = .{0} ** (window_launch_path_max + 1);
+        var args_z: [r4os.subsystem_launch.max_args_bytes + 1]u8 = .{0} ** (r4os.subsystem_launch.max_args_bytes + 1);
+        var title_z: [console_title_max + 1]u8 = .{0} ** (console_title_max + 1);
+        copySliceZ(path_z[0..], target.app_path);
+        copySliceZ(args_z[0..], target.args);
+        copySliceZ(title_z[0..], target.title);
+        self.launchGuiPath(zptr(path_z[0..]), zptr(args_z[0..]), zptr(title_z[0..]), target.policy);
+        const handle = self.window_process_handles[index];
+        if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("program-spawn");
+        return .{ .index = index, .handle = handle };
+    }
+
+    fn headlessSubsystemFailure(self: *App, comptime reason: []const u8) bool {
+        if (self.ctx.exists(subsystem_host_test_marker_path)) return false;
+        const marker = "SUBSYSTEM runtime bootstrap FAILED: " ++ reason ++ "\r\n";
+        _ = self.ctx.fileWrite(subsystem_host_test_marker_path, marker);
+        return false;
+    }
+
+    fn headlessSubsystemLaunchFailure(self: *App, comptime reason: []const u8) ?HeadlessSubsystemLaunch {
+        _ = self.headlessSubsystemFailure(reason);
+        return null;
+    }
+
+    fn waitForHeadlessSubsystemAudio(self: *App) bool {
+        const started = self.ctx.ticks();
+        const timeout_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 5;
+        while (self.ctx.ticks() -| started < timeout_ticks) {
+            var info: r4os.abi.ServiceInfo = .{};
+            if (self.ctx.sys.serviceOpen(subsystem_audio_service, &info) == r4os.abi.service_api_result_ok and info.handle != 0) {
+                _ = self.ctx.sys.serviceClose(info.handle);
+                return true;
+            }
+            self.ctx.sleepTicks(1);
+        }
+        return false;
+    }
+
     fn initTiming(self: *App) void {
         const state = self.ctx.timeState();
         self.monotonic_hz = if (state.monotonic_hz == 0) default_monotonic_hz else state.monotonic_hz;
@@ -2322,7 +2443,7 @@ pub const App = struct {
         self.time_menu_open = false;
         self.menu_submenu_open = false;
         self.menu_submenu_focus = false;
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.keyboard_focus = self.windowTargetForIndex(index);
         self.invalidateWindow(old_active);
         self.invalidateWindow(index);
@@ -2619,7 +2740,7 @@ pub const App = struct {
     fn prepareWindowMouseDown(self: *App, index: usize, x: i32, y: i32) void {
         if (index >= self.windows.len) return;
         const old_active = self.active_window;
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.keyboard_focus = self.windowTarget(index, x, y);
         self.mirrorWindowFocus(index);
         self.invalidateWindow(old_active);
@@ -2709,7 +2830,7 @@ pub const App = struct {
         if (self.windows[index].maximized) self.mirrorWindowMaximize(index) else self.mirrorWindowRestore(index);
         self.updateGuiWindowInfo(index);
         self.pushGuiEvent(index, .resize);
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.keyboard_focus = self.windowTargetForIndex(index);
         self.mirrorWindowFocus(index);
         self.invalidateWindow(index);
@@ -2727,13 +2848,14 @@ pub const App = struct {
         var i: usize = 0;
         while (i < self.windows.len) : (i += 1) {
             if (self.windows[i].visible and !self.windows[i].minimized) {
-                self.active_window = i;
+                self.activateWindow(i, false);
                 self.keyboard_focus = self.windowTargetForIndex(i);
                 self.mirrorWindowFocus(i);
                 self.invalidateWindow(i);
                 return;
             }
         }
+        if (self.isBoundGuiAppWindow(self.active_window)) self.pushGuiEvent(self.active_window, .focus_lost);
         self.keyboard_focus = .none;
     }
 
@@ -2777,7 +2899,7 @@ pub const App = struct {
         if (rectEqual(old_frame, new_frame)) return false;
         self.damage.invalidate(old_frame);
         self.invalidateWindow(index);
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.updateGuiWindowInfo(index);
         self.mirrorWindowUpdate(index);
         return true;
@@ -2876,7 +2998,7 @@ pub const App = struct {
         if (rectEqual(old_frame, new_frame)) return false;
         self.damage.invalidate(old_frame);
         self.invalidateWindow(index);
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.updateGuiWindowInfo(index);
         self.mirrorWindowUpdate(index);
         self.pushGuiEvent(index, .resize);
@@ -3331,6 +3453,10 @@ pub const App = struct {
     }
 
     fn enterTerminalMode(self: *App) void {
+        self.enterTerminalModeWithArgs(terminal_desktop_args);
+    }
+
+    fn enterTerminalModeWithArgs(self: *App, terminal_args: [*:0]const u8) void {
         _ = self.syncProgramWindows();
         if (self.hasRunningDesktopApps()) {
             self.openDialog(.message_terminal_mode_busy);
@@ -3338,7 +3464,7 @@ pub const App = struct {
         }
         if (self.windows[0].instance_id == 0) {
             var handle: r4os.abi.ProgramProcessHandle = .{};
-            const result = self.ctx.programSpawnWithConsoleHostHandle(terminal_path, terminal_desktop_args, .console, .terminal_mode, &handle);
+            const result = self.ctx.programSpawnWithConsoleHostHandle(terminal_path, terminal_args, .console, .terminal_mode, &handle);
             if (result != r4os.abi.program_handle_ok or !processHandleValid(handle)) {
                 if (result == r4os.abi.program_handle_error_not_found) {
                     self.openDialog(.message_run_not_found);
@@ -3363,11 +3489,11 @@ pub const App = struct {
             _ = self.ctx.programSetConsoleHost(self.windows[0].instance_id, .terminal_mode);
         }
 
-        self.setConsoleLaunch("Terminal Mode", terminal_path, terminal_desktop_args);
+        self.setConsoleLaunch("Terminal Mode", terminal_path, terminal_args);
         self.followConsoleTail(0);
         self.windows[0].setTitleLit("Terminal Mode");
         self.windows[0].restore();
-        self.active_window = 0;
+        self.activateWindow(0, false);
         self.keyboard_focus = .terminal_window;
         self.mirrorWindowRegister(0);
         self.mirrorWindowFocus(0);
@@ -3449,7 +3575,7 @@ pub const App = struct {
         self.updateGuiWindowInfo(window_index);
         self.pushGuiEvent(window_index, .resize);
         if (trace_klickifax) self.ctx.println("Klickifax launch: initial GUI event queued");
-        self.active_window = window_index;
+        self.activateWindow(window_index, true);
         self.keyboard_focus = self.windowTargetForIndex(window_index);
         // R4DESK remains the authoritative host. The optional synchronous
         // WINSVC mirror is not part of browser correctness and may block while
@@ -3607,7 +3733,7 @@ pub const App = struct {
         self.terminal_mode = false;
         if (self.windows[index].instance_id != 0) _ = self.ctx.programSetConsoleHost(self.windows[index].instance_id, .terminal_window);
         self.windows[index].restore();
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.keyboard_focus = self.windowTargetForIndex(index);
         self.mirrorWindowFocus(index);
         self.invalidateWindow(old_active);
@@ -3968,6 +4094,8 @@ pub const App = struct {
                     const reap_status = self.ctx.programHandleReap(&snapshot.handle, &completion);
                     if (reap_status != r4os.abi.program_handle_ok and !processHandleDefinitelyGone(reap_status)) continue;
                     const exit_code = if (reap_status == r4os.abi.program_handle_ok) completion.exit_code else info.exit_code;
+                    self.window_completion_handles[i] = snapshot.handle;
+                    self.window_completion_exit_codes[i] = exit_code;
                     self.invalidateWindow(i);
                     self.reportFinishedWindow(i, exit_code);
                     self.clearWindowInstanceBinding(i);
@@ -4295,6 +4423,18 @@ pub const App = struct {
             .tick = self.ctx.ticks(),
         };
         _ = self.ctx.guiPushEvent(instance_id, &event);
+    }
+
+    fn activateWindow(self: *App, index: usize, announce_same: bool) void {
+        if (index >= self.windows.len) return;
+        const previous = self.active_window;
+        if (previous != index and self.isBoundGuiAppWindow(previous)) self.pushGuiEvent(previous, .focus_lost);
+        self.active_window = index;
+        if ((previous != index or announce_same) and self.isHostedAppWindow(index)) self.pushGuiEvent(index, .focus_gained);
+    }
+
+    fn isBoundGuiAppWindow(self: *const App, index: usize) bool {
+        return index < self.windows.len and self.windows[index].kind == .app and self.windows[index].instance_id != 0;
     }
 
     fn pushGuiPointerEvent(self: *App, index: usize, kind: r4os.abi.GuiEventKind, x: i32, y: i32, buttons: u32) void {
@@ -4747,15 +4887,17 @@ pub const App = struct {
     }
 
     fn nextWindow(self: *App) void {
+        const old_active = self.active_window;
+        var candidate = self.active_window;
         var step: usize = 0;
         while (step < self.windows.len) : (step += 1) {
-            const old_active = self.active_window;
-            self.active_window = (self.active_window + 1) % self.windows.len;
-            if (self.windows[self.active_window].visible) {
-                self.windows[self.active_window].restore();
-                self.keyboard_focus = self.windowTargetForIndex(self.active_window);
+            candidate = (candidate + 1) % self.windows.len;
+            if (self.windows[candidate].visible) {
+                self.windows[candidate].restore();
+                self.activateWindow(candidate, false);
+                self.keyboard_focus = self.windowTargetForIndex(candidate);
                 self.invalidateWindow(old_active);
-                self.invalidateWindow(self.active_window);
+                self.invalidateWindow(candidate);
                 self.invalidateTaskbar();
                 return;
             }
@@ -4763,15 +4905,17 @@ pub const App = struct {
     }
 
     fn previousWindow(self: *App) void {
+        const old_active = self.active_window;
+        var candidate = self.active_window;
         var step: usize = 0;
         while (step < self.windows.len) : (step += 1) {
-            const old_active = self.active_window;
-            self.active_window = if (self.active_window == 0) self.windows.len - 1 else self.active_window - 1;
-            if (self.windows[self.active_window].visible) {
-                self.windows[self.active_window].restore();
-                self.keyboard_focus = self.windowTargetForIndex(self.active_window);
+            candidate = if (candidate == 0) self.windows.len - 1 else candidate - 1;
+            if (self.windows[candidate].visible) {
+                self.windows[candidate].restore();
+                self.activateWindow(candidate, false);
+                self.keyboard_focus = self.windowTargetForIndex(candidate);
                 self.invalidateWindow(old_active);
-                self.invalidateWindow(self.active_window);
+                self.invalidateWindow(candidate);
                 self.invalidateTaskbar();
                 return;
             }
@@ -4803,7 +4947,7 @@ pub const App = struct {
     fn focusOrRestore(self: *App, index: usize) void {
         const old_active = self.active_window;
         self.windows[index].restore();
-        self.active_window = index;
+        self.activateWindow(index, false);
         self.keyboard_focus = self.windowTargetForIndex(index);
         self.mirrorWindowFocus(index);
         self.invalidateWindow(old_active);
@@ -6192,6 +6336,10 @@ fn hasR4XSmokeArg(args: [*:0]const u8) bool {
 
 fn hasKlickifaxSmokeArg(args: [*:0]const u8) bool {
     return argsContain(args, "--smoke-klickifax") or argsContain(args, "SMOKE-KLICKIFAX") or argsContain(args, "/SMOKE-KLICKIFAX");
+}
+
+fn hasHeadlessSubsystemArg(args: [*:0]const u8) bool {
+    return argsContain(args, "/HEADLESS-SUBSYSTEM");
 }
 
 fn argsContain(args: [*:0]const u8, wanted: []const u8) bool {
