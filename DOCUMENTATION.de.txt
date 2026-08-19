@@ -37,8 +37,10 @@ Das explizite Shellargument `/HEADLESS-SUBSYSTEM` gehoert zum Testprofil. Es
 wartet zunaechst auf den testweise aufgenommenen AUDSVC. Danach laedt R4DESK
 den installierten Subsystemkatalog, probt `SUBSYSTEM-A.BAS` und
 `SUBSYSTEM-B.BAS` und loest beide Dateien ueber dieselbe R4STD-
-Dateihandlerkette wie Explorer zu `test.basic` auf. Beide `R4SUBSYS1`-Starts
-laufen gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
+Dateihandlerkette wie Explorer zu `test.basic` auf. Diese Auswahl wird durch
+die ausschliesslich im Testoverlay liegende BAS-Zuordnung erzwungen; normale
+Full- und GUI-Images behalten `r4os.basic`. Beide `R4SUBSYS1`-Starts laufen
+gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
 maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
 Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
 
