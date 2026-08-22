@@ -61,6 +61,10 @@ pub const Context = struct {
         return self.sys.timeState();
     }
 
+    pub fn bootReady(self: *const Context) i32 {
+        return self.sys.bootReady();
+    }
+
     pub fn timeServiceStatus(self: *const Context, out: *r4os.abi.TimeServiceStatus) i32 {
         return self.sys.timeServiceStatus(out);
     }

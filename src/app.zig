@@ -389,6 +389,7 @@ pub const App = struct {
         self.resetWindowServiceState();
         self.invalidateFull();
         self.redraw();
+        _ = self.ctx.bootReady();
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
             self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);

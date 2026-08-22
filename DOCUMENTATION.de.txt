@@ -22,6 +22,12 @@ R4DESK, R4DRAW, R4NET, R4AUDIO und R4DEV gemaess module.R4MF. Zusaetzlich
 bindet er die R4STD-Tabellen SETTINGS_V1, TIME_V1 und CONFIG_V1 lokal ein.
 Optionale Kernel-Felder werden mit hasFn geprueft.
 
+Nach dem ersten vollstaendigen Redraw meldet der als Boot-Shell gestartete
+Desktop seine tatsaechliche Nutzbereitschaft einmalig ueber das optionale
+R4SYS-Feld `boot_ready`. Wiederholungen veraendern den eingefrorenen
+Bootmessstand nicht; normale, spaeter gestartete Desktop-Instanzen duerfen
+den Marker nicht setzen.
+
 Fenster-, Console-, Clipboard-, ProgramStatus- und Power-Funktionen laufen
 ueber ihre aktuellen Gruppenfelder. Der Desktop besitzt keine eigene
 Kernel- oder API-Parallelstruktur.
