@@ -234,6 +234,13 @@ pub fn build(b: *std.Build) void {
     const gui_frame_snapshot_tests = b.addTest(.{
         .root_module = gui_frame_snapshot_module,
     });
+    const window_service_gate_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/window_service_gate.zig"),
+            .target = test_target,
+            .optimize = test_optimize,
+        }),
+    });
 
     const run_model_tests = b.addRunArtifact(model_tests);
     const run_window_tests = b.addRunArtifact(window_tests);
@@ -256,6 +263,7 @@ pub fn build(b: *std.Build) void {
     const run_appearance_colors_tests = b.addRunArtifact(appearance_colors_tests);
     const run_wallpaper_tests = b.addRunArtifact(wallpaper_tests);
     const run_gui_frame_snapshot_tests = b.addRunArtifact(gui_frame_snapshot_tests);
+    const run_window_service_gate_tests = b.addRunArtifact(window_service_gate_tests);
     const test_step = b.step("test", "Run Desktop Zig tests");
     test_step.dependOn(&run_model_tests.step);
     test_step.dependOn(&run_window_tests.step);
@@ -278,4 +286,5 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_appearance_colors_tests.step);
     test_step.dependOn(&run_wallpaper_tests.step);
     test_step.dependOn(&run_gui_frame_snapshot_tests.step);
+    test_step.dependOn(&run_window_service_gate_tests.step);
 }

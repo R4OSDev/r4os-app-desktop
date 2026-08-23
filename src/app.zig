@@ -22,6 +22,7 @@ const text_field = @import("text_field.zig");
 const theme = @import("theme.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
+const window_service_gate = @import("window_service_gate.zig");
 
 const Dialog = enum(u8) {
     none,
@@ -163,6 +164,8 @@ const desktop_drag_threshold_px: i32 = 4;
 const blink_half_ms: u32 = 500;
 const close_kill_timeout_ms: u32 = 2000;
 const time_config_check_ms: u32 = 1000;
+const window_service_retry_ms: u32 = 2000;
+const remote_input_burst: u32 = 16;
 const console_scroll_wheel_lines: u32 = 3;
 const console_scroll_max_fallback: u32 = 512;
 const clipboard_buffer_size: usize = @as(usize, r4os.clipboard.max_text_bytes) + 1;
@@ -291,7 +294,8 @@ pub const App = struct {
     inventory_out_of_memory: bool = false,
     win_service_status: r4os.abi.WindowServiceStatus = .{},
     win_service_snapshot: r4os.abi.WindowServiceSnapshot = .{},
-    win_service_available: bool = false,
+    win_service_gate: window_service_gate.Gate = .{},
+    window_service_retry_ticks: u64 = 200,
     window_service_mirrored: [4]bool = .{false} ** 4,
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
@@ -408,13 +412,15 @@ pub const App = struct {
                 continue;
             }
             var needs_redraw = false;
-            const remote_input = self.pollRemoteInputEvent();
-            if (remote_input and self.dispatchEvent()) needs_redraw = true;
-            if (!remote_input and self.pollKeyboardEvent() and self.dispatchEvent()) needs_redraw = true;
-            if (!remote_input and self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
+            var remote_events: u32 = 0;
+            while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
+                if (self.dispatchEvent()) needs_redraw = true;
+            }
+            if (self.pollKeyboardEvent() and self.dispatchEvent()) needs_redraw = true;
+            if (self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             if (needs_redraw) self.redraw();
-            self.idleWait(needs_redraw or remote_input);
+            self.idleWait(needs_redraw or remote_events != 0);
         }
     }
 
@@ -432,6 +438,7 @@ pub const App = struct {
             self.ctx.sleepTicks(0);
             return;
         }
+        _ = self.retryWindowServiceIfDue();
         if (self.activity_wait_supported) {
             const rc = self.ctx.desktopActivityWait(self.activity_seq, self.blink_half_ticks, &self.activity_seq);
             if (rc >= 0) {
@@ -1982,6 +1989,7 @@ pub const App = struct {
         self.blink_half_ticks = ticksFromMs(self.monotonic_hz, blink_half_ms);
         self.close_kill_timeout_ticks = ticksFromMs(self.monotonic_hz, close_kill_timeout_ms);
         self.time_config_check_ticks = ticksFromMs(self.monotonic_hz, time_config_check_ms);
+        self.window_service_retry_ticks = ticksFromMs(self.monotonic_hz, window_service_retry_ms);
         self.desktop_layout_writeback.configure(r4std.settings.WritebackPolicy.forHz(.lazy, self.monotonic_hz), self.ctx.ticks());
     }
 
@@ -2043,7 +2051,6 @@ pub const App = struct {
 
         if (input.kind == r4os.abi.remote_input_kind_key_down) {
             self.remote_input_keys +%= 1;
-            self.logRemoteInput(&input);
             const key = remoteInputKey(input.key) orelse {
                 self.beginEvent(.none);
                 return true;
@@ -2060,7 +2067,6 @@ pub const App = struct {
 
         if (input.kind == r4os.abi.remote_input_kind_key_up) {
             self.remote_input_keys +%= 1;
-            self.logRemoteInput(&input);
             self.beginEvent(.none);
             return true;
         }
@@ -2070,7 +2076,6 @@ pub const App = struct {
             input.kind == r4os.abi.remote_input_kind_mouse_wheel)
         {
             self.remote_input_mouse +%= 1;
-            self.logRemoteInput(&input);
             self.beginEvent(.mouse);
             self.event_remote_input = true;
             self.event_mouse = .{
@@ -2139,24 +2144,6 @@ pub const App = struct {
             if (target != .none) self.event.setTarget(target);
         }
         return true;
-    }
-
-    fn logRemoteInput(self: *App, input: *const r4os.abi.RemoteInputEvent) void {
-        self.ctx.write("R4DESK remote input: kind=");
-        self.ctx.write(remoteInputKindName(input.kind));
-        self.ctx.write(" seq=");
-        self.ctx.printU64(@intCast(input.sequence));
-        self.ctx.write(" key=");
-        self.ctx.printU64(@intCast(input.key));
-        self.ctx.write(" buttons=");
-        self.ctx.printU64(@intCast(input.buttons));
-        self.ctx.write(" x=");
-        self.ctx.printI32(input.x);
-        self.ctx.write(" y=");
-        self.ctx.printI32(input.y);
-        self.ctx.write(" wheel=");
-        self.ctx.printI32(input.wheel);
-        self.ctx.println("");
     }
 
     fn pollTimerEvent(self: *App) bool {
@@ -3878,15 +3865,20 @@ pub const App = struct {
     }
 
     fn resetWindowServiceState(self: *App) void {
+        self.window_service_mirrored = .{false} ** 4;
         var record = r4os.abi.WindowServiceRecord{};
         var result: r4os.abi.WindowServiceResult = .{};
         const rc = self.ctx.windowServiceRecord(r4os.abi.window_service_op_restart_cleanup, &record, &result);
-        self.win_service_available = result.magic == r4os.abi.window_service_result_magic and result.version == r4os.abi.window_service_result_version;
-        if (rc == r4os.abi.window_service_result_ok and self.win_service_available) {
-            self.win_service_status.window_count = result.window_count;
-            self.win_service_status.focused_window = result.focused_window;
-            self.win_service_status.focused_instance = result.focused_instance;
+        if (rc != r4os.abi.window_service_result_ok or !validWindowServiceResult(&result) or
+            result.result != r4os.abi.window_service_result_ok)
+        {
+            self.markWindowServiceUnavailable();
+            return;
         }
+        self.win_service_gate.markAvailable();
+        self.win_service_status.window_count = result.window_count;
+        self.win_service_status.focused_window = result.focused_window;
+        self.win_service_status.focused_instance = result.focused_instance;
     }
 
     fn refreshWindowServiceSnapshot(self: *App) bool {
@@ -3895,10 +3887,10 @@ pub const App = struct {
         if (rc == 0) {
             self.win_service_snapshot = snapshot;
             self.win_service_status = snapshot.status;
-            self.win_service_available = true;
+            self.win_service_gate.markAvailable();
             return true;
         }
-        self.win_service_available = false;
+        self.markWindowServiceUnavailable();
         return false;
     }
 
@@ -3935,7 +3927,7 @@ pub const App = struct {
     }
 
     fn sendWindowServiceOp(self: *App, index: usize, op: u16) void {
-        if (!self.win_service_available) return;
+        if (!self.win_service_gate.available) return;
         if (index >= self.windows.len) return;
         if (op != r4os.abi.window_service_op_remove and self.windows[index].instance_id == 0) return;
         if (op != r4os.abi.window_service_op_register and !self.window_service_mirrored[index]) return;
@@ -3944,18 +3936,42 @@ pub const App = struct {
         if (op == r4os.abi.window_service_op_minimize) record.flags |= r4os.abi.window_service_flag_minimized;
         if (op == r4os.abi.window_service_op_close) record.flags |= r4os.abi.window_service_flag_closing;
         var result: r4os.abi.WindowServiceResult = .{};
-        _ = self.ctx.windowServiceRecord(op, &record, &result);
-        if (result.magic == r4os.abi.window_service_result_magic and result.version == r4os.abi.window_service_result_version) {
-            if (op == r4os.abi.window_service_op_register and result.result == r4os.abi.window_service_result_ok) {
-                self.window_service_mirrored[index] = true;
-            } else if (op == r4os.abi.window_service_op_remove and result.result == r4os.abi.window_service_result_ok) {
-                self.window_service_mirrored[index] = false;
-            }
-            self.win_service_available = true;
-            self.win_service_status.window_count = result.window_count;
-            self.win_service_status.focused_window = result.focused_window;
-            self.win_service_status.focused_instance = result.focused_instance;
+        const rc = self.ctx.windowServiceRecord(op, &record, &result);
+        if (rc != r4os.abi.window_service_result_ok or !validWindowServiceResult(&result) or
+            result.result != r4os.abi.window_service_result_ok)
+        {
+            self.markWindowServiceUnavailable();
+            return;
         }
+        if (op == r4os.abi.window_service_op_register) {
+            self.window_service_mirrored[index] = true;
+        } else if (op == r4os.abi.window_service_op_remove) {
+            self.window_service_mirrored[index] = false;
+        }
+        self.win_service_gate.markAvailable();
+        self.win_service_status.window_count = result.window_count;
+        self.win_service_status.focused_window = result.focused_window;
+        self.win_service_status.focused_instance = result.focused_instance;
+    }
+
+    fn markWindowServiceUnavailable(self: *App) void {
+        self.window_service_mirrored = .{false} ** 4;
+        self.win_service_gate.markUnavailable(self.ctx.ticks(), self.window_service_retry_ticks);
+    }
+
+    fn retryWindowServiceIfDue(self: *App) bool {
+        const now = self.ctx.ticks();
+        if (!self.win_service_gate.retryDue(now, true)) return false;
+        self.resetWindowServiceState();
+        if (!self.win_service_gate.available) return false;
+
+        var index: usize = 0;
+        while (index < self.windows.len) : (index += 1) {
+            if (self.windows[index].instance_id == 0) continue;
+            self.mirrorWindowRegister(index);
+            if (!self.win_service_gate.available) return false;
+        }
+        return true;
     }
 
     fn windowServiceRecordForIndex(self: *const App, index: usize) r4os.abi.WindowServiceRecord {
@@ -6589,15 +6605,9 @@ fn remoteModifiers(modifiers: u32) u8 {
     return out;
 }
 
-fn remoteInputKindName(kind: u32) []const u8 {
-    return switch (kind) {
-        r4os.abi.remote_input_kind_key_down => "key-down",
-        r4os.abi.remote_input_kind_key_up => "key-up",
-        r4os.abi.remote_input_kind_mouse_move => "mouse-move",
-        r4os.abi.remote_input_kind_mouse_buttons => "mouse-buttons",
-        r4os.abi.remote_input_kind_mouse_wheel => "mouse-wheel",
-        else => "unknown",
-    };
+fn validWindowServiceResult(result: *const r4os.abi.WindowServiceResult) bool {
+    return result.magic == r4os.abi.window_service_result_magic and
+        result.version == r4os.abi.window_service_result_version;
 }
 
 fn modifiersForKey(key: u32) u8 {
