@@ -4423,7 +4423,7 @@ pub const App = struct {
             .y = client.y,
             .tick = self.ctx.ticks(),
         };
-        _ = self.ctx.guiPushEvent(instance_id, &event);
+        _ = self.pushGuiEventBounded(instance_id, &event, true);
     }
 
     fn activateWindow(self: *App, index: usize, announce_same: bool) void {
@@ -4452,7 +4452,7 @@ pub const App = struct {
             .buttons = buttons,
             .tick = self.ctx.ticks(),
         };
-        _ = self.ctx.guiPushEvent(instance_id, &event);
+        _ = self.pushGuiEventBounded(instance_id, &event, kind != .mouse_move);
     }
 
     fn pushGuiKeyEvent(self: *App, index: usize, key: u32) void {
@@ -4466,7 +4466,19 @@ pub const App = struct {
             .modifiers = self.event.modifiers,
             .tick = self.ctx.ticks(),
         };
-        _ = self.ctx.guiPushEvent(instance_id, &event);
+        _ = self.pushGuiEventBounded(instance_id, &event, true);
+    }
+
+    fn pushGuiEventBounded(self: *App, instance_id: u32, event: *const r4os.abi.GuiEvent, ordering_sensitive: bool) bool {
+        const attempts: usize = if (ordering_sensitive) 4 else 1;
+        var attempt: usize = 0;
+        while (attempt < attempts) : (attempt += 1) {
+            const result = self.ctx.guiPushEvent(instance_id, event);
+            if (result == 0) return true;
+            if (result != -3 or attempt + 1 == attempts) return false;
+            self.ctx.taskYield();
+        }
+        return false;
     }
 
     fn deliverGuiMouseMove(self: *App, x: i32, y: i32, buttons: u8) void {
@@ -4502,10 +4514,7 @@ pub const App = struct {
             var encoded: [4]u8 = undefined;
             const len = encodeUtf8Codepoint(key, &encoded);
             if (len == 0) return false;
-            for (encoded[0..len]) |ch| {
-                if (self.ctx.consolePushKey(instance_id, ch) != 0) return false;
-            }
-            return true;
+            return self.pushConsoleInputBounded(instance_id, encoded[0..len]);
         }
         return self.ctx.consolePushKey(instance_id, @intCast(key)) == 0;
     }
@@ -4684,24 +4693,62 @@ pub const App = struct {
         const len = self.ctx.clipboardRead(data[0..]);
         if (len <= 0) return true;
         var previous_cr = false;
+        var write_index: usize = 0;
         var i: usize = 0;
         while (i < @as(usize, @intCast(len))) : (i += 1) {
             const ch = data[i];
             if (ch == 0) break;
             if (ch == '\r') {
-                _ = self.ctx.consolePushKey(instance_id, r4os.gui.Key.enter);
+                data[write_index] = r4os.gui.Key.enter;
+                write_index += 1;
                 previous_cr = true;
                 continue;
             }
             if (ch == '\n') {
-                if (!previous_cr) _ = self.ctx.consolePushKey(instance_id, r4os.gui.Key.enter);
+                if (!previous_cr) {
+                    data[write_index] = r4os.gui.Key.enter;
+                    write_index += 1;
+                }
                 previous_cr = false;
                 continue;
             }
             previous_cr = false;
-            if (isTextKey(ch) or ch == r4os.gui.Key.tab) _ = self.ctx.consolePushKey(instance_id, ch);
+            if (isTextKey(ch)) {
+                data[write_index] = ch;
+                write_index += 1;
+            } else if (ch == r4os.gui.Key.tab) {
+                // Terminal input has no tab-editing state; preserve the text
+                // boundary explicitly as one ordinary space.
+                data[write_index] = ' ';
+                write_index += 1;
+            }
         }
-        return true;
+        return self.pushConsoleInputBounded(instance_id, data[0..write_index]);
+    }
+
+    fn pushConsoleInputBounded(self: *App, instance_id: u32, data: []const u8) bool {
+        if (data.len == 0) return true;
+        var offset: usize = 0;
+        var calls: usize = 0;
+        while (offset < data.len and calls < 64) : (calls += 1) {
+            const result = self.ctx.consolePushInput(instance_id, data[offset..]);
+            if (result == r4os.abi.err_no_fn) {
+                for (data[offset..]) |ch| {
+                    if (self.ctx.consolePushKey(instance_id, ch) != 0) return false;
+                }
+                return true;
+            }
+            if (result < 0) return false;
+            const accepted: usize = @intCast(result);
+            if (accepted > data.len - offset) return false;
+            if (accepted == 0) {
+                self.ctx.taskYield();
+                continue;
+            }
+            offset += accepted;
+            if (offset < data.len) self.ctx.taskYield();
+        }
+        return offset == data.len;
     }
 
     fn pasteClipboardToRunPath(self: *App) bool {

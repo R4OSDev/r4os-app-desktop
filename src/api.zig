@@ -57,6 +57,10 @@ pub const Context = struct {
         self.sys.sleepTicks(duration);
     }
 
+    pub fn taskYield(self: *const Context) void {
+        self.sys.taskYield();
+    }
+
     pub fn timeState(self: *const Context) r4os.abi.TimeState {
         return self.sys.timeState();
     }
@@ -274,6 +278,10 @@ pub const Context = struct {
 
     pub fn consolePushKey(self: *const Context, instance_id: u32, key: u8) i32 {
         return self.desk.consolePushKey(instance_id, key);
+    }
+
+    pub fn consolePushInput(self: *const Context, instance_id: u32, data: []const u8) i32 {
+        return self.desk.consolePushInput(instance_id, data);
     }
 
     pub fn windowServiceStatus(self: *const Context, out: *r4os.abi.WindowServiceStatus) i32 {
