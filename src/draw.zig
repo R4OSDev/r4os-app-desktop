@@ -38,6 +38,10 @@ pub const system_menu_w: i32 = 150;
 pub const system_menu_h: i32 = 108;
 pub const settings_dialog_w: i32 = 500;
 pub const settings_dialog_h: i32 = 294;
+pub const run_dialog_w: i32 = 420;
+pub const run_dialog_h: i32 = 178;
+pub const tasks_dialog_w: i32 = 500;
+pub const tasks_dialog_h: i32 = 420;
 pub const settings_ok_x: i32 = 162;
 pub const settings_cancel_x: i32 = 254;
 pub const settings_ok_y: i32 = 262;
@@ -101,6 +105,25 @@ pub const RenderStats = struct {
     present_last_ticks: u64 = 0,
     scene_blit_bytes_total: u64 = 0,
     scene_blit_bytes_last: u64 = 0,
+    layers_visited_total: u64 = 0,
+    layers_culled_total: u64 = 0,
+    layers_visited_last: u32 = 0,
+    layers_culled_last: u32 = 0,
+    windows_visited_total: u64 = 0,
+    windows_culled_total: u64 = 0,
+    windows_visited_last: u32 = 0,
+    windows_culled_last: u32 = 0,
+    items_visited_total: u64 = 0,
+    items_culled_total: u64 = 0,
+    items_visited_last: u32 = 0,
+    items_culled_last: u32 = 0,
+    display_blit_calls_total: u64 = 0,
+    display_blit_calls_last: u32 = 0,
+    display_stride_presents: u32 = 0,
+    display_legacy_row_presents: u32 = 0,
+    remote_shadow_copies: u32 = 0,
+    remote_shadow_skips: u32 = 0,
+    remote_shadow_copies_last: u32 = 0,
     cursor_latency_total_ticks: u64 = 0,
     cursor_latency_max_ticks: u64 = 0,
     cursor_latency_last_ticks: u64 = 0,
@@ -137,16 +160,29 @@ const CachedIco = struct {
 };
 
 pub fn desktop(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
-    fillSurface(ctx, surface.desktop(screen_w, screen_h), bg);
-    desktopInfo(ctx, screen_w, screen_h, bg);
+    desktopBackground(ctx, screen_w, screen_h, bg);
+    desktopInfoLayer(ctx, screen_w, screen_h, bg);
     taskbar(ctx, screen_w, screen_h, null, null, 0, null, null, .none, .none);
 }
 
-fn desktopInfo(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
+pub fn desktopBackground(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
+    fillSurface(ctx, surface.desktop(screen_w, screen_h), bg);
+}
+
+pub fn desktopInfoRect(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32) surface.Rect {
     const text = desktopInfoText(ctx);
+    _ = text;
     const text_w: i32 = @as(i32, @intCast(desktop_info_len)) * glyph_w;
     const x = @max(8, screen_w - text_w - 10);
     const y = @max(8, screen_h - theme.taskbar_h - glyph_h - 8);
+    return .{ .x = x, .y = y, .w = text_w, .h = glyph_h };
+}
+
+pub fn desktopInfoLayer(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
+    const text = desktopInfoText(ctx);
+    const rect = desktopInfoRect(ctx, screen_w, screen_h);
+    const x = rect.x;
+    const y = rect.y;
     ctx.paintText(x, y, text, theme.title_text, bg);
 }
 
@@ -217,23 +253,40 @@ fn startsWith(s: []const u8, prefix: []const u8) bool {
 pub fn desktopItems(ctx: *const desk_api.Context, items: *const desktop_items.Items, selected: usize, hover_target: model.UiTarget, pressed_target: model.UiTarget, bg_color: u32, icon_text_color: u32) void {
     var i: usize = 0;
     while (i < items.count) : (i += 1) {
-        const entry = &items.entries[i];
-        const target = items.target(i);
-        const active = selected == i or hover_target == target or pressed_target == target;
-        const label_colors = appearance_colors.desktopIconLabel(active, bg_color, icon_text_color);
-        const label_bg = label_colors.background;
-        const label_fg = label_colors.foreground;
-        const pressed_offset: i32 = if (pressed_target == target) 1 else 0;
-        if (active) {
-            ctx.paintRect(entry.x + 2, entry.y + 43, @intCast(desktop_items.icon_w - 4), 15, label_bg);
-            if (pressed_target == target) bevel(ctx, entry.x, entry.y, desktop_items.icon_w, desktop_items.icon_h, true);
-        }
-        if (!desktopItemIco(ctx, entry, entry.x + 20 + pressed_offset, entry.y + 6 + pressed_offset)) {
-            desktopIcon(ctx, entry.x + 20 + pressed_offset, entry.y + 6 + pressed_offset, entry.launch_kind);
-        }
-        if (hover_target == target and pressed_target != target) focusRect(ctx, entry.x + 2, entry.y + 2, desktop_items.icon_w - 4, desktop_items.icon_h - 4);
-        ctx.paintText(shortcutLabelX(entry.x, entry.titleZ()), entry.y + 47, entry.titleZ(), label_fg, label_bg);
+        desktopItem(ctx, items, i, selected, hover_target, pressed_target, bg_color, icon_text_color);
     }
+}
+
+pub fn desktopItemRect(items: *const desktop_items.Items, index: usize) surface.Rect {
+    if (index >= items.count) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    const entry = &items.entries[index];
+    const label_w = @as(i32, @intCast(zStringLen(entry.titleZ()))) * glyph_w;
+    return .{
+        .x = entry.x,
+        .y = entry.y,
+        .w = @max(desktop_items.icon_w, label_w + 4),
+        .h = desktop_items.icon_h,
+    };
+}
+
+pub fn desktopItem(ctx: *const desk_api.Context, items: *const desktop_items.Items, index: usize, selected: usize, hover_target: model.UiTarget, pressed_target: model.UiTarget, bg_color: u32, icon_text_color: u32) void {
+    if (index >= items.count) return;
+    const entry = &items.entries[index];
+    const target = items.target(index);
+    const active = selected == index or hover_target == target or pressed_target == target;
+    const label_colors = appearance_colors.desktopIconLabel(active, bg_color, icon_text_color);
+    const label_bg = label_colors.background;
+    const label_fg = label_colors.foreground;
+    const pressed_offset: i32 = if (pressed_target == target) 1 else 0;
+    if (active) {
+        ctx.paintRect(entry.x + 2, entry.y + 43, @intCast(desktop_items.icon_w - 4), 15, label_bg);
+        if (pressed_target == target) bevel(ctx, entry.x, entry.y, desktop_items.icon_w, desktop_items.icon_h, true);
+    }
+    if (!desktopItemIco(ctx, entry, entry.x + 20 + pressed_offset, entry.y + 6 + pressed_offset)) {
+        desktopIcon(ctx, entry.x + 20 + pressed_offset, entry.y + 6 + pressed_offset, entry.launch_kind);
+    }
+    if (hover_target == target and pressed_target != target) focusRect(ctx, entry.x + 2, entry.y + 2, desktop_items.icon_w - 4, desktop_items.icon_h - 4);
+    ctx.paintText(shortcutLabelX(entry.x, entry.titleZ()), entry.y + 47, entry.titleZ(), label_fg, label_bg);
 }
 
 pub fn desktopItemGrid(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, items: *const desktop_items.Items, drag_index: usize) void {
@@ -918,11 +971,11 @@ pub fn messageBoxDialog(ctx: *const desk_api.Context, screen_w: i32, screen_h: i
 }
 
 pub fn runDialog(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, path: [*:0]const u8, focus: model.UiTarget, hover_target: model.UiTarget, pressed_target: model.UiTarget) void {
-    const x = @divTrunc(screen_w - 420, 2);
-    const y = @divTrunc(screen_h - 178, 2);
+    const x = @divTrunc(screen_w - run_dialog_w, 2);
+    const y = @divTrunc(screen_h - run_dialog_h, 2);
     var visible_path: [45]u8 = .{0} ** 45;
     copyTailZ(visible_path[0..], path);
-    dialogFrameLit(ctx, x, y, 420, 178, "Run");
+    dialogFrameLit(ctx, x, y, run_dialog_w, run_dialog_h, "Run");
     textLit(ctx, x + 24, y + 48, "Program and arguments:", theme.text, theme.window_bg);
     bevel(ctx, x + 24, y + 68, 372, 24, true);
     ctx.paintText(x + 32, y + 76, @ptrCast(&visible_path), theme.text, theme.client_bg);
@@ -945,8 +998,8 @@ pub fn tasksDialog(
     hover_target: model.UiTarget,
     pressed_target: model.UiTarget,
 ) void {
-    const dialog_w: i32 = 500;
-    const dialog_h: i32 = 420;
+    const dialog_w: i32 = tasks_dialog_w;
+    const dialog_h: i32 = tasks_dialog_h;
     const x = @divTrunc(screen_w - dialog_w, 2);
     const y = @divTrunc(screen_h - dialog_h, 2);
     var exit_buf: [14]u8 = .{0} ** 14;

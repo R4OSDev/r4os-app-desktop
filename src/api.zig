@@ -365,6 +365,22 @@ pub const Context = struct {
         return self.desk.remoteFrameWait(last_revision, timeout_ticks, out);
     }
 
+    pub fn supportsRemoteFrameDemand(self: *const Context) bool {
+        return self.desk.supportsRemoteFrameDemand();
+    }
+
+    pub fn remoteFrameAcquire(self: *const Context) i32 {
+        return self.desk.remoteFrameAcquire();
+    }
+
+    pub fn remoteFrameRelease(self: *const Context) i32 {
+        return self.desk.remoteFrameRelease();
+    }
+
+    pub fn remoteFrameConsumers(self: *const Context) u32 {
+        return self.desk.remoteFrameConsumers();
+    }
+
     pub fn desktopActivityWait(self: *const Context, last_seq: u64, timeout_ticks: u64, out_seq: *u64) i32 {
         return self.desk.desktopActivityWait(last_seq, timeout_ticks, out_seq);
     }
@@ -476,6 +492,10 @@ pub const Context = struct {
         return self.draw.displayPresent();
     }
 
+    pub fn supportsDisplayBlitStride(self: *const Context) bool {
+        return self.draw.hasFn("display_blit_xrgb32_stride");
+    }
+
     pub fn displayBlitSceneRect(self: *const Context, scene: *const scene_buffer.SceneBuffer, rect: surface.Rect) i32 {
         const clipped = scene.clipRect(rect) orelse return 0;
         const pixels = scene.pixels orelse return -1;
@@ -486,6 +506,19 @@ pub const Context = struct {
         const scene_width: usize = @intCast(scene.width);
         const start_y: usize = @intCast(clipped.y);
         const start_x: usize = @intCast(clipped.x);
+
+        if (self.supportsDisplayBlitStride()) {
+            const offset = start_y * scene_width + start_x;
+            const needed = (@as(usize, @intCast(clipped.h)) - 1) * scene_width + @as(usize, @intCast(clipped.w));
+            return self.draw.displayBlitXrgb32Stride(
+                @intCast(x),
+                @intCast(y),
+                w,
+                h,
+                @intCast(scene_width),
+                pixels[offset .. offset + needed],
+            );
+        }
 
         if (clipped.x == 0 and clipped.w == scene.width) {
             const offset = start_y * scene_width;

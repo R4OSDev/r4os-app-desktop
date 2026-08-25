@@ -33,6 +33,12 @@ pub const Rect = struct {
         return !self.isEmpty() and x >= self.x and x < self.right() and y >= self.y and y < self.bottom();
     }
 
+    pub fn intersects(self: Rect, other: Rect) bool {
+        return !self.isEmpty() and !other.isEmpty() and
+            self.x < other.right() and other.x < self.right() and
+            self.y < other.bottom() and other.y < self.bottom();
+    }
+
     pub fn inset(self: Rect, dx: i32, dy: i32) Rect {
         const next_w = @max(0, self.w - dx * 2);
         const next_h = @max(0, self.h - dy * 2);
@@ -78,6 +84,14 @@ pub const Rect = struct {
         };
     }
 };
+
+test "rect intersection excludes touching and empty rectangles" {
+    const base = Rect{ .x = 10, .y = 20, .w = 30, .h = 40 };
+    try std.testing.expect(base.intersects(.{ .x = 39, .y = 59, .w = 2, .h = 2 }));
+    try std.testing.expect(!base.intersects(.{ .x = 40, .y = 20, .w = 4, .h = 4 }));
+    try std.testing.expect(!base.intersects(.{ .x = 10, .y = 60, .w = 4, .h = 4 }));
+    try std.testing.expect(!base.intersects(.{ .x = 10, .y = 20, .w = 0, .h = 4 }));
+}
 
 pub const Surface = struct {
     kind: SurfaceKind,

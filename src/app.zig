@@ -138,7 +138,8 @@ const subsystem_host_test_marker_path = "C:\\TEMP\\SUBSYS.OK";
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
-    "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n";
+    "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
+    "DESKTOP present selftest: OK stride=single-call damage=early-cull remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -239,6 +240,7 @@ pub const App = struct {
     remote_input_keys: u32 = 0,
     remote_input_mouse: u32 = 0,
     last_remote_input_sequence: u32 = 0,
+    remote_frame_consumers: u32 = 0,
     next_event_id: u32 = 0,
     last_mouse_down_tick: u64 = 0,
     last_mouse_down_target: model.UiTarget = .none,
@@ -412,6 +414,7 @@ pub const App = struct {
                 continue;
             }
             var needs_redraw = false;
+            if (self.pollRemoteFrameDemand()) needs_redraw = true;
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
                 if (self.dispatchEvent()) needs_redraw = true;
@@ -452,6 +455,16 @@ pub const App = struct {
             self.activity_wait_supported = false;
         }
         self.ctx.sleepTicks(self.loop_sleep_ticks);
+    }
+
+    fn pollRemoteFrameDemand(self: *App) bool {
+        if (!self.ctx.supportsRemoteFrameDemand()) return false;
+        const consumers = self.ctx.remoteFrameConsumers();
+        if (consumers == self.remote_frame_consumers) return false;
+        const became_active = self.remote_frame_consumers == 0 and consumers != 0;
+        self.remote_frame_consumers = consumers;
+        if (became_active) self.invalidateFull();
+        return became_active;
     }
 
     fn runR4XSmokeAndPoweroff(self: *App) noreturn {
@@ -1511,6 +1524,24 @@ pub const App = struct {
     }
 
     fn smokeRemoteFrameContract(self: *App) bool {
+        const demand_supported = self.ctx.supportsRemoteFrameDemand();
+        var acquired = false;
+        if (demand_supported) {
+            const acquire_rc = self.ctx.remoteFrameAcquire();
+            if (acquire_rc <= 0) {
+                self.ctx.println("Remote frame snapshot: FAILED-acquire");
+                return false;
+            }
+            acquired = true;
+            self.remote_frame_consumers = @intCast(acquire_rc);
+            self.invalidateFull();
+            self.redraw();
+        }
+        defer if (acquired) {
+            const remaining = self.ctx.remoteFrameRelease();
+            self.remote_frame_consumers = if (remaining > 0) @intCast(remaining) else 0;
+        };
+
         var info: r4os.abi.RemoteFrameInfo = .{};
         const info_rc = self.ctx.remoteFrameInfo(&info);
         if (info_rc != 0 or info.magic != r4os.abi.remote_frame_magic or info.version != r4os.abi.remote_frame_version) {
@@ -1898,6 +1929,7 @@ pub const App = struct {
         const first = self.launchHeadlessSubsystemGuest(subsystem_guest_a_path) orelse return false;
         const second = self.launchHeadlessSubsystemGuest(subsystem_guest_b_path) orelse return false;
         if (first.index == second.index or sameProcessHandle(first.handle, second.handle)) return self.headlessSubsystemFailure("instance-identity");
+        if (!self.smokePresentPathContract()) return false;
 
         self.toggleMaximizeWindow(first.index);
         self.smokePumpCooperativeFrames(1);
@@ -1924,6 +1956,54 @@ pub const App = struct {
         self.enterTerminalModeWithArgs("");
         if (!self.terminal_mode or self.windows[0].instance_id == 0) return self.headlessSubsystemFailure("terminal-mode");
         self.headless_acceptance_terminal = true;
+        return true;
+    }
+
+    fn smokePresentPathContract(self: *App) bool {
+        if (!self.ctx.supportsDisplayBlitStride()) return self.headlessSubsystemFailure("present-stride-api");
+        if (!self.ctx.supportsRemoteFrameDemand()) return self.headlessSubsystemFailure("present-demand-api");
+        if (self.ctx.remoteFrameConsumers() != 0) return self.headlessSubsystemFailure("present-demand-initial");
+
+        var absent_info: r4os.abi.RemoteFrameInfo = .{};
+        if (self.ctx.remoteFrameInfo(&absent_info) == 0) return self.headlessSubsystemFailure("present-shadow-without-consumer");
+
+        const narrow = surface.Rect{ .x = @max(0, self.screen_w - 1), .y = @max(0, self.screen_h - 1), .w = 1, .h = 1 };
+        self.presentDamageRect(narrow, .mixed);
+        if (self.render_stats.display_blit_calls_last != 1 or
+            self.render_stats.layers_culled_last == 0 or
+            self.render_stats.windows_culled_last == 0 or
+            self.render_stats.items_culled_last == 0 or
+            self.render_stats.remote_shadow_copies_last != 0)
+        {
+            return self.headlessSubsystemFailure("present-narrow-cull");
+        }
+
+        const acquire_rc = self.ctx.remoteFrameAcquire();
+        if (acquire_rc <= 0) return self.headlessSubsystemFailure("present-demand-acquire");
+        self.remote_frame_consumers = @intCast(acquire_rc);
+        self.invalidateFull();
+        self.redraw();
+
+        var ready_info: r4os.abi.RemoteFrameInfo = .{};
+        if (self.render_stats.remote_shadow_copies_last == 0 or
+            self.ctx.remoteFrameInfo(&ready_info) != 0 or
+            ready_info.revision == 0 or
+            ready_info.width != @as(u32, @intCast(self.screen_w)) or
+            ready_info.height != @as(u32, @intCast(self.screen_h)))
+        {
+            _ = self.ctx.remoteFrameRelease();
+            self.remote_frame_consumers = 0;
+            return self.headlessSubsystemFailure("present-demand-frame");
+        }
+
+        const release_rc = self.ctx.remoteFrameRelease();
+        self.remote_frame_consumers = if (release_rc > 0) @intCast(release_rc) else 0;
+        if (release_rc != 0) return self.headlessSubsystemFailure("present-demand-release");
+        self.presentDamageRect(narrow, .mixed);
+        var released_info: r4os.abi.RemoteFrameInfo = .{};
+        if (self.render_stats.remote_shadow_copies_last != 0 or self.ctx.remoteFrameInfo(&released_info) == 0) {
+            return self.headlessSubsystemFailure("present-shadow-release");
+        }
         return true;
     }
 
@@ -3059,7 +3139,7 @@ pub const App = struct {
         const gui_frame_views = self.guiFrameViews();
         const compose_start = self.ctx.ticks();
         if (scene_ready) self.ctx.beginSceneClipped(&self.scene, damage_rect);
-        compositor.compose(
+        const cull_stats = compositor.compose(
             self.ctx,
             self.screen_w,
             self.screen_h,
@@ -3098,13 +3178,18 @@ pub const App = struct {
             self.cursor_y,
             self.hover_target,
             self.mouse_down_target,
+            damage_rect,
         );
         const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
         const present_start = self.ctx.ticks();
+        var remote_publish_rc: i32 = r4os.abi.remote_frame_error_unavailable;
+        var display_blit_calls: u32 = 0;
+        const stride_blit = self.ctx.supportsDisplayBlitStride();
         if (scene_ready) {
             self.ctx.endScene();
             self.scene.clearPaintClip();
-            _ = self.ctx.remoteFramePublishSceneRect(&self.scene, damage_rect, self.cursor_x, self.cursor_y);
+            remote_publish_rc = self.ctx.remoteFramePublishSceneRect(&self.scene, damage_rect, self.cursor_x, self.cursor_y);
+            display_blit_calls = if (stride_blit or damage_rect.w == self.screen_w) 1 else @intCast(@max(0, damage_rect.h));
             _ = self.ctx.displayBlitSceneRect(&self.scene, damage_rect);
         }
         _ = self.ctx.displayPresent();
@@ -3113,7 +3198,7 @@ pub const App = struct {
         const frame_ticks = elapsedTicks(frame_start, now);
         const present_ticks = elapsedTicks(present_start, now);
         const cursor_latency_ticks = if (cursor_queued_tick == 0) 0 else elapsedTicks(cursor_queued_tick, now);
-        self.recordPresentStats(damage_rect, kind, frame_ticks, compose_ticks, present_ticks, cursor_latency_ticks);
+        self.recordPresentStats(damage_rect, kind, frame_ticks, compose_ticks, present_ticks, cursor_latency_ticks, cull_stats, display_blit_calls, stride_blit, remote_publish_rc);
     }
 
     fn ensureSceneBuffer(self: *App) bool {
@@ -5723,7 +5808,7 @@ pub const App = struct {
         }
     }
 
-    fn recordPresentStats(self: *App, rect: surface.Rect, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, cursor_latency_ticks: u64) void {
+    fn recordPresentStats(self: *App, rect: surface.Rect, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, cursor_latency_ticks: u64, cull: compositor.CullStats, display_blit_calls: u32, stride_blit: bool, remote_publish_rc: i32) void {
         const pixels: u32 = @intCast(rectArea(rect));
         const copy_bytes = @as(u64, pixels) * 4;
         self.render_stats.redraws +%= 1;
@@ -5736,6 +5821,31 @@ pub const App = struct {
         recordTickStat(&self.render_stats.present_total_ticks, &self.render_stats.present_max_ticks, &self.render_stats.present_last_ticks, present_ticks);
         self.render_stats.scene_blit_bytes_total +%= copy_bytes;
         self.render_stats.scene_blit_bytes_last = copy_bytes;
+        self.render_stats.layers_visited_total +%= cull.layers_visited;
+        self.render_stats.layers_culled_total +%= cull.layers_culled;
+        self.render_stats.layers_visited_last = cull.layers_visited;
+        self.render_stats.layers_culled_last = cull.layers_culled;
+        self.render_stats.windows_visited_total +%= cull.windows_visited;
+        self.render_stats.windows_culled_total +%= cull.windows_culled;
+        self.render_stats.windows_visited_last = cull.windows_visited;
+        self.render_stats.windows_culled_last = cull.windows_culled;
+        self.render_stats.items_visited_total +%= cull.items_visited;
+        self.render_stats.items_culled_total +%= cull.items_culled;
+        self.render_stats.items_visited_last = cull.items_visited;
+        self.render_stats.items_culled_last = cull.items_culled;
+        self.render_stats.display_blit_calls_total +%= display_blit_calls;
+        self.render_stats.display_blit_calls_last = display_blit_calls;
+        if (stride_blit) {
+            self.render_stats.display_stride_presents +%= 1;
+        } else if (display_blit_calls > 1) {
+            self.render_stats.display_legacy_row_presents +%= 1;
+        }
+        self.render_stats.remote_shadow_copies_last = if (remote_publish_rc > 0) 1 else 0;
+        if (remote_publish_rc > 0) {
+            self.render_stats.remote_shadow_copies +%= 1;
+        } else if (remote_publish_rc == 0) {
+            self.render_stats.remote_shadow_skips +%= 1;
+        }
         if (cursor_latency_ticks != 0 or kind == .cursor) {
             recordTickStat(&self.render_stats.cursor_latency_total_ticks, &self.render_stats.cursor_latency_max_ticks, &self.render_stats.cursor_latency_last_ticks, cursor_latency_ticks);
         }

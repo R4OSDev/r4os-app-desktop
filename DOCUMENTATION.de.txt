@@ -32,6 +32,14 @@ Fenster-, Console-, Clipboard-, ProgramStatus- und Power-Funktionen laufen
 ueber ihre aktuellen Gruppenfelder. Der Desktop besitzt keine eigene
 Kernel- oder API-Parallelstruktur.
 
+Der Presentpfad komponiert bei kleinem Damage nur schneidende Layer, Desktop-
+Items und Fenster, ohne deren Z-Reihenfolge zu veraendern. Rechteckige
+Scene-Blits verwenden bei vorhandenem R4DRAW-Slot den vollen Scene-Pitch als
+Source-Stride und bleiben dadurch ein einzelner ABI-Aufruf. Der
+R4DESK-Remote-Frame-Shadow wird nur bei einem explizit registrierten
+Readback-Konsumenten gepflegt; der erste Konsument erzwingt einen Vollframe,
+der letzte Release verwirft Live- und Mapping-Snapshots.
+
 Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
 Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
 GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,
@@ -50,8 +58,9 @@ gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
 maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
 Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
 
-Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind,
-schreibt der Desktop die Video-/Eingabe- und Runtime-/Audio-Erfolgsmarkerdatei
+Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind und
+der Stride-/Damage-/Remote-Demand-Presenttest erfolgreich war, schreibt der
+Desktop die Video-/Eingabe-, Runtime-/Audio- und Present-Erfolgsmarkerdatei
 fuer AUTOEXEC. Fehler schreiben stattdessen einen konkreten Bootstrap- oder
 Fixture-Marker und wechseln ebenfalls in den seriell gespiegelten
 Terminalmodus, damit die restliche Suite Diagnosekontext liefern kann. Nach
@@ -75,9 +84,10 @@ periodisches Dateipolling.
 Build und Test
 --------------
 
-    DevTools/Scripts/Build.bat -app Desktop
-    DevTools/Scripts/Build.bat -app Appearance
-    DevTools/Scripts/Build.bat -norun
+    Build.bat test
+    ./Build.sh test
+    Tools/Build.bat -test
+    ./Tools/Build.sh -test
 
-Interaktive Sichttests erfolgen ueber Build.bat -gui. Headless API-/Bootsmokes
-laufen ueber Build.bat -test.
+Interaktive Sichttests erfolgen ueber das GUI-Profil des Workspace-Builds.
+Headless API-/Bootsmokes laufen ueber das Testprofil.
