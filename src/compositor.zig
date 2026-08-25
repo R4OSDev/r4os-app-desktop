@@ -37,6 +37,8 @@ pub const CullStats = struct {
     windows_culled: u32 = 0,
     items_visited: u32 = 0,
     items_culled: u32 = 0,
+    gui_frame_commands: u64 = 0,
+    gui_resource_bytes: u64 = 0,
 };
 
 pub const SettingsOverlay = struct {
@@ -273,6 +275,10 @@ fn drawWindow(
     }
     const scroll_offset = if (index < console_scroll_offsets.len) console_scroll_offsets[index] else 0;
     const gui_frame = if (index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
+    if (gui_frame.valid) {
+        stats.gui_frame_commands +%= @intCast(gui_frame.commands.len);
+        stats.gui_resource_bytes +%= @intCast(gui_frame.resources.len);
+    }
     draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
 }
 

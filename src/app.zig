@@ -135,6 +135,9 @@ const subsystem_host_test_path = "/R4OS/SUBSYSTEMS/test.basic/SUBSYSOK.R4X";
 const subsystem_guest_a_path = "C:\\TEMP\\SUBSYSTEM-A.BAS";
 const subsystem_guest_b_path = "C:\\TEMP\\SUBSYSTEM-B.BAS";
 const subsystem_host_test_marker_path = "C:\\TEMP\\SUBSYS.OK";
+const r4basic_host_path = "/R4OS/SUBSYSTEMS/r4os.basic/R4BASIC.R4X";
+const r4basic_baseline_guest_path = "C:\\TEMP\\GORILLA.BAS";
+const r4basic_baseline_marker_path = "C:\\TEMP\\R4BASIC.BASELINE";
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
@@ -1802,6 +1805,18 @@ pub const App = struct {
         self.ctx.printU64(self.render_stats.present_last_ticks);
         self.ctx.print("/");
         self.ctx.printU64(self.render_stats.present_max_ticks);
+        self.ctx.print(" frame_ns=");
+        self.ctx.printU64(self.render_stats.frame_last_ns);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.frame_max_ns);
+        self.ctx.print(" copies=");
+        self.ctx.printU64(self.render_stats.scene_copy_successes);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.scene_copy_attempts);
+        self.ctx.print(" gui_work=");
+        self.ctx.printU64(self.render_stats.gui_frame_commands_last);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.gui_resource_bytes_last);
         self.ctx.print(" cursor_latency=");
         self.ctx.printU64(self.render_stats.cursor_latency_last_ticks);
         self.ctx.print("/");
@@ -1839,10 +1854,16 @@ pub const App = struct {
         const copy_ok = s.redraws > 0 and s.scene_blit_bytes_total > 0 and s.scene_blit_bytes_last > 0;
         const frame_ok = s.frame_max_ticks >= s.frame_last_ticks and
             s.compose_max_ticks >= s.compose_last_ticks and
-            s.present_max_ticks >= s.present_last_ticks;
+            s.present_max_ticks >= s.present_last_ticks and
+            s.frame_max_ns >= s.frame_last_ns and
+            s.compose_max_ns >= s.compose_last_ns and
+            s.present_max_ns >= s.present_last_ns;
+        const accounting_ok = s.scene_blit_bytes_total == s.display_blit_bytes_total + s.remote_shadow_bytes_total and
+            s.scene_copy_attempts == s.scene_copy_successes + s.scene_copy_skips and
+            s.present_attempts == s.present_successes + s.present_failures;
         const cursor_ok = !expect_cursor or (s.cursor_moves > 0 and s.cursor_only_presents > 0 and s.cursor_latency_max_ticks >= s.cursor_latency_last_ticks);
         const worker_ok = s.layout_worker_started > 0 and s.layout_worker_completed > 0 and s.layout_worker_errors == 0;
-        const ok = copy_ok and frame_ok and cursor_ok and worker_ok;
+        const ok = copy_ok and frame_ok and accounting_ok and cursor_ok and worker_ok;
 
         self.ctx.print("DESKTOP responsiveness: ");
         self.ctx.write(if (ok) "OK" else "FAILED");
@@ -1858,6 +1879,14 @@ pub const App = struct {
         self.ctx.printU64(s.compose_last_ticks);
         self.ctx.print("/");
         self.ctx.printU64(s.compose_max_ticks);
+        self.ctx.print(" frame_ns=");
+        self.ctx.printU64(s.frame_last_ns);
+        self.ctx.print("/");
+        self.ctx.printU64(s.frame_max_ns);
+        self.ctx.print(" copy_targets=");
+        self.ctx.printU64(s.scene_copy_successes);
+        self.ctx.print("/");
+        self.ctx.printU64(s.scene_copy_attempts);
         self.ctx.print(" present=");
         self.ctx.printU64(s.present_last_ticks);
         self.ctx.print("/");
@@ -1922,6 +1951,7 @@ pub const App = struct {
 
     fn startHeadlessSubsystemAcceptance(self: *App) bool {
         _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
+        _ = self.ctx.fileDelete(r4basic_baseline_marker_path);
         self.window_completion_handles = .{r4os.abi.ProgramProcessHandle{}} ** self.window_completion_handles.len;
         self.window_completion_exit_codes = .{0} ** self.window_completion_exit_codes.len;
         if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
@@ -1952,6 +1982,17 @@ pub const App = struct {
         if (self.window_completion_exit_codes[first.index] != 0) return self.headlessSubsystemFailure("completion-a-exit");
         if (!sameProcessHandle(self.window_completion_handles[second.index], second.handle)) return self.headlessSubsystemFailure("completion-b-handle");
         if (self.window_completion_exit_codes[second.index] != 0) return self.headlessSubsystemFailure("completion-b-exit");
+
+        const baseline = self.launchHeadlessR4BasicBaseline() orelse return false;
+        const baseline_started = self.ctx.ticks();
+        const baseline_timeout_ticks = @as(u64, self.monotonic_hz) * 60;
+        while (sameProcessHandle(self.window_process_handles[baseline.index], baseline.handle)) {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| baseline_started >= baseline_timeout_ticks) return self.headlessSubsystemFailure("r4basic-timeout");
+        }
+        if (!sameProcessHandle(self.window_completion_handles[baseline.index], baseline.handle)) return self.headlessSubsystemFailure("r4basic-completion-handle");
+        if (self.window_completion_exit_codes[baseline.index] != 0) return self.headlessSubsystemFailure("r4basic-completion-exit");
+        if (!self.ctx.exists(r4basic_baseline_marker_path)) return self.headlessSubsystemFailure("r4basic-marker");
         if (self.ctx.fileWrite(subsystem_host_test_marker_path, subsystem_host_test_marker) != @as(i32, @intCast(subsystem_host_test_marker.len))) return false;
 
         self.enterTerminalModeWithArgs("");
@@ -2082,6 +2123,54 @@ pub const App = struct {
         self.launchGuiPath(zptr(path_z[0..]), zptr(args_z[0..]), zptr(title_z[0..]), target.policy);
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("program-spawn");
+        return .{ .index = index, .handle = handle };
+    }
+
+    fn launchHeadlessR4BasicBaseline(self: *App) ?HeadlessSubsystemLaunch {
+        const start_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-clock");
+        const input = r4std.subsystem_runtime.probe(&self.ctx.sys, r4basic_baseline_guest_path) catch return self.headlessSubsystemLaunchFailure("r4basic-probe");
+        const probe_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-probe-clock");
+        const associations = [_]r4os.subsystem_catalog.Association{.{
+            .extension = ".BAS",
+            .subsystem_id = "r4os.basic",
+            .format_id = "basic.qbasic-source",
+        }};
+        var resolution: r4os.subsystem_catalog.Resolution = .{};
+        r4os.subsystem_catalog.resolve(r4std.subsystem_runtime.catalog(), input, .{ .user_associations = &associations }, &resolution) catch return self.headlessSubsystemLaunchFailure("r4basic-resolve");
+        const target = resolution.selected() orelse return self.headlessSubsystemLaunchFailure("r4basic-handler");
+        const resolve_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-resolve-clock");
+        if (!equalsIgnoreCase(target.subsystem_id, "r4os.basic") or
+            !equalsIgnoreCase(target.format_id, "basic.qbasic-source") or
+            !equalsIgnoreCase(target.host_path, r4basic_host_path) or
+            !r4std.subsystem_runtime.hostPresent(&self.ctx.sys, target.host_path))
+        {
+            return self.headlessSubsystemLaunchFailure("r4basic-target");
+        }
+
+        var trace_id: [16]u8 = undefined;
+        writeR4BasicTraceId(&trace_id, start_ns);
+        var phases_storage: [64]u8 = undefined;
+        const desktop_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-host-clock");
+        const phases = std.fmt.bufPrint(phases_storage[0..], "{d},{d},{d}", .{
+            probe_end_ns -| start_ns,
+            resolve_end_ns -| start_ns,
+            desktop_ns -| start_ns,
+        }) catch return self.headlessSubsystemLaunchFailure("r4basic-timeline");
+        const options = [_]r4os.subsystem_launch.Option{
+            .{ .key = r4os.subsystem_launch.trace_key, .value = trace_id[0..] },
+            .{ .key = r4os.subsystem_launch.trace_mode_key, .value = r4os.subsystem_launch.trace_mode_headless },
+            .{ .key = r4os.subsystem_launch.trace_phases_key, .value = phases },
+        };
+        var args_storage: [r4os.subsystem_launch.max_args_bytes + 1]u8 = .{0} ** (r4os.subsystem_launch.max_args_bytes + 1);
+        const args = r4os.subsystem_launch.encode(r4basic_baseline_guest_path, &options, args_storage[0..r4os.subsystem_launch.max_args_bytes]) catch return self.headlessSubsystemLaunchFailure("r4basic-args");
+        const index = self.findFreeAppWindow() orelse return self.headlessSubsystemLaunchFailure("r4basic-window-slot");
+        var path_z: [window_launch_path_max + 1]u8 = .{0} ** (window_launch_path_max + 1);
+        var title_z: [console_title_max + 1]u8 = .{0} ** (console_title_max + 1);
+        copySliceZ(path_z[0..], target.host_path);
+        copySliceZ(title_z[0..], target.display_name);
+        self.launchGuiPath(zptr(path_z[0..]), zptr(args_storage[0 .. args.len + 1]), zptr(title_z[0..]), .gui);
+        const handle = self.window_process_handles[index];
+        if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("r4basic-program-spawn");
         return .{ .index = index, .handle = handle };
     }
 
@@ -3178,6 +3267,7 @@ pub const App = struct {
             if (index != 0) damage_bounds = damage_bounds.merged(region);
         }
         const frame_start = self.ctx.ticks();
+        const frame_start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         _ = self.ctx.displayBeginFrameRect(
             damage_bounds.x,
             damage_bounds.y,
@@ -3188,6 +3278,7 @@ pub const App = struct {
         const console_scroll_offsets = self.consoleScrollOffsets();
         const gui_frame_views = self.guiFrameViews();
         const compose_start = self.ctx.ticks();
+        const compose_start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         var cull_stats = compositor.CullStats{};
         for (clipped_regions) |damage_rect| {
             if (scene_ready) self.ctx.beginSceneClipped(&self.scene, damage_rect);
@@ -3199,11 +3290,15 @@ pub const App = struct {
             }
         }
         const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
+        const compose_end_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const present_start = self.ctx.ticks();
+        const present_start_ns = compose_end_ns;
         var remote_publish_rc: i32 = r4os.abi.remote_frame_error_unavailable;
         var display_blit_calls: u32 = 0;
         var present_result: r4os.abi.DisplayPresentResult = .{};
         var canonical_present = false;
+        var display_copy_succeeded = false;
+        var display_present_succeeded = false;
         if (scene_ready) {
             remote_publish_rc = self.ctx.remoteFramePublishSceneRegions(&self.scene, clipped_regions, self.cursor_x, self.cursor_y);
             self.present_source_generation +%= 1;
@@ -3218,16 +3313,24 @@ pub const App = struct {
             canonical_present = present_rc == 0;
             if (canonical_present) {
                 display_blit_calls = 1;
+                display_copy_succeeded = true;
+                display_present_succeeded = true;
             } else {
-                _ = self.ctx.displayBlitSceneRect(&self.scene, damage_bounds);
-                _ = self.ctx.displayPresent();
+                const blit_rc = self.ctx.displayBlitSceneRect(&self.scene, damage_bounds);
+                const fallback_present_rc = self.ctx.displayPresent();
                 display_blit_calls = 1;
+                display_copy_succeeded = blit_rc >= 0;
+                display_present_succeeded = fallback_present_rc >= 0;
             }
         }
         self.last_display_revision = self.ctx.displayRevision();
         const now = self.ctx.ticks();
+        const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const frame_ticks = elapsedTicks(frame_start, now);
         const present_ticks = elapsedTicks(present_start, now);
+        const frame_ns = elapsedNanoseconds(frame_start_ns, now_ns);
+        const compose_ns = elapsedNanoseconds(compose_start_ns, compose_end_ns);
+        const present_ns = elapsedNanoseconds(present_start_ns, now_ns);
         const cursor_latency_ticks = if (canonical_present and present_result.elapsed_ticks != 0)
             present_result.elapsed_ticks
         else if (cursor_queued_tick == 0)
@@ -3242,9 +3345,14 @@ pub const App = struct {
             frame_ticks,
             compose_ticks,
             present_ticks,
+            frame_ns,
+            compose_ns,
+            present_ns,
             cursor_latency_ticks,
             cull_stats,
             display_blit_calls,
+            display_copy_succeeded,
+            display_present_succeeded,
             canonical_present or self.ctx.supportsDisplayBlitStride(),
             remote_publish_rc,
             present_result,
@@ -4455,7 +4563,11 @@ pub const App = struct {
 
     fn launchHostRequest(self: *App, request: r4os.abi.ProgramHostLaunchRequest) void {
         const path = zptr(request.path[0..]);
-        const args = zptr(request.args[0..]);
+        var traced_args: [r4os.subsystem_launch.max_args_bytes + 1]u8 = .{0} ** (r4os.subsystem_launch.max_args_bytes + 1);
+        const args = if (self.addDesktopR4BasicTrace(spanZ(request.args[0..]), traced_args[0..r4os.subsystem_launch.max_args_bytes])) |encoded|
+            zptr(traced_args[0 .. encoded.len + 1])
+        else
+            zptr(request.args[0..]);
         var title_buf: [console_title_max + 1]u8 = .{0} ** (console_title_max + 1);
         titleFromPath(title_buf[0..], path);
         const title: [*:0]const u8 = @ptrCast(&title_buf);
@@ -4464,6 +4576,37 @@ pub const App = struct {
             .gui => self.launchGuiPath(path, args, title, .gui),
             .auto => self.launchAutoPath(path, args, title),
         }
+    }
+
+    fn addDesktopR4BasicTrace(self: *const App, encoded: []const u8, out: []u8) ?[]const u8 {
+        const request = r4os.subsystem_launch.parse(encoded) catch return null;
+        if (request.option_count != 3) return null;
+        const trace_id = (request.option(r4os.subsystem_launch.trace_key) catch null) orelse return null;
+        const mode = (request.option(r4os.subsystem_launch.trace_mode_key) catch null) orelse return null;
+        const prior_phases = (request.option(r4os.subsystem_launch.trace_phases_key) catch null) orelse return null;
+        if (trace_id.len != 16 or !equalsIgnoreCase(mode, r4os.subsystem_launch.trace_mode_gui)) return null;
+        const start_ns = std.fmt.parseInt(u64, trace_id, 16) catch return null;
+        const now_ns = self.ctx.sys.monotonicNanoseconds() orelse return null;
+        if (now_ns < start_ns) return null;
+        var fields = std.mem.splitScalar(u8, prior_phases, ',');
+        const probe_elapsed = fields.next() orelse return null;
+        const resolve_elapsed = fields.next() orelse return null;
+        _ = fields.next() orelse return null;
+        if (fields.next() != null) return null;
+        _ = std.fmt.parseInt(u64, probe_elapsed, 10) catch return null;
+        _ = std.fmt.parseInt(u64, resolve_elapsed, 10) catch return null;
+        var phases_storage: [64]u8 = undefined;
+        const phases = std.fmt.bufPrint(phases_storage[0..], "{s},{s},{d}", .{
+            probe_elapsed,
+            resolve_elapsed,
+            now_ns - start_ns,
+        }) catch return null;
+        const options = [_]r4os.subsystem_launch.Option{
+            .{ .key = r4os.subsystem_launch.trace_key, .value = trace_id },
+            .{ .key = r4os.subsystem_launch.trace_mode_key, .value = mode },
+            .{ .key = r4os.subsystem_launch.trace_phases_key, .value = phases },
+        };
+        return r4os.subsystem_launch.encode(request.guest_path, &options, out) catch null;
     }
 
     fn syncDisplayRevision(self: *App) bool {
@@ -5902,8 +6045,12 @@ pub const App = struct {
         }
     }
 
-    fn recordPresentStats(self: *App, rect: surface.Rect, pixels: u32, region_count: u32, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, cursor_latency_ticks: u64, cull: compositor.CullStats, display_blit_calls: u32, stride_blit: bool, remote_publish_rc: i32, present_result: r4os.abi.DisplayPresentResult) void {
+    fn recordPresentStats(self: *App, rect: surface.Rect, pixels: u32, region_count: u32, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, frame_ns: u64, compose_ns: u64, present_ns: u64, cursor_latency_ticks: u64, cull: compositor.CullStats, display_blit_calls: u32, display_copy_succeeded: bool, display_present_succeeded: bool, stride_blit: bool, remote_publish_rc: i32, present_result: r4os.abi.DisplayPresentResult) void {
         const copy_bytes = @as(u64, pixels) * 4;
+        const display_bytes = if (display_copy_succeeded) copy_bytes else 0;
+        const remote_bytes = if (remote_publish_rc > 0) copy_bytes else 0;
+        const copy_attempts: u64 = if (display_blit_calls == 0) 0 else 2;
+        const copy_successes = @as(u64, @intFromBool(display_copy_succeeded)) + @intFromBool(remote_publish_rc > 0);
         self.render_stats.redraws +%= 1;
         self.render_stats.total_damage_pixels +%= pixels;
         self.render_stats.last_damage_pixels = pixels;
@@ -5912,8 +6059,22 @@ pub const App = struct {
         recordTickStat(&self.render_stats.frame_total_ticks, &self.render_stats.frame_max_ticks, &self.render_stats.frame_last_ticks, frame_ticks);
         recordTickStat(&self.render_stats.compose_total_ticks, &self.render_stats.compose_max_ticks, &self.render_stats.compose_last_ticks, compose_ticks);
         recordTickStat(&self.render_stats.present_total_ticks, &self.render_stats.present_max_ticks, &self.render_stats.present_last_ticks, present_ticks);
-        self.render_stats.scene_blit_bytes_total +%= copy_bytes;
-        self.render_stats.scene_blit_bytes_last = copy_bytes;
+        recordTickStat(&self.render_stats.frame_total_ns, &self.render_stats.frame_max_ns, &self.render_stats.frame_last_ns, frame_ns);
+        recordTickStat(&self.render_stats.compose_total_ns, &self.render_stats.compose_max_ns, &self.render_stats.compose_last_ns, compose_ns);
+        recordTickStat(&self.render_stats.present_total_ns, &self.render_stats.present_max_ns, &self.render_stats.present_last_ns, present_ns);
+        self.render_stats.scene_blit_bytes_total +%= display_bytes + remote_bytes;
+        self.render_stats.scene_blit_bytes_last = display_bytes + remote_bytes;
+        self.render_stats.display_blit_bytes_total +%= display_bytes;
+        self.render_stats.display_blit_bytes_last = display_bytes;
+        self.render_stats.remote_shadow_bytes_total +%= remote_bytes;
+        self.render_stats.remote_shadow_bytes_last = remote_bytes;
+        self.render_stats.scene_copy_attempts +%= copy_attempts;
+        self.render_stats.scene_copy_successes +%= copy_successes;
+        self.render_stats.scene_copy_skips +%= copy_attempts -| copy_successes;
+        if (display_blit_calls != 0) {
+            self.render_stats.present_attempts +%= 1;
+            if (display_present_succeeded) self.render_stats.present_successes +%= 1 else self.render_stats.present_failures +%= 1;
+        }
         self.render_stats.layers_visited_total +%= cull.layers_visited;
         self.render_stats.layers_culled_total +%= cull.layers_culled;
         self.render_stats.layers_visited_last = cull.layers_visited;
@@ -5926,6 +6087,10 @@ pub const App = struct {
         self.render_stats.items_culled_total +%= cull.items_culled;
         self.render_stats.items_visited_last = cull.items_visited;
         self.render_stats.items_culled_last = cull.items_culled;
+        self.render_stats.gui_frame_commands_total +%= cull.gui_frame_commands;
+        self.render_stats.gui_frame_commands_last = cull.gui_frame_commands;
+        self.render_stats.gui_resource_bytes_total +%= cull.gui_resource_bytes;
+        self.render_stats.gui_resource_bytes_last = cull.gui_resource_bytes;
         self.render_stats.display_blit_calls_total +%= display_blit_calls;
         self.render_stats.display_blit_calls_last = display_blit_calls;
         self.render_stats.damage_regions_total +%= region_count;
@@ -5958,7 +6123,7 @@ pub const App = struct {
         self.render_stats.remote_shadow_copies_last = if (remote_publish_rc > 0) 1 else 0;
         if (remote_publish_rc > 0) {
             self.render_stats.remote_shadow_copies +%= 1;
-        } else if (remote_publish_rc == 0) {
+        } else if (display_blit_calls != 0) {
             self.render_stats.remote_shadow_skips +%= 1;
         }
         if (cursor_latency_ticks != 0 or kind == .cursor) {
@@ -5968,12 +6133,12 @@ pub const App = struct {
             self.render_stats.ui_blocker_count +%= 1;
             if (frame_ticks > self.render_stats.ui_blocker_max_ticks) self.render_stats.ui_blocker_max_ticks = frame_ticks;
         }
-        switch (kind) {
+        if (display_present_succeeded) switch (kind) {
             .cursor => self.render_stats.cursor_only_presents +%= 1,
             .mixed => self.render_stats.mixed_damage_presents +%= 1,
             .full => self.render_stats.full_damage_presents +%= 1,
             else => {},
-        }
+        };
     }
 
     fn startButtonHit(self: *const App, x: i32, y: i32) bool {
@@ -6324,6 +6489,11 @@ fn elapsedTicks(start: u64, end: u64) u64 {
     return if (end >= start) end - start else 0;
 }
 
+fn elapsedNanoseconds(start: u64, end: u64) u64 {
+    if (start == 0 or end < start) return 0;
+    return end - start;
+}
+
 fn recordTickStat(total: *u64, max: *u64, last: *u64, ticks: u64) void {
     total.* +%= ticks;
     last.* = ticks;
@@ -6399,6 +6569,16 @@ fn accumulateCullStats(total: *compositor.CullStats, value: compositor.CullStats
     total.windows_culled +%= value.windows_culled;
     total.items_visited +%= value.items_visited;
     total.items_culled +%= value.items_culled;
+    total.gui_frame_commands +%= value.gui_frame_commands;
+    total.gui_resource_bytes +%= value.gui_resource_bytes;
+}
+
+fn writeR4BasicTraceId(out: *[16]u8, value: u64) void {
+    const hex = "0123456789ABCDEF";
+    for (out[0..], 0..) |*byte, index| {
+        const shift: u6 = @intCast((15 - index) * 4);
+        byte.* = hex[@as(u4, @truncate(value >> shift))];
+    }
 }
 
 fn isFullRect(rect: surface.Rect, screen_w: i32, screen_h: i32) bool {
