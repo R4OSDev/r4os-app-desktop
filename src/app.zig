@@ -139,7 +139,7 @@ const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
-    "DESKTOP present selftest: OK stride=single-call damage=early-cull remote=on-demand\r\n";
+    "DESKTOP present selftest: OK regions=2 fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -226,6 +226,7 @@ pub const App = struct {
     cursor_damage: CursorDamage = .{},
     cursor_damage_queued_tick: u64 = 0,
     render_stats: compositor.RenderStats = .{},
+    present_source_generation: u64 = 0,
     scene: scene_buffer.SceneBuffer = .{},
     cursor_x: i32 = 0,
     cursor_y: i32 = 0,
@@ -1961,8 +1962,29 @@ pub const App = struct {
 
     fn smokePresentPathContract(self: *App) bool {
         if (!self.ctx.supportsDisplayBlitStride()) return self.headlessSubsystemFailure("present-stride-api");
+        if (!self.ctx.supportsDisplayPresentRegions()) return self.headlessSubsystemFailure("present-regions-api");
+        if (!self.ctx.supportsRemoteFrameRegions()) return self.headlessSubsystemFailure("present-remote-regions-api");
         if (!self.ctx.supportsRemoteFrameDemand()) return self.headlessSubsystemFailure("present-demand-api");
         if (self.ctx.remoteFrameConsumers() != 0) return self.headlessSubsystemFailure("present-demand-initial");
+
+        var capabilities: r4os.abi.DisplayPresentCapabilities = .{};
+        if (self.ctx.displayPresentCapabilities(&capabilities) != 0 or
+            capabilities.max_regions < 2 or
+            capabilities.backend_kind != r4os.abi.display_present_backend_external_blit or
+            (capabilities.flags & (r4os.abi.display_present_cap_cpu_fallback |
+                r4os.abi.display_present_cap_exact_regions |
+                r4os.abi.display_present_cap_sync_fence |
+                r4os.abi.display_present_cap_accelerated_blit |
+                r4os.abi.display_present_cap_external_backend)) !=
+                (r4os.abi.display_present_cap_cpu_fallback |
+                    r4os.abi.display_present_cap_exact_regions |
+                    r4os.abi.display_present_cap_sync_fence |
+                    r4os.abi.display_present_cap_accelerated_blit |
+                    r4os.abi.display_present_cap_external_backend) or
+            !fixedNameEquals(capabilities.backend_name[0..], "DISPBLIT"))
+        {
+            return self.headlessSubsystemFailure("present-backend-capabilities");
+        }
 
         var absent_info: r4os.abi.RemoteFrameInfo = .{};
         if (self.ctx.remoteFrameInfo(&absent_info) == 0) return self.headlessSubsystemFailure("present-shadow-without-consumer");
@@ -1976,6 +1998,34 @@ pub const App = struct {
             self.render_stats.remote_shadow_copies_last != 0)
         {
             return self.headlessSubsystemFailure("present-narrow-cull");
+        }
+
+        const separated = [_]surface.Rect{
+            .{ .x = 2, .y = 2, .w = 2, .h = 2 },
+            .{ .x = @max(4, self.screen_w - 4), .y = @max(4, self.screen_h - 4), .w = 2, .h = 2 },
+        };
+        const lost_before = self.render_stats.present_lost_frames;
+        const fallback_before = self.render_stats.present_backend_fallbacks;
+        const probe_input_tick = self.ctx.ticks();
+        self.ctx.sleepTicks(1);
+        self.presentDamageRegionsTimed(separated[0..], .mixed, probe_input_tick);
+        if (self.render_stats.damage_regions_last != 2 or
+            self.render_stats.last_damage_pixels != 8 or
+            self.render_stats.display_blit_calls_last != 1 or
+            self.render_stats.present_generation_last == 0 or
+            self.render_stats.present_fence_last == 0 or
+            self.render_stats.present_lost_frames != lost_before or
+            self.render_stats.present_backend_fallbacks != fallback_before or
+            self.render_stats.input_present_last_ticks == 0)
+        {
+            return self.headlessSubsystemFailure("present-separated-damage");
+        }
+        var completion: r4os.abi.DisplayPresentCompletion = .{};
+        if (self.ctx.displayPresentCompletion(self.render_stats.present_fence_last, &completion) != 0 or
+            (completion.flags & r4os.abi.display_present_completion_complete) == 0 or
+            completion.completed_fence < self.render_stats.present_fence_last)
+        {
+            return self.headlessSubsystemFailure("present-fence-completion");
         }
 
         const acquire_rc = self.ctx.remoteFrameAcquire();
@@ -3074,77 +3124,140 @@ pub const App = struct {
     }
 
     fn redraw(self: *App) void {
-        if (self.damage.take()) |damage_rect| {
-            var rect = damage_rect;
-            var cursor_queued_tick: u64 = 0;
-            const taskbar_rect = self.taskbarRect();
-            const split_taskbar = self.taskbar_damage and !rectsOverlap(rect, taskbar_rect);
-            if (self.taskbar_damage and !split_taskbar) {
-                rect = rect.merged(taskbar_rect);
-                self.taskbar_damage = false;
-            }
-            if (self.cursor_damage.active) {
-                cursor_queued_tick = self.cursor_damage_queued_tick;
-                self.cursor_damage_queued_tick = 0;
-                rect = rect.merged(self.cursor_damage.old_rect).merged(self.cursor_damage.new_rect);
-                self.cursor_damage.reset();
-            }
-            self.presentDamageRectTimed(rect, if (isFullRect(rect, self.screen_w, self.screen_h)) .full else .mixed, cursor_queued_tick);
-            if (split_taskbar) {
-                self.taskbar_damage = false;
-                self.presentDamageRect(taskbar_rect, .mixed);
-            }
-            return;
-        }
+        var regions: [surface.max_damage_regions]surface.Rect = undefined;
+        var region_count = self.damage.takeRegions(&regions);
+        const cursor_only = region_count == 0 and !self.taskbar_damage and self.cursor_damage.active;
+        var cursor_queued_tick: u64 = 0;
 
         if (self.taskbar_damage) {
+            appendDamageRegion(&regions, &region_count, self.taskbarRect());
             self.taskbar_damage = false;
-            self.presentDamageRect(self.taskbarRect(), .mixed);
-            return;
         }
-
         if (self.cursor_damage.active) {
-            const old_rect = self.cursor_damage.old_rect;
-            const new_rect = self.cursor_damage.new_rect;
-            const cursor_queued_tick = self.cursor_damage_queued_tick;
+            cursor_queued_tick = self.cursor_damage_queued_tick;
             self.cursor_damage_queued_tick = 0;
-            self.cursor_damage.reset();
-            const merged = old_rect.merged(new_rect);
-            if (rectArea(merged) <= rectArea(old_rect) + rectArea(new_rect)) {
-                self.presentDamageRectTimed(merged, .cursor, cursor_queued_tick);
-            } else {
-                self.presentDamageRectTimed(old_rect, .cursor, cursor_queued_tick);
-                if (!rectEqual(old_rect, new_rect)) self.presentDamageRect(new_rect, .cursor);
+            appendDamageRegion(&regions, &region_count, self.cursor_damage.old_rect);
+            if (!rectEqual(self.cursor_damage.old_rect, self.cursor_damage.new_rect)) {
+                appendDamageRegion(&regions, &region_count, self.cursor_damage.new_rect);
             }
-            return;
+            self.cursor_damage.reset();
+        }
+        if (region_count == 0) {
+            regions[0] = surface.desktop(self.screen_w, self.screen_h).rect;
+            region_count = 1;
         }
 
-        self.presentDamageRect(surface.desktop(self.screen_w, self.screen_h).rect, .full);
+        const kind: compositor.DamageKind = if (region_count == 1 and isFullRect(regions[0], self.screen_w, self.screen_h))
+            .full
+        else if (cursor_only)
+            .cursor
+        else
+            .mixed;
+        self.presentDamageRegionsTimed(regions[0..region_count], kind, cursor_queued_tick);
     }
 
     fn presentDamageRect(self: *App, damage_rect: surface.Rect, kind: compositor.DamageKind) void {
-        self.presentDamageRectTimed(damage_rect, kind, 0);
+        self.presentDamageRegionsTimed((&damage_rect)[0..1], kind, 0);
     }
 
-    fn presentDamageRectTimed(self: *App, damage_rect: surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) void {
+    fn presentDamageRegionsTimed(self: *App, damage_regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) void {
+        if (damage_regions.len == 0) return;
+        var clipped_storage: [surface.max_damage_regions]surface.Rect = undefined;
+        var clipped_count: usize = 0;
+        for (damage_regions) |region| {
+            if (clipDamageRect(region, self.screen_w, self.screen_h)) |clipped| {
+                appendDamageRegion(&clipped_storage, &clipped_count, clipped);
+            }
+        }
+        if (clipped_count == 0) return;
+        const clipped_regions = clipped_storage[0..clipped_count];
+        var damage_bounds = clipped_regions[0];
+        var damage_pixels: u64 = 0;
+        for (clipped_regions, 0..) |region, index| {
+            damage_pixels += rectArea(region);
+            if (index != 0) damage_bounds = damage_bounds.merged(region);
+        }
         const frame_start = self.ctx.ticks();
         _ = self.ctx.displayBeginFrameRect(
-            damage_rect.x,
-            damage_rect.y,
-            @intCast(@max(0, damage_rect.w)),
-            @intCast(@max(0, damage_rect.h)),
+            damage_bounds.x,
+            damage_bounds.y,
+            @intCast(@max(0, damage_bounds.w)),
+            @intCast(@max(0, damage_bounds.h)),
         );
         const scene_ready = self.ensureSceneBuffer();
         const console_scroll_offsets = self.consoleScrollOffsets();
         const gui_frame_views = self.guiFrameViews();
         const compose_start = self.ctx.ticks();
-        if (scene_ready) self.ctx.beginSceneClipped(&self.scene, damage_rect);
-        const cull_stats = compositor.compose(
+        var cull_stats = compositor.CullStats{};
+        for (clipped_regions) |damage_rect| {
+            if (scene_ready) self.ctx.beginSceneClipped(&self.scene, damage_rect);
+            const region_cull = self.composeDamageRect(damage_rect, console_scroll_offsets[0..], gui_frame_views[0..]);
+            accumulateCullStats(&cull_stats, region_cull);
+            if (scene_ready) {
+                self.ctx.endScene();
+                self.scene.clearPaintClip();
+            }
+        }
+        const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
+        const present_start = self.ctx.ticks();
+        var remote_publish_rc: i32 = r4os.abi.remote_frame_error_unavailable;
+        var display_blit_calls: u32 = 0;
+        var present_result: r4os.abi.DisplayPresentResult = .{};
+        var canonical_present = false;
+        if (scene_ready) {
+            remote_publish_rc = self.ctx.remoteFramePublishSceneRegions(&self.scene, clipped_regions, self.cursor_x, self.cursor_y);
+            self.present_source_generation +%= 1;
+            if (self.present_source_generation == 0) self.present_source_generation = 1;
+            const present_rc = self.ctx.displayPresentSceneRegions(
+                &self.scene,
+                clipped_regions,
+                self.present_source_generation,
+                cursor_queued_tick,
+                &present_result,
+            );
+            canonical_present = present_rc == 0;
+            if (canonical_present) {
+                display_blit_calls = 1;
+            } else {
+                _ = self.ctx.displayBlitSceneRect(&self.scene, damage_bounds);
+                _ = self.ctx.displayPresent();
+                display_blit_calls = 1;
+            }
+        }
+        self.last_display_revision = self.ctx.displayRevision();
+        const now = self.ctx.ticks();
+        const frame_ticks = elapsedTicks(frame_start, now);
+        const present_ticks = elapsedTicks(present_start, now);
+        const cursor_latency_ticks = if (canonical_present and present_result.elapsed_ticks != 0)
+            present_result.elapsed_ticks
+        else if (cursor_queued_tick == 0)
+            0
+        else
+            elapsedTicks(cursor_queued_tick, now);
+        self.recordPresentStats(
+            damage_bounds,
+            @intCast(@min(damage_pixels, ~@as(u32, 0))),
+            @intCast(clipped_regions.len),
+            kind,
+            frame_ticks,
+            compose_ticks,
+            present_ticks,
+            cursor_latency_ticks,
+            cull_stats,
+            display_blit_calls,
+            canonical_present or self.ctx.supportsDisplayBlitStride(),
+            remote_publish_rc,
+            present_result,
+        );
+    }
+
+    fn composeDamageRect(self: *App, damage_rect: surface.Rect, console_scroll_offsets: []const u32, gui_frame_views: []const gui_frame_snapshot.View) compositor.CullStats {
+        return compositor.compose(
             self.ctx,
             self.screen_w,
             self.screen_h,
             self.windows[0..],
-            gui_frame_views[0..],
+            gui_frame_views,
             self.active_window,
             zptr(self.clock[0..]),
             zptr(self.keyboard_layout.display[0..]),
@@ -3167,7 +3280,7 @@ pub const App = struct {
             zptr(self.console_title[0..]),
             zptr(self.console_path[0..]),
             zptr(self.console_args[0..]),
-            console_scroll_offsets[0..],
+            console_scroll_offsets,
             self.wallpaper_state.view(),
             self.config,
             self.config.terminal_font_size,
@@ -3180,25 +3293,6 @@ pub const App = struct {
             self.mouse_down_target,
             damage_rect,
         );
-        const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
-        const present_start = self.ctx.ticks();
-        var remote_publish_rc: i32 = r4os.abi.remote_frame_error_unavailable;
-        var display_blit_calls: u32 = 0;
-        const stride_blit = self.ctx.supportsDisplayBlitStride();
-        if (scene_ready) {
-            self.ctx.endScene();
-            self.scene.clearPaintClip();
-            remote_publish_rc = self.ctx.remoteFramePublishSceneRect(&self.scene, damage_rect, self.cursor_x, self.cursor_y);
-            display_blit_calls = if (stride_blit or damage_rect.w == self.screen_w) 1 else @intCast(@max(0, damage_rect.h));
-            _ = self.ctx.displayBlitSceneRect(&self.scene, damage_rect);
-        }
-        _ = self.ctx.displayPresent();
-        self.last_display_revision = self.ctx.displayRevision();
-        const now = self.ctx.ticks();
-        const frame_ticks = elapsedTicks(frame_start, now);
-        const present_ticks = elapsedTicks(present_start, now);
-        const cursor_latency_ticks = if (cursor_queued_tick == 0) 0 else elapsedTicks(cursor_queued_tick, now);
-        self.recordPresentStats(damage_rect, kind, frame_ticks, compose_ticks, present_ticks, cursor_latency_ticks, cull_stats, display_blit_calls, stride_blit, remote_publish_rc);
     }
 
     fn ensureSceneBuffer(self: *App) bool {
@@ -5808,8 +5902,7 @@ pub const App = struct {
         }
     }
 
-    fn recordPresentStats(self: *App, rect: surface.Rect, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, cursor_latency_ticks: u64, cull: compositor.CullStats, display_blit_calls: u32, stride_blit: bool, remote_publish_rc: i32) void {
-        const pixels: u32 = @intCast(rectArea(rect));
+    fn recordPresentStats(self: *App, rect: surface.Rect, pixels: u32, region_count: u32, kind: compositor.DamageKind, frame_ticks: u64, compose_ticks: u64, present_ticks: u64, cursor_latency_ticks: u64, cull: compositor.CullStats, display_blit_calls: u32, stride_blit: bool, remote_publish_rc: i32, present_result: r4os.abi.DisplayPresentResult) void {
         const copy_bytes = @as(u64, pixels) * 4;
         self.render_stats.redraws +%= 1;
         self.render_stats.total_damage_pixels +%= pixels;
@@ -5835,6 +5928,28 @@ pub const App = struct {
         self.render_stats.items_culled_last = cull.items_culled;
         self.render_stats.display_blit_calls_total +%= display_blit_calls;
         self.render_stats.display_blit_calls_last = display_blit_calls;
+        self.render_stats.damage_regions_total +%= region_count;
+        self.render_stats.damage_regions_last = region_count;
+        if (present_result.present_generation != 0) {
+            if (self.render_stats.present_generation_last != 0 and
+                present_result.present_generation != self.render_stats.present_generation_last +% 1)
+            {
+                self.render_stats.present_lost_frames +%= 1;
+            }
+            self.render_stats.present_generation_last = present_result.present_generation;
+            self.render_stats.present_fence_last = present_result.fence;
+            if ((present_result.flags & r4os.abi.display_present_result_fallback) != 0) {
+                self.render_stats.present_backend_fallbacks +%= 1;
+            }
+            if (present_result.elapsed_ticks != 0) {
+                recordTickStat(
+                    &self.render_stats.input_present_total_ticks,
+                    &self.render_stats.input_present_max_ticks,
+                    &self.render_stats.input_present_last_ticks,
+                    present_result.elapsed_ticks,
+                );
+            }
+        }
         if (stride_blit) {
             self.render_stats.display_stride_presents +%= 1;
         } else if (display_blit_calls > 1) {
@@ -6243,6 +6358,49 @@ fn rectsOverlap(a: surface.Rect, b: surface.Rect) bool {
         a.y < b.bottom() and a.bottom() > b.y;
 }
 
+fn appendDamageRegion(regions: *[surface.max_damage_regions]surface.Rect, count: *usize, rect: surface.Rect) void {
+    if (rect.isEmpty()) return;
+    var merged = rect;
+    var index: usize = 0;
+    while (index < count.*) {
+        if (!rectsOverlap(regions[index], merged)) {
+            index += 1;
+            continue;
+        }
+        merged = merged.merged(regions[index]);
+        count.* -= 1;
+        regions[index] = regions[count.*];
+        index = 0;
+    }
+    if (count.* < regions.len) {
+        regions[count.*] = merged;
+        count.* += 1;
+        return;
+    }
+    var bounds = merged;
+    for (regions[0..count.*]) |existing| bounds = bounds.merged(existing);
+    regions[0] = bounds;
+    count.* = 1;
+}
+
+fn clipDamageRect(rect: surface.Rect, screen_w: i32, screen_h: i32) ?surface.Rect {
+    const left = @max(0, rect.x);
+    const top = @max(0, rect.y);
+    const right = @min(screen_w, rect.right());
+    const bottom = @min(screen_h, rect.bottom());
+    if (right <= left or bottom <= top) return null;
+    return .{ .x = left, .y = top, .w = right - left, .h = bottom - top };
+}
+
+fn accumulateCullStats(total: *compositor.CullStats, value: compositor.CullStats) void {
+    total.layers_visited +%= value.layers_visited;
+    total.layers_culled +%= value.layers_culled;
+    total.windows_visited +%= value.windows_visited;
+    total.windows_culled +%= value.windows_culled;
+    total.items_visited +%= value.items_visited;
+    total.items_culled +%= value.items_culled;
+}
+
 fn isFullRect(rect: surface.Rect, screen_w: i32, screen_h: i32) bool {
     return rect.x <= 0 and rect.y <= 0 and rect.w >= screen_w and rect.h >= screen_h;
 }
@@ -6254,6 +6412,15 @@ fn damageKindName(kind: compositor.DamageKind) []const u8 {
         .mixed => "mixed",
         .full => "full",
     };
+}
+
+fn fixedNameEquals(value: []const u8, expected: []const u8) bool {
+    var len: usize = 0;
+    while (len < value.len and value[len] != 0) : (len += 1) {}
+    if (len != expected.len) return false;
+    var index: usize = 0;
+    while (index < len) : (index += 1) if (value[index] != expected[index]) return false;
+    return true;
 }
 
 fn copyZPtr(out: []u8, value: [*:0]const u8) void {

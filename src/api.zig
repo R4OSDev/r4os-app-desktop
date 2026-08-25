@@ -369,6 +369,10 @@ pub const Context = struct {
         return self.desk.supportsRemoteFrameDemand();
     }
 
+    pub fn supportsRemoteFrameRegions(self: *const Context) bool {
+        return self.desk.supportsRemoteFrameRegions();
+    }
+
     pub fn remoteFrameAcquire(self: *const Context) i32 {
         return self.desk.remoteFrameAcquire();
     }
@@ -410,6 +414,43 @@ pub const Context = struct {
         if (frame_pixels == 0 or frame_pixels > max_frame_pixels) return r4os.abi.remote_frame_error_invalid;
         info.frame_pixels = @intCast(frame_pixels);
         info.frame_bytes = @intCast(frame_pixels * @sizeOf(u32));
+        return self.desk.remoteFramePublish(&info, pixels);
+    }
+
+    pub fn remoteFramePublishSceneRegions(self: *const Context, scene: *const scene_buffer.SceneBuffer, rects: []const surface.Rect, cursor_x: i32, cursor_y: i32) i32 {
+        if (rects.len == 0 or rects.len > r4os.abi.display_damage_max_regions) return r4os.abi.remote_frame_error_invalid;
+        if (scene.width <= 0 or scene.height <= 0) return r4os.abi.remote_frame_error_invalid;
+        const pixels = scene.pixels orelse return r4os.abi.remote_frame_error_unavailable;
+        var regions: [r4os.abi.display_damage_max_regions]r4os.abi.DisplayDamageRect =
+            .{r4os.abi.DisplayDamageRect{}} ** r4os.abi.display_damage_max_regions;
+        var bounds: surface.Rect = undefined;
+        for (rects, 0..) |rect, index| {
+            const clipped = scene.clipRect(rect) orelse return r4os.abi.remote_frame_error_out_of_range;
+            regions[index] = .{ .x = clipped.x, .y = clipped.y, .w = @intCast(clipped.w), .h = @intCast(clipped.h) };
+            bounds = if (index == 0) clipped else bounds.merged(clipped);
+        }
+        var info = r4os.abi.RemoteFrameInfo{
+            .flags = r4os.abi.remote_frame_flag_ready | r4os.abi.remote_frame_flag_dirty_valid | r4os.abi.remote_frame_flag_cursor_valid,
+            .width = @intCast(scene.width),
+            .height = @intCast(scene.height),
+            .stride_pixels = @intCast(scene.width),
+            .bytes_per_pixel = 4,
+            .dirty_x = bounds.x,
+            .dirty_y = bounds.y,
+            .dirty_w = @intCast(bounds.w),
+            .dirty_h = @intCast(bounds.h),
+            .cursor_x = cursor_x,
+            .cursor_y = cursor_y,
+            .cursor_flags = r4os.abi.remote_frame_cursor_flag_visible,
+        };
+        const frame_pixels = @as(u64, info.width) * info.height;
+        const max_frame_pixels: u64 = 0xffff_ffff / @sizeOf(u32);
+        if (frame_pixels == 0 or frame_pixels > max_frame_pixels) return r4os.abi.remote_frame_error_invalid;
+        info.frame_pixels = @intCast(frame_pixels);
+        info.frame_bytes = @intCast(frame_pixels * @sizeOf(u32));
+        if (self.desk.supportsRemoteFrameRegions()) {
+            return self.desk.remoteFramePublishRegions(&info, pixels, regions[0..rects.len]);
+        }
         return self.desk.remoteFramePublish(&info, pixels);
     }
 
@@ -535,6 +576,46 @@ pub const Context = struct {
             if (rc < 0) return rc;
         }
         return 1;
+    }
+
+    pub fn supportsDisplayPresentRegions(self: *const Context) bool {
+        return self.draw.supportsDisplayPresentRegions();
+    }
+
+    pub fn displayPresentSceneRegions(
+        self: *const Context,
+        scene: *const scene_buffer.SceneBuffer,
+        rects: []const surface.Rect,
+        source_generation: u64,
+        input_tick: u64,
+        out: *r4os.abi.DisplayPresentResult,
+    ) i32 {
+        if (!self.supportsDisplayPresentRegions() or rects.len == 0 or rects.len > r4os.abi.display_damage_max_regions) return r4os.abi.display_present_error_unavailable;
+        const pixels = scene.pixels orelse return r4os.abi.display_present_error_unavailable;
+        if (scene.width <= 0 or scene.height <= 0) return r4os.abi.display_present_error_invalid;
+        var regions: [r4os.abi.display_damage_max_regions]r4os.abi.DisplayDamageRect =
+            .{r4os.abi.DisplayDamageRect{}} ** r4os.abi.display_damage_max_regions;
+        for (rects, 0..) |rect, index| {
+            const clipped = scene.clipRect(rect) orelse return r4os.abi.display_present_error_out_of_range;
+            regions[index] = .{ .x = clipped.x, .y = clipped.y, .w = @intCast(clipped.w), .h = @intCast(clipped.h) };
+        }
+        const request = r4os.abi.DisplayPresentRequest{
+            .flags = if (input_tick != 0) r4os.abi.display_present_request_flag_input_tick_valid else 0,
+            .source_width = @intCast(scene.width),
+            .source_height = @intCast(scene.height),
+            .source_stride_pixels = @intCast(scene.width),
+            .source_generation = source_generation,
+            .input_tick = input_tick,
+        };
+        return self.draw.displayPresentRegions(&request, pixels, regions[0..rects.len], out);
+    }
+
+    pub fn displayPresentCapabilities(self: *const Context, out: *r4os.abi.DisplayPresentCapabilities) i32 {
+        return self.draw.displayPresentCapabilities(out);
+    }
+
+    pub fn displayPresentCompletion(self: *const Context, fence: u64, out: *r4os.abi.DisplayPresentCompletion) i32 {
+        return self.draw.displayPresentCompletion(fence, out);
     }
 
     pub fn guiRasterRead(self: *const Context, instance_id: u32, offset: u32, out: []u32) i32 {
