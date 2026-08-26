@@ -75,6 +75,11 @@ gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
 maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
 Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
 
+Die produktive GORILLA-Abnahme waehlt `r4os.basic` ebenfalls nur aus Pfad und
+Dateimetadaten. `R4BASIC source-probe` belegt einen `fileInfo`-Aufruf sowie
+null Inhaltslesungen und null gelesene Bytes vor dem Prozessstart; der
+R4Basic-Host bleibt damit alleiniger Besitzer des vollstaendigen Quellloads.
+
 Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind, der
 Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
 und der Stride-/Damage-/Cursorblink-/Remote-Demand-Presenttest erfolgreich

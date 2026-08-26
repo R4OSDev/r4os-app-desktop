@@ -142,6 +142,7 @@ const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=sequenced+policy-filtered idle=no-frame fps>=20\r\n" ++
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
+    "R4BASIC source-probe: info_calls=1 read_calls=0 read_bytes=0 limit_bytes=262144\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
@@ -2161,7 +2162,7 @@ pub const App = struct {
 
     fn launchHeadlessR4BasicBaseline(self: *App) ?HeadlessSubsystemLaunch {
         const start_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-clock");
-        const input = r4std.subsystem_runtime.probe(&self.ctx.sys, r4basic_baseline_guest_path) catch return self.headlessSubsystemLaunchFailure("r4basic-probe");
+        const inspection = r4std.subsystem_runtime.inspect(&self.ctx.sys, r4basic_baseline_guest_path) catch return self.headlessSubsystemLaunchFailure("r4basic-probe");
         const probe_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-probe-clock");
         const associations = [_]r4os.subsystem_catalog.Association{.{
             .extension = ".BAS",
@@ -2169,7 +2170,7 @@ pub const App = struct {
             .format_id = "basic.qbasic-source",
         }};
         var resolution: r4os.subsystem_catalog.Resolution = .{};
-        r4os.subsystem_catalog.resolve(r4std.subsystem_runtime.catalog(), input, .{ .user_associations = &associations }, &resolution) catch return self.headlessSubsystemLaunchFailure("r4basic-resolve");
+        r4os.subsystem_catalog.resolve(r4std.subsystem_runtime.catalog(), inspection.input, .{ .user_associations = &associations }, &resolution) catch return self.headlessSubsystemLaunchFailure("r4basic-resolve");
         const target = resolution.selected() orelse return self.headlessSubsystemLaunchFailure("r4basic-handler");
         const resolve_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return self.headlessSubsystemLaunchFailure("r4basic-resolve-clock");
         if (!equalsIgnoreCase(target.subsystem_id, "r4os.basic") or
@@ -2178,6 +2179,11 @@ pub const App = struct {
             !r4std.subsystem_runtime.hostPresent(&self.ctx.sys, target.host_path))
         {
             return self.headlessSubsystemLaunchFailure("r4basic-target");
+        }
+        if (inspection.access.info_calls != 1 or inspection.access.read_calls != 0 or inspection.access.read_bytes != 0 or
+            r4os.subsystem_catalog.max_probe_bytes != 256 * 1024)
+        {
+            return self.headlessSubsystemLaunchFailure("r4basic-source-probe");
         }
 
         var trace_id: [16]u8 = undefined;
