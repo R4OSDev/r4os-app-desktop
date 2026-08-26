@@ -140,7 +140,7 @@ const r4basic_baseline_guest_path = "C:\\TEMP\\GORILLA.BAS";
 const r4basic_baseline_marker_path = "C:\\TEMP\\R4BASIC.BASELINE";
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
-    "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
+    "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=sequenced+policy-filtered idle=no-frame fps>=20\r\n" ++
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
