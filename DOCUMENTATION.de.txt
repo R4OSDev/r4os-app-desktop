@@ -57,6 +57,13 @@ Scrollposition erneuert. Der 500-ms-Cursorblink verwendet den gecachten
 Status, invalidiert nur den Cursorbalken und komponiert dank Paintclip weder
 unsichtbare Zeilen noch die restliche Terminalflaeche neu.
 
+Der Desktop-Smoke startet zwei unabhaengige Terminalfenster und belegt seit
+0.69.67 ueber Task- und Konsolentelemetrie, dass beide nach dem Prompt ohne
+weitere CPU-Ticks, Reads, Revisionen oder Desktop-Signale blockiert bleiben.
+Danach prueft er gebuendelte Eingabe, den erneuten Wait in `PAUSE`, den
+generationengebundenen Wake, normalen Exit sowie einen Close-Request auf das
+zweite Fenster und dessen generationstreuen Reap.
+
 Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
 Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
 GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,

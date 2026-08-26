@@ -1137,8 +1137,13 @@ pub const App = struct {
 
     fn smokeLaunchMultipleTerminalWindows(self: *App) bool {
         self.ctx.print("Terminal multi-window launch: ");
+        const perf_start = self.ctx.performanceInput() orelse {
+            self.ctx.println("FAILED-metrics");
+            return false;
+        };
         const before = self.countWindowsByLaunchPath(terminal_path);
         self.launchConsolePath(terminal_path, "", "Terminal");
+        self.smokePumpFrames(4);
         _ = self.syncProgramWindows();
         if (self.hasDamage()) self.redraw();
         const after_first = self.countWindowsByLaunchPath(terminal_path);
@@ -1150,24 +1155,184 @@ pub const App = struct {
         }
 
         self.launchConsolePath(terminal_path, "", "Terminal");
+        self.smokePumpFrames(4);
         _ = self.syncProgramWindows();
         if (self.hasDamage()) self.redraw();
         const after_second = self.countWindowsByLaunchPath(terminal_path);
         const second = self.active_window;
-        const ok = after_second == before + 2 and
+        const windows_ok = after_second == before + 2 and
             second < self.windows.len and
             second != first and
             self.windows[second].kind == .terminal and
             !self.terminal_mode;
-        self.forceCloseWindowsByLaunchPath(terminal_path);
-        _ = self.syncProgramWindows();
-        if (self.hasDamage()) self.redraw();
-        if (!ok) {
+        if (!windows_ok) {
             self.ctx.println("FAILED-second");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
             return false;
         }
-        self.ctx.println("ok");
+
+        const first_id = self.windows[first].instance_id;
+        const second_id = self.windows[second].instance_id;
+        const first_handle = self.window_process_handles[first];
+        const second_handle = self.window_process_handles[second];
+        var settled_perf: ?r4os.abi.ProgramInputPerformanceInfo = null;
+        var settle_attempt: u32 = 0;
+        while (settle_attempt < 40) : (settle_attempt += 1) {
+            self.smokePumpFrames(1);
+            const current = self.ctx.performanceInput() orelse continue;
+            if (current.console_wait_blocks - perf_start.console_wait_blocks >= 2) {
+                settled_perf = current;
+                break;
+            }
+        }
+        const idle_before = settled_perf orelse {
+            self.ctx.println("FAILED-input-wait");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        };
+        const runtime_before = self.smokeTaskRuntimeTicks(first_id, second_id) orelse {
+            self.ctx.println("FAILED-runtime-before");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        };
+        self.smokePumpFrames(12);
+        const runtime_after = self.smokeTaskRuntimeTicks(first_id, second_id) orelse {
+            self.ctx.println("FAILED-runtime-after");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        };
+        const idle_after = self.ctx.performanceInput() orelse {
+            self.ctx.println("FAILED-idle-metrics");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        };
+        if (runtime_after != runtime_before or
+            idle_after.console_read_calls != idle_before.console_read_calls or
+            idle_after.console_wait_calls != idle_before.console_wait_calls or
+            idle_after.console_wait_blocks != idle_before.console_wait_blocks or
+            idle_after.console_output_revision_batches != idle_before.console_output_revision_batches or
+            idle_after.console_output_desktop_signals != idle_before.console_output_desktop_signals)
+        {
+            self.ctx.println("FAILED-idle-work");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+
+        if (!self.pushConsoleInputBounded(first_id, "PAUSE\n")) {
+            self.ctx.println("FAILED-pause-input");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+        var pause_ready = false;
+        var pause_attempt: u32 = 0;
+        while (pause_attempt < 40) : (pause_attempt += 1) {
+            self.smokePumpFrames(1);
+            var output: [4096]u8 = undefined;
+            const got = self.ctx.consoleOutput(first_id, output[0..]);
+            const current = self.ctx.performanceInput();
+            if (got > 0 and containsBytes(output[0..@intCast(got)], "Press any key") and
+                current != null and current.?.console_wait_blocks > idle_after.console_wait_blocks)
+            {
+                pause_ready = true;
+                break;
+            }
+        }
+        if (!pause_ready or !self.pushConsoleInputBounded(first_id, "XEXIT\n")) {
+            self.ctx.println("FAILED-pause");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+        const close_result = self.ctx.programHandleRequestClose(&second_handle);
+        if (close_result != r4os.abi.program_handle_ok) {
+            self.ctx.println("FAILED-close-request");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+        self.windows[second].requestClose(self.ctx.ticks());
+
+        var closed = false;
+        var close_attempt: u32 = 0;
+        while (close_attempt < 80) : (close_attempt += 1) {
+            self.smokePumpFrames(1);
+            _ = self.syncProgramWindows();
+            if (self.windows[first].instance_id == 0 and self.windows[second].instance_id == 0) {
+                closed = true;
+                break;
+            }
+        }
+        if (!closed or
+            !sameProcessHandle(self.window_completion_handles[first], first_handle) or
+            !sameProcessHandle(self.window_completion_handles[second], second_handle) or
+            self.window_completion_exit_codes[first] != 0 or
+            self.window_completion_exit_codes[second] != 0)
+        {
+            self.ctx.println("FAILED-close");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+
+        const active_after = self.ctx.performanceInput() orelse {
+            self.ctx.println("FAILED-active-metrics");
+            return false;
+        };
+        const active_write_calls = active_after.console_output_write_calls - idle_after.console_output_write_calls;
+        const active_revisions = active_after.console_output_revision_batches - idle_after.console_output_revision_batches;
+        const active_signals = active_after.console_output_desktop_signals - idle_after.console_output_desktop_signals;
+        if (active_after.console_read_bytes - idle_after.console_read_bytes < 12 or
+            active_after.console_wait_wakes - idle_after.console_wait_wakes < 3 or
+            active_write_calls == 0 or active_revisions > active_write_calls * 2 or active_signals > active_write_calls)
+        {
+            self.ctx.println("FAILED-active-work");
+            return false;
+        }
+        if (self.hasDamage()) self.redraw();
+        self.ctx.print("ok idle-cpu=");
+        self.ctx.printU64(runtime_after - runtime_before);
+        self.ctx.print(" waits=");
+        self.ctx.printU64(active_after.console_wait_blocks - perf_start.console_wait_blocks);
+        self.ctx.print(" wakes=");
+        self.ctx.printU64(active_after.console_wait_wakes - perf_start.console_wait_wakes);
+        self.ctx.print(" revisions=");
+        self.ctx.printU64(active_revisions);
+        self.ctx.print(" signals=");
+        self.ctx.printU64(active_signals);
+        self.ctx.println("");
         return true;
+    }
+
+    fn smokeTaskRuntimeTicks(self: *const App, first_id: u32, second_id: u32) ?u64 {
+        var attempt: u32 = 0;
+        retry: while (attempt < task_inventory_restart_limit) : (attempt += 1) {
+            var cursor: r4os.abi.ProgramInventoryCursor = .{};
+            var summary: r4os.abi.ProgramInventorySummary = .{};
+            if (self.ctx.programInventoryBegin(&cursor, &summary) != r4os.abi.program_handle_ok) continue;
+            var total: u64 = 0;
+            var first_found = false;
+            var second_found = false;
+            while (true) {
+                var entries: [task_inventory_page_capacity]r4os.abi.ProgramTaskSnapshot = undefined;
+                var page: r4os.abi.ProgramInventoryPageInfo = .{};
+                if (self.ctx.programInventoryTasks(&cursor, entries[0..], &page) != r4os.abi.program_handle_ok) continue :retry;
+                if (page.status == r4os.abi.program_inventory_status_restart or
+                    page.snapshot_generation != cursor.snapshot_generation or page.returned > entries.len)
+                {
+                    continue :retry;
+                }
+                for (entries[0..@intCast(page.returned)]) |entry| {
+                    if (entry.owner_instance_id == first_id) {
+                        total +|= entry.runtime_ticks;
+                        first_found = true;
+                    } else if (entry.owner_instance_id == second_id) {
+                        total +|= entry.runtime_ticks;
+                        second_found = true;
+                    }
+                }
+                if (page.status == r4os.abi.program_inventory_status_complete)
+                    return if (first_found and second_found) total else null;
+                if (page.status != r4os.abi.program_inventory_status_more or page.returned == 0) continue :retry;
+            }
+        }
+        return null;
     }
 
     fn smokeInitialDesktopState(self: *const App) bool {

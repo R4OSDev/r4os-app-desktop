@@ -133,6 +133,10 @@ pub const Context = struct {
         self.sys.programStatus(out);
     }
 
+    pub fn performanceInput(self: *const Context) ?r4os.abi.ProgramInputPerformanceInfo {
+        return self.dev.performanceInput();
+    }
+
     pub fn programClass(self: *const Context, path: [*:0]const u8, policy: r4os.abi.LaunchPolicy) i32 {
         return self.sys.programClass(path, policy);
     }
