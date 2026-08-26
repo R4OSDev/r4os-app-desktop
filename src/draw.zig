@@ -18,6 +18,7 @@ const window = @import("window.zig");
 
 const console_output_render_max: usize = 16 * 1024;
 const terminal_line_max: usize = 512;
+const terminal_snapshot_line_max: usize = 256;
 const ico_buffer_max: usize = 8192;
 // Stufe 3 der Iconkette (0.61.14): das generische Programmicon.
 const standard_program_icon_path = "C:\\R4OS\\Media\\Icons\\Application.ico";
@@ -77,6 +78,46 @@ pub const DamageKind = enum(u8) {
     full = 3,
 };
 
+pub const TerminalSnapshotLine = struct {
+    offset: u16 = 0,
+    len: u16 = 0,
+};
+
+pub const TerminalSnapshot = struct {
+    valid: bool = false,
+    has_output: bool = false,
+    instance_id: u32 = 0,
+    revision: u32 = 0,
+    width: i32 = 0,
+    height: i32 = 0,
+    font_size: u8 = 0,
+    codepage: u16 = 0,
+    scroll_offset: u32 = 0,
+    effective_offset: u32 = 0,
+    state: r4os.abi.ConsoleState = .{},
+    lines: [terminal_snapshot_line_max]TerminalSnapshotLine = .{TerminalSnapshotLine{}} ** terminal_snapshot_line_max,
+    line_count: usize = 0,
+    text: [console_output_render_max]u8 = .{0} ** console_output_render_max,
+    text_len: usize = 0,
+
+    pub fn matches(self: *const TerminalSnapshot, instance_id: u32, revision: u32, rect: surface.Rect, font_size: u8, codepage: u16, scroll_offset: u32) bool {
+        return self.valid and self.instance_id == instance_id and self.revision == revision and
+            self.width == rect.w and self.height == rect.h and self.font_size == font_size and
+            self.codepage == codepage and self.scroll_offset == scroll_offset;
+    }
+
+    pub fn invalidate(self: *TerminalSnapshot) void {
+        self.valid = false;
+    }
+};
+
+pub const TerminalRefreshStats = struct {
+    state_reads: u32 = 0,
+    output_bytes: u32 = 0,
+    parsed_bytes: u32 = 0,
+    visible_lines: u32 = 0,
+};
+
 pub const RectInfo = struct {
     x: i32 = 0,
     y: i32 = 0,
@@ -88,6 +129,13 @@ pub const RenderStats = struct {
     redraws: u32 = 0,
     cursor_moves: u32 = 0,
     cursor_only_presents: u32 = 0,
+    console_snapshot_refreshes: u64 = 0,
+    console_snapshot_hits: u64 = 0,
+    console_state_reads: u64 = 0,
+    console_output_bytes: u64 = 0,
+    console_parse_bytes: u64 = 0,
+    console_visible_lines: u64 = 0,
+    console_cursor_cache_misses: u64 = 0,
     mixed_damage_presents: u32 = 0,
     full_damage_presents: u32 = 0,
     total_damage_pixels: u64 = 0,
@@ -912,6 +960,7 @@ pub fn appWindow(
     console_title: [*:0]const u8,
     console_path: [*:0]const u8,
     console_args: [*:0]const u8,
+    console_snapshot: ?*const TerminalSnapshot,
     terminal_font_size: u8,
     terminal_codepage: u16,
     terminal_scroll_offset: u32,
@@ -919,6 +968,8 @@ pub fn appWindow(
     hover_target: model.UiTarget,
     pressed_target: model.UiTarget,
 ) void {
+    _ = terminal_codepage;
+    _ = terminal_scroll_offset;
     if (!win.visible or win.minimized) return;
     const frame = win.frameSurface();
     const title_surface = win.titleSurface();
@@ -938,15 +989,20 @@ pub fn appWindow(
 
     switch (win.kind) {
         .terminal => {
-            var output: [console_output_render_max]u8 = .{0} ** console_output_render_max;
-            var state: r4os.abi.ConsoleState = .{};
-            if (win.instance_id != 0) syncConsoleMetrics(ctx, win.instance_id, client.rect, terminal_font_size);
-            if (win.instance_id == 0 or ctx.consoleState(win.instance_id, &state) < 0) state = .{ .fg = theme.text, .bg = theme.client_bg };
+            const state = if (console_snapshot) |snapshot|
+                if (snapshot.valid) snapshot.state else r4os.abi.ConsoleState{ .fg = theme.text, .bg = theme.client_bg }
+            else
+                r4os.abi.ConsoleState{ .fg = theme.text, .bg = theme.client_bg };
             fillSurface(ctx, client, state.bg);
-            if (win.instance_id != 0 and ctx.consoleOutput(win.instance_id, output[0..]) > 0) {
-                const effective_offset = terminalText(ctx, client.rect, output[0..], terminal_font_size, terminal_codepage, terminal_scroll_offset, state.fg, state.bg);
-                if (effective_offset == 0) terminalCursor(ctx, client.rect, state, terminal_font_size, state.fg, cursor_blink_on);
-            } else {
+            var rendered_snapshot = false;
+            if (console_snapshot) |snapshot| {
+                if (snapshot.valid and snapshot.has_output) {
+                    renderTerminalSnapshot(ctx, client.rect, snapshot);
+                    if (snapshot.effective_offset == 0) terminalCursor(ctx, client.rect, state, terminal_font_size, state.fg, cursor_blink_on);
+                    rendered_snapshot = true;
+                }
+            }
+            if (!rendered_snapshot) {
                 textLit(ctx, client.rect.x + 10, client.rect.y + 6, "Console app host", state.fg, state.bg);
                 if (index == 0) {
                     ctx.paintText(client.rect.x + 10, client.rect.y + 22, console_path, state.fg, state.bg);
@@ -1586,6 +1642,7 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
                 ctx.paintTextFontSlice(command.font_id, x, y, text, command.fg, command.bg, paint_bounds);
             },
             r4os.abi.gui_frame_command_kind_raster => hostedFrameRaster(ctx, bounds, command, frame.resources),
+            r4os.abi.gui_frame_command_kind_indexed8 => hostedFrameIndexed8(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_alpha8 => hostedFrameAlpha8(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_argb32 => hostedFrameArgb32(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_path_fill,
@@ -1602,6 +1659,7 @@ fn frameCommandHasBoundedOutput(kind: u32) bool {
     return switch (kind) {
         r4os.abi.gui_frame_command_kind_rect,
         r4os.abi.gui_frame_command_kind_raster,
+        r4os.abi.gui_frame_command_kind_indexed8,
         r4os.abi.gui_frame_command_kind_alpha8,
         r4os.abi.gui_frame_command_kind_argb32,
         r4os.abi.gui_frame_command_kind_path_fill,
@@ -1698,6 +1756,91 @@ fn hostedFrameRaster(ctx: *const desk_api.Context, bounds: surface.Rect, command
     }
 }
 
+fn hostedFrameIndexed8(ctx: *const desk_api.Context, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, resources: []const u8) void {
+    if (!validFrameIndexed8Geometry(command)) return;
+    const source = frameResource(resources, command) orelse return;
+    if (source.len < r4os.abi.gui_indexed8_pixels_offset or source.len != command.resource_bytes) return;
+    var header: r4os.abi.GuiIndexed8Resource = .{};
+    @memcpy(std.mem.asBytes(&header), source[0..@sizeOf(r4os.abi.GuiIndexed8Resource)]);
+    if (header.version != r4os.abi.gui_indexed8_resource_version or header.size != r4os.abi.gui_indexed8_resource_size or
+        header.source_w == 0 or header.source_h == 0 or header.source_w > r4os.abi.gui_raster_max_width or header.source_h > r4os.abi.gui_raster_max_height or
+        header.guest_w == 0 or header.guest_h == 0 or header.viewport_w == 0 or header.viewport_h == 0 or
+        header.palette_entries != r4os.abi.gui_indexed8_palette_entries or header.palette_offset != r4os.abi.gui_indexed8_palette_offset or
+        header.pixels_offset != r4os.abi.gui_indexed8_pixels_offset or header.pixel_stride != header.source_w)
+    {
+        return;
+    }
+    const pixel_bytes = std.math.mul(u64, header.source_w, header.source_h) catch return;
+    const required = std.math.add(u64, header.pixels_offset, pixel_bytes) catch return;
+    if (required != source.len or @as(u64, header.source_x) + header.source_w > header.guest_w or @as(u64, header.source_y) + header.source_h > header.guest_h) return;
+
+    const screen_x = std.math.add(i32, bounds.x, command.x) catch return;
+    const screen_y = std.math.add(i32, bounds.y, command.y) catch return;
+    const item = surface.Rect{ .x = screen_x, .y = screen_y, .w = @intCast(command.w), .h = @intCast(command.h) };
+    const paint = ctx.scenePaintBounds() orelse bounds;
+    const left = @max(item.x, @max(bounds.x, paint.x));
+    const top = @max(item.y, @max(bounds.y, paint.y));
+    const right = @min(item.right(), @min(bounds.right(), paint.right()));
+    const bottom = @min(item.bottom(), @min(bounds.bottom(), paint.bottom()));
+    if (right <= left or bottom <= top) return;
+
+    const client_start_x = @as(i64, command.x) + (left - screen_x);
+    const client_start_y = @as(i64, command.y) + (top - screen_y);
+    const viewport_local_x = client_start_x - header.viewport_x;
+    const viewport_local_y = client_start_y - header.viewport_y;
+    if (viewport_local_x < 0 or viewport_local_y < 0) return;
+    const x_numerator = @as(u64, @intCast(viewport_local_x)) * header.guest_w;
+    const y_numerator = @as(u64, @intCast(viewport_local_y)) * header.guest_h;
+    const x_start: u32 = @intCast(x_numerator / header.viewport_w);
+    const x_start_remainder: u32 = @intCast(x_numerator % header.viewport_w);
+    const x_step = header.guest_w / header.viewport_w;
+    const x_remainder_step = header.guest_w % header.viewport_w;
+    var source_y: u32 = @intCast(y_numerator / header.viewport_h);
+    var y_remainder: u32 = @intCast(y_numerator % header.viewport_h);
+    const y_step = header.guest_h / header.viewport_h;
+    const y_remainder_step = header.guest_h % header.viewport_h;
+
+    var destination_y = top;
+    while (destination_y < bottom) : (destination_y += 1) {
+        var source_x = x_start;
+        var x_remainder = x_start_remainder;
+        var destination_x = left;
+        var run_x = left;
+        var run_color: ?u32 = null;
+        while (destination_x < right) : (destination_x += 1) {
+            if (source_x < header.source_x or source_y < header.source_y or
+                source_x >= header.source_x + header.source_w or source_y >= header.source_y + header.source_h) return;
+            const pixel_offset = @as(usize, header.pixels_offset) +
+                @as(usize, source_y - header.source_y) * header.pixel_stride +
+                (source_x - header.source_x);
+            if (pixel_offset >= source.len) return;
+            const palette_offset = @as(usize, header.palette_offset) + @as(usize, source[pixel_offset]) * @sizeOf(u32);
+            const color = readXrgb32(source, palette_offset) orelse return;
+            if (run_color == null) {
+                run_color = color;
+                run_x = destination_x;
+            } else if (run_color.? != color) {
+                fillRect(ctx, .{ .x = run_x, .y = destination_y, .w = destination_x - run_x, .h = 1 }, run_color.? & 0x00FF_FFFF);
+                run_color = color;
+                run_x = destination_x;
+            }
+            source_x += x_step;
+            x_remainder += x_remainder_step;
+            if (x_remainder >= header.viewport_w) {
+                x_remainder -= header.viewport_w;
+                source_x += 1;
+            }
+        }
+        if (run_color) |color| fillRect(ctx, .{ .x = run_x, .y = destination_y, .w = right - run_x, .h = 1 }, color & 0x00FF_FFFF);
+        source_y += y_step;
+        y_remainder += y_remainder_step;
+        if (y_remainder >= header.viewport_h) {
+            y_remainder -= header.viewport_h;
+            source_y += 1;
+        }
+    }
+}
+
 fn readXrgb32(source: []const u8, offset: usize) ?u32 {
     const end = std.math.add(usize, offset, @sizeOf(u32)) catch return null;
     if (end > source.len) return null;
@@ -1756,6 +1899,16 @@ fn validFrameRasterGeometry(command: r4os.abi.GuiFrameCommand) bool {
     if (command.w == 0 or command.h == 0 or command.w > r4os.abi.gui_raster_max_width or command.h > r4os.abi.gui_raster_max_height) return false;
     const pixels = std.math.mul(u64, command.w, command.h) catch return false;
     return pixels <= r4os.abi.gui_raster_max_pixels;
+}
+
+fn validFrameIndexed8Geometry(command: r4os.abi.GuiFrameCommand) bool {
+    if (command.w == 0 or command.h == 0 or command.w > r4os.abi.gui_raster_max_width or command.h > r4os.abi.gui_raster_max_height or
+        command.rgb != 0 or command.fg != 0 or command.bg != 0 or command.font_id != 0 or command.text_w != 0 or command.text_h != 0 or
+        command.baseline != 0 or command.line_height != 0 or command.parameter0 != 0 or command.parameter1 != 0)
+    {
+        return false;
+    }
+    return true;
 }
 
 fn validFrameAlpha8Geometry(command: r4os.abi.GuiFrameCommand) bool {
@@ -1846,16 +1999,111 @@ fn hostedText(ctx: *const desk_api.Context, rect: surface.Rect, text_buf: []cons
     }
 }
 
-pub fn fullscreenConsole(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, instance_id: u32, font_size: u8, codepage: u16, scroll_offset: u32, cursor_blink_on: bool) void {
+pub fn fullscreenConsole(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, snapshot: ?*const TerminalSnapshot, font_size: u8, cursor_blink_on: bool) void {
     const rect: surface.Rect = .{ .x = 0, .y = 0, .w = screen_w, .h = screen_h };
-    if (instance_id != 0) syncConsoleMetrics(ctx, instance_id, rect, font_size);
-    var state: r4os.abi.ConsoleState = .{};
-    if (instance_id == 0 or ctx.consoleState(instance_id, &state) < 0) state = .{};
+    const state = if (snapshot) |cached| if (cached.valid) cached.state else r4os.abi.ConsoleState{} else r4os.abi.ConsoleState{};
     ctx.paintRect(0, 0, @intCast(@max(0, screen_w)), @intCast(@max(0, screen_h)), state.bg);
-    var output: [console_output_render_max]u8 = .{0} ** console_output_render_max;
-    if (instance_id != 0 and ctx.consoleOutput(instance_id, output[0..]) > 0) {
-        const effective_offset = terminalText(ctx, rect, output[0..], font_size, codepage, scroll_offset, state.fg, state.bg);
-        if (effective_offset == 0) terminalCursor(ctx, rect, state, font_size, state.fg, cursor_blink_on);
+    if (snapshot) |cached| if (cached.valid and cached.has_output) {
+        renderTerminalSnapshot(ctx, rect, cached);
+        if (cached.effective_offset == 0) terminalCursor(ctx, rect, state, font_size, state.fg, cursor_blink_on);
+    };
+}
+
+pub fn refreshTerminalSnapshot(
+    ctx: *const desk_api.Context,
+    snapshot: *TerminalSnapshot,
+    instance_id: u32,
+    revision: u32,
+    rect: surface.Rect,
+    font_size: u8,
+    codepage: u16,
+    scroll_offset: u32,
+) TerminalRefreshStats {
+    var stats = TerminalRefreshStats{};
+    snapshot.* = .{
+        .instance_id = instance_id,
+        .revision = revision,
+        .width = rect.w,
+        .height = rect.h,
+        .font_size = font_size,
+        .codepage = codepage,
+        .scroll_offset = scroll_offset,
+    };
+    if (instance_id == 0 or rect.isEmpty()) return stats;
+
+    const metrics = terminalMetrics(rect, font_size);
+    _ = ctx.consoleSetMetrics(instance_id, metrics.cols, metrics.rows);
+    stats.state_reads = 1;
+    if (ctx.consoleState(instance_id, &snapshot.state) < 0) snapshot.state = .{ .fg = theme.text, .bg = theme.client_bg };
+    const output_len = ctx.consoleOutput(instance_id, snapshot.text[0..]);
+    snapshot.valid = true;
+    if (output_len <= 0) return stats;
+
+    const raw_len: usize = @intCast(@min(@as(i32, @intCast(snapshot.text.len)), output_len));
+    stats.output_bytes = @intCast(raw_len);
+    stats.parsed_bytes = @intCast(raw_len);
+    const range = console_scroll.visibleRange(snapshot.text[0..raw_len], metrics.cols, metrics.rows, scroll_offset, codepage);
+    snapshot.effective_offset = range.effective_offset;
+    snapshot.has_output = true;
+    compactVisibleTerminalLines(snapshot, raw_len, @intCast(@min(metrics.cols, @as(u32, terminal_line_max - 1))), range, codepage);
+    stats.visible_lines = @intCast(snapshot.line_count);
+    return stats;
+}
+
+fn compactVisibleTerminalLines(snapshot: *TerminalSnapshot, raw_len: usize, max_chars: usize, range: console_scroll.Range, codepage: u16) void {
+    var line: [terminal_line_max]u8 = .{0} ** terminal_line_max;
+    var line_len: usize = 0;
+    var line_index: u32 = 0;
+    var write_offset: usize = 0;
+    var index: usize = 0;
+    while (index < raw_len and snapshot.text[index] != 0) : (index += 1) {
+        const ch = snapshot.text[index];
+        if (ch == '\r') continue;
+        if (ch == '\n' or line_len >= max_chars or line_len + 1 >= line.len) {
+            storeTerminalSnapshotLine(snapshot, line[0..line_len], line_index, range, &write_offset);
+            line_index += 1;
+            line_len = 0;
+            if (ch == '\n') continue;
+        }
+        if (console_scroll.printable(ch, codepage)) {
+            line[line_len] = ch;
+            line_len += 1;
+        }
+    }
+    if (line_len > 0 or line_index == 0) storeTerminalSnapshotLine(snapshot, line[0..line_len], line_index, range, &write_offset);
+    snapshot.text_len = write_offset;
+}
+
+fn storeTerminalSnapshotLine(snapshot: *TerminalSnapshot, line: []const u8, line_index: u32, range: console_scroll.Range, write_offset: *usize) void {
+    if (line_index < range.start_line or line_index >= range.end_line or snapshot.line_count >= snapshot.lines.len) return;
+    const available = snapshot.text.len - write_offset.*;
+    const len = @min(line.len, @min(available, std.math.maxInt(u16)));
+    if (len != 0) @memcpy(snapshot.text[write_offset.* .. write_offset.* + len], line[0..len]);
+    snapshot.lines[snapshot.line_count] = .{ .offset = @intCast(write_offset.*), .len = @intCast(len) };
+    snapshot.line_count += 1;
+    write_offset.* += len;
+}
+
+fn renderTerminalSnapshot(ctx: *const desk_api.Context, rect: surface.Rect, snapshot: *const TerminalSnapshot) void {
+    const metrics = terminalMetrics(rect, snapshot.font_size);
+    const paint_bounds = ctx.scenePaintBounds() orelse rect;
+    var line_buffer: [terminal_line_max]u8 = .{0} ** terminal_line_max;
+    var index: usize = 0;
+    while (index < snapshot.line_count) : (index += 1) {
+        const item = snapshot.lines[index];
+        const start: usize = item.offset;
+        const len: usize = item.len;
+        if (start + len > snapshot.text_len or len >= line_buffer.len) return;
+        const line_rect = surface.Rect{
+            .x = metrics.x,
+            .y = metrics.y + @as(i32, @intCast(index)) * metrics.line_h,
+            .w = @as(i32, @intCast(len)) * glyph_w,
+            .h = metrics.line_h,
+        };
+        if (!line_rect.intersects(paint_bounds)) continue;
+        @memset(line_buffer[0..], 0);
+        if (len != 0) @memcpy(line_buffer[0..len], snapshot.text[start .. start + len]);
+        ctx.paintText(line_rect.x, line_rect.y, @ptrCast(&line_buffer), snapshot.state.fg, snapshot.state.bg);
     }
 }
 
@@ -2189,6 +2437,27 @@ test "frame raster commands retain per-command geometry limits" {
     try std.testing.expect(!validFrameAlpha8Geometry(.{ .w = r4os.abi.gui_alpha8_max_width + 1, .h = 1 }));
     try std.testing.expect(validFrameArgb32Geometry(.{ .w = r4os.abi.gui_argb32_max_width, .h = 1 }));
     try std.testing.expect(!validFrameArgb32Geometry(.{ .w = r4os.abi.gui_argb32_max_width + 1, .h = 1 }));
+}
+
+test "terminal snapshot compacts only visible parsed lines" {
+    var snapshot = TerminalSnapshot{};
+    const input = "L1\nL2\nL3\nL4\nL5";
+    @memcpy(snapshot.text[0..input.len], input);
+    const range = console_scroll.visibleRange(snapshot.text[0..input.len], 80, 3, 0, 437);
+    compactVisibleTerminalLines(&snapshot, input.len, 80, range, 437);
+    try std.testing.expectEqual(@as(usize, 3), snapshot.line_count);
+    try std.testing.expectEqualStrings("L3", snapshot.text[snapshot.lines[0].offset .. snapshot.lines[0].offset + snapshot.lines[0].len]);
+    try std.testing.expectEqualStrings("L4", snapshot.text[snapshot.lines[1].offset .. snapshot.lines[1].offset + snapshot.lines[1].len]);
+    try std.testing.expectEqualStrings("L5", snapshot.text[snapshot.lines[2].offset .. snapshot.lines[2].offset + snapshot.lines[2].len]);
+    snapshot.valid = true;
+    snapshot.instance_id = 9;
+    snapshot.revision = 7;
+    snapshot.width = 640;
+    snapshot.height = 400;
+    snapshot.font_size = 14;
+    snapshot.codepage = 437;
+    try std.testing.expect(snapshot.matches(9, 7, .{ .x = 100, .y = 200, .w = 640, .h = 400 }, 14, 437, 0));
+    try std.testing.expect(!snapshot.matches(9, 8, .{ .x = 100, .y = 200, .w = 640, .h = 400 }, 14, 437, 0));
 }
 
 test "empty committed frame preserves hosted text fallback" {

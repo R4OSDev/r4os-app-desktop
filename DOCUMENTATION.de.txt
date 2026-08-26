@@ -40,6 +40,23 @@ R4DESK-Remote-Frame-Shadow wird nur bei einem explizit registrierten
 Readback-Konsumenten gepflegt; der erste Konsument erzwingt einen Vollframe,
 der letzte Release verwirft Live- und Mapping-Snapshots.
 
+Gehostete GUI-Frames werden generationstreu gecacht. Folgt auf den aktiven
+Snapshot genau eine append-only Damagegeneration, liest R4DESK nur deren
+Befehle, Ressourcen und bis zu acht Regionen, rebasiert Ressourcenoffsets und
+haengt sie an den bestehenden Snapshot an. Bei Luecken, Altvertrag oder
+Speicherdruck bleibt der vollstaendige Snapshot der sichere Fallback. Nur die
+uebermittelten Clientregionen werden invalidiert. Indexed8-Kommandos werden
+direkt aus Palette und indiziertem Quelltile integer oder fraktional in den
+aktuellen Paintclip gerendert; nicht schneidende Tiles werden vor dem
+Pixelzugriff verworfen.
+
+Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Snapshot mit
+kompakten Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Konsolenstatus,
+Ausgabe und Parsing werden nur bei Revision, Geometrie, Font, Codepage oder
+Scrollposition erneuert. Der 500-ms-Cursorblink verwendet den gecachten
+Status, invalidiert nur den Cursorbalken und komponiert dank Paintclip weder
+unsichtbare Zeilen noch die restliche Terminalflaeche neu.
+
 Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
 Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
 GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,
@@ -58,15 +75,17 @@ gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
 maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
 Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
 
-Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind und
-der Stride-/Damage-/Remote-Demand-Presenttest erfolgreich war, schreibt der
-Desktop die Video-/Eingabe-, Runtime-/Audio- und Present-Erfolgsmarkerdatei
-fuer AUTOEXEC. Fehler schreiben stattdessen einen konkreten Bootstrap- oder
-Fixture-Marker und wechseln ebenfalls in den seriell gespiegelten
-Terminalmodus, damit die restliche Suite Diagnosekontext liefern kann. Nach
-erfolgreicher Abnahme wartet der test-only Desktop kooperativ ohne weiteres
-Rendering bis zum kontrollierten Poweroff. Ohne `/HEADLESS-SUBSYSTEM` wird
-weder das Fixture noch AUTOEXEC vom Desktop gestartet.
+Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind, der
+Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
+und der Stride-/Damage-/Cursorblink-/Remote-Demand-Presenttest erfolgreich
+war, schreibt der Desktop die Video-/Eingabe-, Runtime-/Audio- und Present-
+Erfolgsmarkerdatei fuer AUTOEXEC. Fehler schreiben stattdessen einen konkreten
+Bootstrap- oder Fixture-Marker und wechseln ebenfalls in den seriell
+gespiegelten Terminalmodus, damit die restliche Suite Diagnosekontext liefern
+kann. Nach erfolgreicher Abnahme wartet der test-only Desktop kooperativ ohne
+weiteres Rendering bis zum kontrollierten Poweroff. Ohne
+`/HEADLESS-SUBSYSTEM` wird weder das Fixture noch AUTOEXEC vom Desktop
+gestartet.
 
 Konfiguration
 -------------

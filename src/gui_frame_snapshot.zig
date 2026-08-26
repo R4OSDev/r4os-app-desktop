@@ -14,9 +14,11 @@ pub const RefreshResult = enum {
 pub const View = struct {
     supported: bool = false,
     valid: bool = false,
+    full_damage: bool = true,
     info: r4os.abi.GuiFrameInfo = .{},
     commands: []const r4os.abi.GuiFrameCommand = &.{},
     resources: []const u8 = &.{},
+    damage_regions: []const r4os.abi.DisplayDamageRect = &.{},
 };
 
 const Buffer = struct {
@@ -25,6 +27,9 @@ const Buffer = struct {
     resource_memory: ?[]align(resource_alignment) u8 = null,
     command_len: usize = 0,
     resource_len: usize = 0,
+    damage_regions: [r4os.abi.gui_frame_max_damage_regions]r4os.abi.DisplayDamageRect = .{r4os.abi.DisplayDamageRect{}} ** r4os.abi.gui_frame_max_damage_regions,
+    damage_count: usize = 0,
+    full_damage: bool = true,
     valid: bool = false,
 
     fn commands(self: *Buffer) []r4os.abi.GuiFrameCommand {
@@ -58,8 +63,12 @@ const Buffer = struct {
     fn ensureCommands(self: *Buffer, allocator: std.mem.Allocator, wanted: usize) bool {
         const current = if (self.command_memory) |memory| memory.len else 0;
         if (current >= wanted) return true;
-        const replacement = allocator.alloc(r4os.abi.GuiFrameCommand, wanted) catch return false;
-        if (self.command_memory) |memory| allocator.free(memory);
+        const grown = @max(wanted, @max(@as(usize, 16), current *| 2));
+        const replacement = allocator.alloc(r4os.abi.GuiFrameCommand, grown) catch return false;
+        if (self.command_memory) |memory| {
+            @memcpy(replacement[0..self.command_len], memory[0..self.command_len]);
+            allocator.free(memory);
+        }
         self.command_memory = replacement;
         return true;
     }
@@ -67,8 +76,12 @@ const Buffer = struct {
     fn ensureResources(self: *Buffer, allocator: std.mem.Allocator, wanted: usize) bool {
         const current = if (self.resource_memory) |memory| memory.len else 0;
         if (current >= wanted) return true;
-        const replacement = allocator.alignedAlloc(u8, .fromByteUnits(resource_alignment), wanted) catch return false;
-        if (self.resource_memory) |memory| allocator.free(memory);
+        const grown = @max(wanted, @max(@as(usize, 4096), current *| 2));
+        const replacement = allocator.alignedAlloc(u8, .fromByteUnits(resource_alignment), grown) catch return false;
+        if (self.resource_memory) |memory| {
+            @memcpy(replacement[0..self.resource_len], memory[0..self.resource_len]);
+            allocator.free(memory);
+        }
         self.resource_memory = replacement;
         return true;
     }
@@ -86,6 +99,11 @@ pub const Cache = struct {
     staging: Buffer = .{},
     pending: bool = false,
     out_of_memory: bool = false,
+    delta_refreshes: u64 = 0,
+    full_refreshes: u64 = 0,
+    delta_fallbacks: u64 = 0,
+    appended_commands: u64 = 0,
+    appended_resource_bytes: u64 = 0,
 
     pub fn bind(self: *Cache, allocator: std.mem.Allocator, owner: r4os.abi.ProgramProcessHandle) void {
         if (sameHandle(self.owner, owner)) {
@@ -110,10 +128,13 @@ pub const Cache = struct {
     pub fn view(self: *const Cache) View {
         if (!self.active.valid) return .{};
         return .{
+            .supported = true,
             .valid = true,
+            .full_damage = self.active.full_damage,
             .info = self.active.info,
             .commands = self.active.constCommands(),
             .resources = self.active.constResources(),
+            .damage_regions = self.active.damage_regions[0..self.active.damage_count],
         };
     }
 
@@ -141,6 +162,21 @@ pub const Cache = struct {
             self.pending = false;
             self.out_of_memory = false;
             return .unchanged;
+        }
+
+        var generation_info: r4os.abi.GuiFrameGenerationInfo = .{};
+        const generation_rc = reader.guiFrameGenerationInfo(&self.owner, info.committed_generation, &generation_info);
+        const generation_valid = generation_rc == r4os.abi.gui_frame_result_ok and
+            validGenerationInfo(generation_info, self.owner, info);
+        if (generation_valid and self.active.valid and
+            (generation_info.flags & r4os.abi.gui_frame_generation_flag_delta) != 0 and
+            generation_info.base_generation == self.active.info.committed_generation)
+        {
+            const delta_result = self.appendDelta(allocator, reader, info, generation_info);
+            if (delta_result != .retry) return delta_result;
+            self.delta_fallbacks +%= 1;
+        } else if (self.active.valid and info.committed_generation != self.active.info.committed_generation) {
+            self.delta_fallbacks +%= 1;
         }
 
         const command_count = std.math.cast(usize, info.committed_command_count) orelse {
@@ -180,6 +216,8 @@ pub const Cache = struct {
         }
 
         self.staging.info = read_info;
+        self.staging.full_damage = true;
+        self.staging.damage_count = 0;
         self.staging.valid = true;
         std.mem.swap(Buffer, &self.active, &self.staging);
         self.staging.valid = false;
@@ -188,6 +226,76 @@ pub const Cache = struct {
         self.releaseOversizedStaging(allocator);
         self.pending = false;
         self.out_of_memory = false;
+        self.full_refreshes +%= 1;
+        return .updated;
+    }
+
+    fn appendDelta(self: *Cache, allocator: std.mem.Allocator, reader: anytype, info: r4os.abi.GuiFrameInfo, generation_info: r4os.abi.GuiFrameGenerationInfo) RefreshResult {
+        const command_count = std.math.cast(usize, generation_info.command_count) orelse return .retry;
+        const resource_bytes = std.math.cast(usize, generation_info.resource_bytes) orelse return .retry;
+        const total_command_count = std.math.cast(usize, generation_info.total_command_count) orelse return .retry;
+        const total_resource_bytes = std.math.cast(usize, generation_info.total_resource_bytes) orelse return .retry;
+        const expected_commands = std.math.add(usize, self.active.command_len, command_count) catch return .retry;
+        const expected_resources = std.math.add(usize, self.active.resource_len, resource_bytes) catch return .retry;
+        if (expected_commands != total_command_count or expected_resources != total_resource_bytes or
+            info.committed_command_count != total_command_count or info.committed_resource_bytes != total_resource_bytes)
+        {
+            return .retry;
+        }
+        if (!self.active.ensureCommands(allocator, total_command_count) or !self.active.ensureResources(allocator, total_resource_bytes)) {
+            self.pending = true;
+            self.out_of_memory = true;
+            return .retry;
+        }
+
+        const command_base = self.active.command_len;
+        const resource_base = self.active.resource_len;
+        var read_info: r4os.abi.GuiFrameGenerationInfo = .{};
+        var damage_regions: [r4os.abi.gui_frame_max_damage_regions]r4os.abi.DisplayDamageRect = undefined;
+        const command_memory = self.active.command_memory orelse return .retry;
+        var empty_resource: [0]u8 = .{};
+        const resource_target: []u8 = if (self.active.resource_memory) |memory|
+            memory[resource_base..total_resource_bytes]
+        else if (resource_bytes == 0)
+            empty_resource[0..]
+        else
+            return .retry;
+        const rc = reader.guiFrameGenerationRead(
+            &self.owner,
+            generation_info.generation,
+            command_memory[command_base..total_command_count],
+            resource_target,
+            damage_regions[0..],
+            &read_info,
+        );
+        if (rc != r4os.abi.gui_frame_result_ok or !validGenerationInfo(read_info, self.owner, info) or
+            read_info.generation != generation_info.generation or read_info.base_generation != generation_info.base_generation or
+            read_info.command_count != generation_info.command_count or read_info.resource_bytes != generation_info.resource_bytes or
+            read_info.damage_count > damage_regions.len)
+        {
+            self.pending = true;
+            return .retry;
+        }
+
+        for (command_memory[command_base..total_command_count]) |*command| {
+            if (command.resource_bytes == 0) continue;
+            command.resource_offset = std.math.add(u64, command.resource_offset, resource_base) catch {
+                self.pending = true;
+                return .retry;
+            };
+        }
+        self.active.command_len = total_command_count;
+        self.active.resource_len = total_resource_bytes;
+        self.active.info = info;
+        self.active.full_damage = false;
+        self.active.damage_count = read_info.damage_count;
+        @memcpy(self.active.damage_regions[0..self.active.damage_count], damage_regions[0..self.active.damage_count]);
+        self.active.valid = true;
+        self.pending = false;
+        self.out_of_memory = false;
+        self.delta_refreshes +%= 1;
+        self.appended_commands +%= command_count;
+        self.appended_resource_bytes +%= resource_bytes;
         return .updated;
     }
 
@@ -218,12 +326,29 @@ fn validInfo(info: r4os.abi.GuiFrameInfo, owner: r4os.abi.ProgramProcessHandle) 
         sameHandle(info.owner, owner);
 }
 
+fn validGenerationInfo(info: r4os.abi.GuiFrameGenerationInfo, owner: r4os.abi.ProgramProcessHandle, frame: r4os.abi.GuiFrameInfo) bool {
+    return info.version >= r4os.abi.gui_frame_generation_info_version and
+        info.size >= r4os.abi.gui_frame_generation_info_size and
+        info.command_version == r4os.abi.gui_frame_command_version and
+        info.command_size == r4os.abi.gui_frame_command_size and
+        info.region_size == @sizeOf(r4os.abi.DisplayDamageRect) and
+        info.generation == frame.committed_generation and
+        info.total_command_count == frame.committed_command_count and
+        info.total_resource_bytes == frame.committed_resource_bytes and
+        sameHandle(info.owner, owner);
+}
+
 const FakeReader = struct {
     info: r4os.abi.GuiFrameInfo,
     commands: []const r4os.abi.GuiFrameCommand,
     resources: []const u8,
     stale_once: bool = false,
     reads: usize = 0,
+    generation_supported: bool = false,
+    generation_info: r4os.abi.GuiFrameGenerationInfo = .{},
+    generation_commands: []const r4os.abi.GuiFrameCommand = &.{},
+    generation_resources: []const u8 = &.{},
+    generation_regions: []const r4os.abi.DisplayDamageRect = &.{},
 
     fn guiFrameInfo(self: *FakeReader, handle: *const r4os.abi.ProgramProcessHandle, out: *r4os.abi.GuiFrameInfo) i32 {
         if (!sameHandle(handle.*, self.info.owner)) return r4os.abi.gui_frame_error_invalid;
@@ -252,6 +377,31 @@ const FakeReader = struct {
         @memcpy(resources[0..self.resources.len], self.resources);
         return r4os.abi.gui_frame_result_ok;
     }
+
+    fn guiFrameGenerationInfo(self: *FakeReader, handle: *const r4os.abi.ProgramProcessHandle, generation: u64, out: *r4os.abi.GuiFrameGenerationInfo) i32 {
+        if (!self.generation_supported) return r4os.abi.err_no_fn;
+        if (!sameHandle(handle.*, self.info.owner) or generation != self.generation_info.generation) return r4os.abi.gui_frame_error_stale;
+        out.* = self.generation_info;
+        return r4os.abi.gui_frame_result_ok;
+    }
+
+    fn guiFrameGenerationRead(
+        self: *FakeReader,
+        handle: *const r4os.abi.ProgramProcessHandle,
+        generation: u64,
+        commands: []r4os.abi.GuiFrameCommand,
+        resources: []u8,
+        regions: []r4os.abi.DisplayDamageRect,
+        out: *r4os.abi.GuiFrameGenerationInfo,
+    ) i32 {
+        if (!self.generation_supported or !sameHandle(handle.*, self.info.owner) or generation != self.generation_info.generation) return r4os.abi.gui_frame_error_stale;
+        if (commands.len < self.generation_commands.len or resources.len < self.generation_resources.len or regions.len < self.generation_regions.len) return r4os.abi.gui_frame_error_buffer_too_small;
+        @memcpy(commands[0..self.generation_commands.len], self.generation_commands);
+        @memcpy(resources[0..self.generation_resources.len], self.generation_resources);
+        @memcpy(regions[0..self.generation_regions.len], self.generation_regions);
+        out.* = self.generation_info;
+        return r4os.abi.gui_frame_result_ok;
+    }
 };
 
 fn fakeInfo(owner: r4os.abi.ProgramProcessHandle, generation: u64, command_count: usize, resource_bytes: usize) r4os.abi.GuiFrameInfo {
@@ -261,6 +411,20 @@ fn fakeInfo(owner: r4os.abi.ProgramProcessHandle, generation: u64, command_count
         .committed_generation = generation,
         .committed_command_count = command_count,
         .committed_resource_bytes = resource_bytes,
+    };
+}
+
+fn fakeGenerationInfo(owner: r4os.abi.ProgramProcessHandle, generation: u64, base_generation: u64, command_count: usize, resource_bytes: usize, total_command_count: usize, total_resource_bytes: usize, damage_count: usize) r4os.abi.GuiFrameGenerationInfo {
+    return .{
+        .flags = if (base_generation == 0) r4os.abi.gui_frame_generation_flag_full else r4os.abi.gui_frame_generation_flag_delta,
+        .damage_count = @intCast(damage_count),
+        .owner = owner,
+        .generation = generation,
+        .base_generation = base_generation,
+        .command_count = command_count,
+        .resource_bytes = resource_bytes,
+        .total_command_count = total_command_count,
+        .total_resource_bytes = total_resource_bytes,
     };
 }
 
@@ -372,6 +536,52 @@ test "snapshot cache has no legacy command-count ceiling" {
     try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
     try std.testing.expectEqual(@as(usize, 2048), cache.view().commands.len);
     try std.testing.expectEqual(@as(u32, 2047), cache.view().commands[2047].rgb);
+}
+
+test "snapshot cache appends one delta generation and preserves regional damage" {
+    const allocator = std.testing.allocator;
+    const owner = r4os.abi.ProgramProcessHandle{ .instance_id = 21, .generation = 5 };
+    const base_commands = [_]r4os.abi.GuiFrameCommand{.{
+        .kind = r4os.abi.gui_frame_command_kind_text,
+        .resource_bytes = 1,
+    }};
+    const delta_commands = [_]r4os.abi.GuiFrameCommand{.{
+        .kind = r4os.abi.gui_frame_command_kind_text,
+        .resource_bytes = 2,
+    }};
+    const damage = [_]r4os.abi.DisplayDamageRect{
+        .{ .x = 1, .y = 2, .w = 3, .h = 4 },
+        .{ .x = 40, .y = 50, .w = 2, .h = 2 },
+    };
+    var reader = FakeReader{
+        .info = fakeInfo(owner, 1, 1, 1),
+        .commands = base_commands[0..],
+        .resources = "A",
+    };
+    var cache = Cache{};
+    defer cache.deinit(allocator);
+    cache.bind(allocator, owner);
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+
+    reader.info = fakeInfo(owner, 2, 2, 3);
+    reader.commands = &.{};
+    reader.resources = &.{};
+    reader.generation_supported = true;
+    reader.generation_info = fakeGenerationInfo(owner, 2, 1, 1, 2, 2, 3, damage.len);
+    reader.generation_commands = delta_commands[0..];
+    reader.generation_resources = "BC";
+    reader.generation_regions = damage[0..];
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+
+    const view = cache.view();
+    try std.testing.expect(!view.full_damage);
+    try std.testing.expectEqual(@as(usize, 2), view.commands.len);
+    try std.testing.expectEqual(@as(u64, 1), view.commands[1].resource_offset);
+    try std.testing.expectEqualStrings("ABC", view.resources);
+    try std.testing.expectEqualSlices(r4os.abi.DisplayDamageRect, damage[0..], view.damage_regions);
+    try std.testing.expectEqual(@as(u64, 1), cache.delta_refreshes);
+    try std.testing.expectEqual(@as(u64, 1), cache.appended_commands);
+    try std.testing.expectEqual(@as(u64, 2), cache.appended_resource_bytes);
 }
 
 comptime {

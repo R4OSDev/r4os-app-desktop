@@ -140,9 +140,9 @@ const r4basic_baseline_guest_path = "C:\\TEMP\\GORILLA.BAS";
 const r4basic_baseline_marker_path = "C:\\TEMP\\R4BASIC.BASELINE";
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
-    "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
+    "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=translated idle=no-frame fps>=20\r\n" ++
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
-    "DESKTOP present selftest: OK regions=2 fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
+    "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -278,6 +278,7 @@ pub const App = struct {
     console_path: [console_path_max + 1]u8 = .{0} ** (console_path_max + 1),
     console_args: [console_args_max + 1]u8 = .{0} ** (console_args_max + 1),
     console_scrolls: [4]ConsoleScrollState = .{ConsoleScrollState{}} ** 4,
+    console_snapshots: [4]draw.TerminalSnapshot = .{draw.TerminalSnapshot{}} ** 4,
     dialog_title: [message_box.title_buffer_len]u8 = .{0} ** message_box.title_buffer_len,
     dialog_text: [message_box.text_buffer_len]u8 = .{0} ** message_box.text_buffer_len,
     app_error_title: [message_box.title_buffer_len]u8 = .{0} ** message_box.title_buffer_len,
@@ -2069,6 +2070,38 @@ pub const App = struct {
             return self.headlessSubsystemFailure("present-fence-completion");
         }
 
+        const cursor_blink = draw.terminalCursorRect(
+            .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h },
+            .{ .cursor_x = 3, .cursor_y = 2, .cursor_visible = 1 },
+            self.config.terminal_font_size,
+        );
+        if (cursor_blink.isEmpty()) return self.headlessSubsystemFailure("present-cursorblink-geometry");
+        const cursor_lost_before = self.render_stats.present_lost_frames;
+        const cursor_fallback_before = self.render_stats.present_backend_fallbacks;
+        self.presentDamageRegionsTimed((&cursor_blink)[0..1], .cursor, self.ctx.ticks());
+        if (self.render_stats.last_damage_kind != .cursor or
+            self.render_stats.damage_regions_last != 1 or
+            self.render_stats.last_damage_rect.x != cursor_blink.x or
+            self.render_stats.last_damage_rect.y != cursor_blink.y or
+            self.render_stats.last_damage_rect.w != cursor_blink.w or
+            self.render_stats.last_damage_rect.h != cursor_blink.h or
+            self.render_stats.last_damage_pixels != @as(u32, @intCast(rectArea(cursor_blink))) or
+            self.render_stats.display_blit_calls_last != 1 or
+            self.render_stats.present_generation_last == 0 or
+            self.render_stats.present_fence_last == 0 or
+            self.render_stats.present_lost_frames != cursor_lost_before or
+            self.render_stats.present_backend_fallbacks != cursor_fallback_before)
+        {
+            return self.headlessSubsystemFailure("present-cursorblink-regional");
+        }
+        completion = .{};
+        if (self.ctx.displayPresentCompletion(self.render_stats.present_fence_last, &completion) != 0 or
+            (completion.flags & r4os.abi.display_present_completion_complete) == 0 or
+            completion.completed_fence < self.render_stats.present_fence_last)
+        {
+            return self.headlessSubsystemFailure("present-cursorblink-fence");
+        }
+
         const acquire_rc = self.ctx.remoteFrameAcquire();
         if (acquire_rc <= 0) return self.headlessSubsystemFailure("present-demand-acquire");
         self.remote_frame_consumers = @intCast(acquire_rc);
@@ -2371,6 +2404,7 @@ pub const App = struct {
         const host_launch_changed = self.syncHostLaunchRequests();
         const gui_changed = self.syncGuiRevisions();
         const console_changed = self.syncConsoleRevision();
+        self.refreshConsoleSnapshots();
         const display_changed = self.syncDisplayRevision();
         const keyboard_layout_changed = self.updateKeyboardLayout();
         const time_config_changed = self.syncTimeConfig();
@@ -3276,6 +3310,7 @@ pub const App = struct {
         );
         const scene_ready = self.ensureSceneBuffer();
         const console_scroll_offsets = self.consoleScrollOffsets();
+        self.refreshConsoleSnapshots();
         const gui_frame_views = self.guiFrameViews();
         const compose_start = self.ctx.ticks();
         const compose_start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
@@ -3389,6 +3424,7 @@ pub const App = struct {
             zptr(self.console_path[0..]),
             zptr(self.console_args[0..]),
             console_scroll_offsets,
+            self.console_snapshots[0..],
             self.wallpaper_state.view(),
             self.config,
             self.config.terminal_font_size,
@@ -4467,13 +4503,7 @@ pub const App = struct {
                 const appearance_changed = self.syncAppearanceSignal(i);
                 const title_changed = self.syncGuiTitle(i);
                 const size_changed = self.syncGuiMinSize(i);
-                if (!size_changed and !appearance_changed) {
-                    if (title_changed) {
-                        self.invalidateWindow(i);
-                    } else {
-                        self.invalidateWindowClient(i);
-                    }
-                }
+                if (title_changed and !size_changed and !appearance_changed) self.invalidateWindow(i);
                 changed = true;
             }
             if (self.syncGuiFrameSnapshot(i)) changed = true;
@@ -4491,11 +4521,32 @@ pub const App = struct {
         if (!cache.pending) return false;
         return switch (cache.refresh(self.ctx.allocator(), self.ctx)) {
             .updated => blk: {
-                self.invalidateWindowClient(index);
+                self.invalidateGuiFrameDamage(index, cache.view());
                 break :blk true;
             },
             .unchanged, .no_frame, .retry => false,
         };
+    }
+
+    fn invalidateGuiFrameDamage(self: *App, index: usize, frame: gui_frame_snapshot.View) void {
+        if (index >= self.windows.len or frame.full_damage or frame.damage_regions.len == 0) {
+            self.invalidateWindowClient(index);
+            return;
+        }
+        const client = self.windows[index].clientSurface().rect;
+        for (frame.damage_regions) |region| {
+            const left = @max(@as(i64, 0), region.x);
+            const top = @max(@as(i64, 0), region.y);
+            const right = @min(@as(i64, client.w), @as(i64, region.x) + region.w);
+            const bottom = @min(@as(i64, client.h), @as(i64, region.y) + region.h);
+            if (right <= left or bottom <= top) continue;
+            self.damage.invalidate(.{
+                .x = client.x + @as(i32, @intCast(left)),
+                .y = client.y + @as(i32, @intCast(top)),
+                .w = @intCast(right - left),
+                .h = @intCast(bottom - top),
+            });
+        }
     }
 
     fn syncAppearanceSignal(self: *App, index: usize) bool {
@@ -5375,19 +5426,63 @@ pub const App = struct {
         return changed;
     }
 
-    fn consoleCursorRectForWindow(self: *const App, index: usize, fullscreen: bool) ?surface.Rect {
+    fn consoleCursorRectForWindow(self: *App, index: usize, fullscreen: bool) ?surface.Rect {
         if (index >= self.windows.len) return null;
         const instance_id = self.windows[index].instance_id;
         if (instance_id == 0) return null;
-        var state: r4os.abi.ConsoleState = .{};
-        if (self.ctx.consoleState(instance_id, &state) < 0 or state.cursor_visible == 0) return null;
+        const snapshot = &self.console_snapshots[index];
+        if (!snapshot.valid or snapshot.instance_id != instance_id) {
+            self.render_stats.console_cursor_cache_misses +%= 1;
+            return null;
+        }
+        if (snapshot.effective_offset != 0 or snapshot.state.cursor_visible == 0) return null;
         const bounds: surface.Rect = if (fullscreen)
             .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h }
         else
             self.windows[index].clientSurface().rect;
-        const rect = draw.terminalCursorRect(bounds, state, self.config.terminal_font_size);
+        const rect = draw.terminalCursorRect(bounds, snapshot.state, self.config.terminal_font_size);
         if (rect.isEmpty()) return null;
         return rect;
+    }
+
+    fn refreshConsoleSnapshots(self: *App) void {
+        var index: usize = 0;
+        while (index < self.windows.len and index < self.console_snapshots.len) : (index += 1) {
+            const win = &self.windows[index];
+            const visible = if (self.terminal_mode)
+                index == 0 and win.instance_id != 0
+            else
+                win.kind == .terminal and win.instance_id != 0 and win.visible and !win.minimized;
+            if (!visible) {
+                self.console_snapshots[index].invalidate();
+                continue;
+            }
+            const rect: surface.Rect = if (self.terminal_mode and index == 0)
+                .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h }
+            else
+                win.clientSurface().rect;
+            const scroll_offset = self.console_scrolls[index].offset;
+            const snapshot = &self.console_snapshots[index];
+            if (snapshot.matches(win.instance_id, win.gui_revision, rect, self.config.terminal_font_size, self.config.terminal_codepage, scroll_offset)) {
+                self.render_stats.console_snapshot_hits +%= 1;
+                continue;
+            }
+            const stats = draw.refreshTerminalSnapshot(
+                self.ctx,
+                snapshot,
+                win.instance_id,
+                win.gui_revision,
+                rect,
+                self.config.terminal_font_size,
+                self.config.terminal_codepage,
+                scroll_offset,
+            );
+            self.render_stats.console_snapshot_refreshes +%= 1;
+            self.render_stats.console_state_reads +%= stats.state_reads;
+            self.render_stats.console_output_bytes +%= stats.output_bytes;
+            self.render_stats.console_parse_bytes +%= stats.parsed_bytes;
+            self.render_stats.console_visible_lines +%= stats.visible_lines;
+        }
     }
 
     fn invalidateTaskbar(self: *App) void {

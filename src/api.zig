@@ -252,6 +252,27 @@ pub const Context = struct {
         return self.draw.guiFrameRead(handle, expected_generation, commands, resources, out);
     }
 
+    pub fn guiFrameGenerationInfo(
+        self: *const Context,
+        handle: *const r4os.abi.ProgramProcessHandle,
+        generation: u64,
+        out: *r4os.abi.GuiFrameGenerationInfo,
+    ) i32 {
+        return self.draw.guiFrameGenerationInfo(handle, generation, out);
+    }
+
+    pub fn guiFrameGenerationRead(
+        self: *const Context,
+        handle: *const r4os.abi.ProgramProcessHandle,
+        generation: u64,
+        commands: []r4os.abi.GuiFrameCommand,
+        resources: []u8,
+        regions: []r4os.abi.DisplayDamageRect,
+        out: *r4os.abi.GuiFrameGenerationInfo,
+    ) i32 {
+        return self.draw.guiFrameGenerationRead(handle, generation, commands, resources, regions, out);
+    }
+
     pub fn guiTitle(self: *const Context, instance_id: u32, out: []u8) i32 {
         return self.desk.guiTitle(instance_id, out);
     }

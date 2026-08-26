@@ -90,6 +90,7 @@ pub fn compose(
     console_path: [*:0]const u8,
     console_args: [*:0]const u8,
     console_scroll_offsets: []const u32,
+    console_snapshots: []const draw.TerminalSnapshot,
     wallpaper_view: wallpaper.View,
     config: desktop_config.Config,
     terminal_font_size: u8,
@@ -107,9 +108,8 @@ pub fn compose(
 
     if (terminal_mode) {
         if (layerVisible(&stats, damage, desktop_rect)) {
-            const instance_id = if (windows.len > 0) windows[0].instance_id else 0;
-            const scroll_offset = if (console_scroll_offsets.len > 0) console_scroll_offsets[0] else 0;
-            draw.fullscreenConsole(ctx, screen_w, screen_h, instance_id, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on);
+            const snapshot = if (console_snapshots.len > 0) &console_snapshots[0] else null;
+            draw.fullscreenConsole(ctx, screen_w, screen_h, snapshot, terminal_font_size, cursor_blink_on);
         }
         return stats;
     }
@@ -150,7 +150,7 @@ pub fn compose(
     }
 
     if (layerVisible(&stats, damage, surface.workArea(screen_w, screen_h, theme.taskbar_h))) {
-        drawWindows(ctx, windows, gui_frames, active_window, console_title, console_path, console_args, console_scroll_offsets, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, &stats);
+        drawWindows(ctx, windows, gui_frames, active_window, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, &stats);
     } else {
         countCulledWindows(windows, &stats);
     }
@@ -232,6 +232,7 @@ fn drawWindows(
     console_path: [*:0]const u8,
     console_args: [*:0]const u8,
     console_scroll_offsets: []const u32,
+    console_snapshots: []const draw.TerminalSnapshot,
     terminal_font_size: u8,
     terminal_codepage: u16,
     cursor_blink_on: bool,
@@ -242,10 +243,10 @@ fn drawWindows(
 ) void {
     for (windows, 0..) |*win, index| {
         if (index == active_window) continue;
-        drawWindow(ctx, win, gui_frames, index, false, console_title, console_path, console_args, console_scroll_offsets, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
+        drawWindow(ctx, win, gui_frames, index, false, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
     }
     if (active_window < windows.len) {
-        drawWindow(ctx, &windows[active_window], gui_frames, active_window, true, console_title, console_path, console_args, console_scroll_offsets, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
+        drawWindow(ctx, &windows[active_window], gui_frames, active_window, true, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
     }
 }
 
@@ -259,6 +260,7 @@ fn drawWindow(
     console_path: [*:0]const u8,
     console_args: [*:0]const u8,
     console_scroll_offsets: []const u32,
+    console_snapshots: []const draw.TerminalSnapshot,
     terminal_font_size: u8,
     terminal_codepage: u16,
     cursor_blink_on: bool,
@@ -274,12 +276,13 @@ fn drawWindow(
         return;
     }
     const scroll_offset = if (index < console_scroll_offsets.len) console_scroll_offsets[index] else 0;
+    const console_snapshot = if (index < console_snapshots.len) &console_snapshots[index] else null;
     const gui_frame = if (index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
     if (gui_frame.valid) {
         stats.gui_frame_commands +%= @intCast(gui_frame.commands.len);
         stats.gui_resource_bytes +%= @intCast(gui_frame.resources.len);
     }
-    draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
 }
 
 fn countCulledWindows(windows: []const window.Window, stats: *CullStats) void {
