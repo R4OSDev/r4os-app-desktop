@@ -7278,12 +7278,15 @@ fn isAppKey(key: u32) bool {
         key == r4os.gui.Key.delete or
         key == r4os.gui.Key.up or
         key == r4os.gui.Key.down or
+        key == r4os.gui.Key.f3 or
+        key == r4os.gui.Key.shift_tab or
         key == r4os.gui.Key.left or
         key == r4os.gui.Key.right or
         key == r4os.gui.Key.home or
         key == r4os.gui.Key.end or
         key == r4os.gui.Key.page_up or
-        key == r4os.gui.Key.page_down;
+        key == r4os.gui.Key.page_down or
+        key == r4os.gui.Key.f10;
 }
 
 fn isConsoleKey(key: u32) bool {
