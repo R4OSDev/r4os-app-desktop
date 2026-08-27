@@ -50,6 +50,12 @@ direkt aus Palette und indiziertem Quelltile integer oder fraktional in den
 aktuellen Paintclip gerendert; nicht schneidende Tiles werden vor dem
 Pixelzugriff verworfen.
 
+Textbefehle gehosteter GUI-Frames rasterisieren jede den aktuellen Damage-
+und Clientclip schneidende Glyphenzelle. Nur die sichtbaren Teilpixel werden
+uebernommen; dadurch liefern Vollkomposition und regionale Komposition an
+allen Glyphenkanten dasselbe Bild, ohne Pixel ausserhalb des Clips zu
+veraendern. Diese Regel gilt fuer den eingebauten und installierte Fonts.
+
 Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Snapshot mit
 kompakten Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Konsolenstatus,
 Ausgabe und Parsing werden nur bei Revision, Geometrie, Font, Codepage oder

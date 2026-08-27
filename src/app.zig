@@ -13,6 +13,7 @@ const draw = @import("draw.zig");
 const gui_frame_snapshot = @import("gui_frame_snapshot.zig");
 const message_box = @import("message_box.zig");
 const model = @import("model.zig");
+const paint = @import("paint.zig");
 const quick_launch = @import("quick_launch.zig");
 const run_command = @import("run_command.zig");
 const scene_buffer = @import("scene_buffer.zig");
@@ -2174,6 +2175,7 @@ pub const App = struct {
         if (!self.ctx.supportsRemoteFrameRegions()) return self.headlessSubsystemFailure("present-remote-regions-api");
         if (!self.ctx.supportsRemoteFrameDemand()) return self.headlessSubsystemFailure("present-demand-api");
         if (self.ctx.remoteFrameConsumers() != 0) return self.headlessSubsystemFailure("present-demand-initial");
+        if (!self.smokeTextDamageContract()) return false;
 
         var capabilities: r4os.abi.DisplayPresentCapabilities = .{};
         if (self.ctx.displayPresentCapabilities(&capabilities) != 0 or
@@ -2293,6 +2295,67 @@ pub const App = struct {
         var released_info: r4os.abi.RemoteFrameInfo = .{};
         if (self.render_stats.remote_shadow_copies_last != 0 or self.ctx.remoteFrameInfo(&released_info) == 0) {
             return self.headlessSubsystemFailure("present-shadow-release");
+        }
+        return true;
+    }
+
+    fn smokeTextDamageContract(self: *App) bool {
+        var font_id: u32 = r4os.abi.gui_font_builtin_id;
+        var font_info: r4os.abi.GuiFontInfo = .{};
+        var index: u32 = 1;
+        while (index < self.ctx.draw.fontCount()) : (index += 1) {
+            var candidate: r4os.abi.GuiFontInfo = .{};
+            if (self.ctx.draw.fontInfo(index, &candidate) <= 0 or
+                (candidate.flags & r4os.abi.gui_font_flag_renderable) == 0)
+            {
+                continue;
+            }
+            font_id = candidate.id;
+            font_info = candidate;
+            break;
+        }
+        if (font_id == r4os.abi.gui_font_builtin_id) return self.headlessSubsystemFailure("present-text-installed-font");
+
+        const canvas_w: i32 = 64;
+        const canvas_h: i32 = 64;
+        const pixel_count: usize = @intCast(canvas_w * canvas_h);
+        const allocator = self.ctx.allocator();
+        const reference = allocator.alloc(u32, pixel_count) catch return self.headlessSubsystemFailure("present-text-reference-memory");
+        defer allocator.free(reference);
+        const actual = allocator.alloc(u32, pixel_count) catch return self.headlessSubsystemFailure("present-text-actual-memory");
+        defer allocator.free(actual);
+
+        const untouched: u32 = 0x0012_3456;
+        @memset(reference, untouched);
+        var reference_scene = scene_buffer.SceneBuffer{};
+        if (!reference_scene.attach(std.mem.sliceAsBytes(reference), canvas_w, canvas_h)) return self.headlessSubsystemFailure("present-text-reference-scene");
+        const bounds = surface.Rect{ .x = 0, .y = 0, .w = canvas_w, .h = canvas_h };
+        paint.textFontSliceScene(&reference_scene, &self.ctx.draw, font_id, 8, 8, "A", 0x00FF_FFFF, 0, bounds);
+
+        const cell_w: i32 = @intCast(@min(@max(@as(u32, 1), font_info.max_advance), @as(u32, 40)));
+        const cell_h: i32 = @intCast(@min(@max(@max(@as(u32, 1), font_info.height), font_info.line_height), @as(u32, 40)));
+        const clips = [_]surface.Rect{
+            .{ .x = 8, .y = 8 + @divTrunc(cell_h, 2), .w = 1, .h = 1 },
+            .{ .x = 8 + cell_w - 1, .y = 8 + @divTrunc(cell_h, 2), .w = 1, .h = 1 },
+            .{ .x = 8 + @divTrunc(cell_w, 2), .y = 8, .w = 1, .h = 1 },
+            .{ .x = 8 + @divTrunc(cell_w, 2), .y = 8 + cell_h - 1, .w = 1, .h = 1 },
+        };
+        for (clips) |clip| {
+            @memset(actual, untouched);
+            var scene = scene_buffer.SceneBuffer{};
+            if (!scene.attach(std.mem.sliceAsBytes(actual), canvas_w, canvas_h)) return self.headlessSubsystemFailure("present-text-damage-scene");
+            scene.setPaintClip(clip);
+            paint.textFontSliceScene(&scene, &self.ctx.draw, font_id, 8, 8, "A", 0x00FF_FFFF, 0, clip);
+
+            var y: i32 = 0;
+            while (y < canvas_h) : (y += 1) {
+                var x: i32 = 0;
+                while (x < canvas_w) : (x += 1) {
+                    const pixel_index: usize = @intCast(y * canvas_w + x);
+                    const expected = if (clip.contains(x, y)) reference[pixel_index] else untouched;
+                    if (actual[pixel_index] != expected) return self.headlessSubsystemFailure("present-text-glyph-edge");
+                }
+            }
         }
         return true;
     }

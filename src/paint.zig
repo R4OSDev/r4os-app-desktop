@@ -140,7 +140,7 @@ pub fn textFontSlice(
             py = addCoordinate(py, line_h);
             continue;
         }
-        if (cellInside(bounds, px, py, advance, line_h)) glyph(draw, font_id, layout, px, py, decoded.codepoint, fg, bg);
+        glyphClipped(draw, font_id, layout, px, py, decoded.codepoint, fg, bg, bounds);
         px = addCoordinate(px, advance);
     }
 }
@@ -172,7 +172,7 @@ pub fn textFontSliceScene(
             py = addCoordinate(py, line_h);
             continue;
         }
-        if (cellInside(bounds, px, py, advance, line_h)) glyphScene(scene, draw, font_id, layout, px, py, decoded.codepoint, fg, bg);
+        glyphSceneClipped(scene, draw, font_id, layout, px, py, decoded.codepoint, fg, bg, bounds);
         px = addCoordinate(px, advance);
     }
 }
@@ -180,12 +180,6 @@ pub fn textFontSliceScene(
 fn addCoordinate(value: i32, delta: i32) i32 {
     return std.math.add(i32, value, delta) catch
         if (delta >= 0) std.math.maxInt(i32) else std.math.minInt(i32);
-}
-
-fn cellInside(bounds: surface.Rect, x: i32, y: i32, w: i32, h: i32) bool {
-    const right = std.math.add(i32, x, w) catch return false;
-    const bottom = std.math.add(i32, y, h) catch return false;
-    return x >= bounds.x and y >= bounds.y and right <= bounds.right() and bottom <= bounds.bottom();
 }
 
 const FontLayout = struct {
@@ -214,23 +208,7 @@ fn glyph(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: 
     const screen_h: i32 = @intCast(draw.screenHeight());
     if (x >= screen_w or y >= screen_h) return;
 
-    var row: usize = 0;
-    while (row < h) : (row += 1) {
-        const source_row: u64 = if (layout.imported and row < layout.bitmap_height)
-            draw.fontGlyphRow(font_id, codepoint, @intCast(row))
-        else
-            0;
-        var col: usize = 0;
-        while (col < w) : (col += 1) {
-            const bit = if (layout.imported)
-                (source_row & (@as(u64, 1) << @intCast(col))) != 0
-            else if (row < glyph_base_h and col < glyph_base_w)
-                (glyphPattern(codepoint)[row] & (@as(u8, 0x80) >> @intCast(col))) != 0
-            else
-                false;
-            pixels[row * w + col] = if (bit) fg else bg;
-        }
-    }
+    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0 .. w * h]);
 
     _ = draw.displayBlitXrgb32(x, y, @intCast(w), @intCast(h), pixels[0 .. w * h]);
 }
@@ -242,25 +220,96 @@ fn glyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     if (x >= scene.width or y >= scene.height) return;
 
+    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0 .. w * h]);
+
+    scene.blitXrgb32(x, y, @intCast(w), @intCast(h), pixels[0 .. w * h]);
+}
+
+fn glyphClipped(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
+    _ = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, std.math.maxInt(i32), std.math.maxInt(i32)) orelse return;
+    const screen_w: i32 = @intCast(@min(draw.screenWidth(), @as(u32, @intCast(std.math.maxInt(i32)))));
+    const screen_h: i32 = @intCast(@min(draw.screenHeight(), @as(u32, @intCast(std.math.maxInt(i32)))));
+    const clipped = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, screen_w, screen_h) orelse return;
+    var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
+    const count = layout.cell_width * layout.cell_height;
+    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0..count]);
+    blitClippedGlyph(draw, pixels[0..count], layout.cell_width, x, y, clipped);
+}
+
+fn glyphSceneClipped(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
+    const clipped = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, scene.width, scene.height) orelse return;
+    var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
+    const count = layout.cell_width * layout.cell_height;
+    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0..count]);
+    blitClippedGlyphScene(scene, pixels[0..count], layout.cell_width, x, y, clipped);
+}
+
+fn rasterizeGlyph(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, codepoint: u32, fg: u32, bg: u32, pixels: []u32) void {
     var row: usize = 0;
-    while (row < h) : (row += 1) {
+    while (row < layout.cell_height) : (row += 1) {
         const source_row: u64 = if (layout.imported and row < layout.bitmap_height)
             draw.fontGlyphRow(font_id, codepoint, @intCast(row))
         else
             0;
         var col: usize = 0;
-        while (col < w) : (col += 1) {
+        while (col < layout.cell_width) : (col += 1) {
             const bit = if (layout.imported)
                 (source_row & (@as(u64, 1) << @intCast(col))) != 0
             else if (row < glyph_base_h and col < glyph_base_w)
                 (glyphPattern(codepoint)[row] & (@as(u8, 0x80) >> @intCast(col))) != 0
             else
                 false;
-            pixels[row * w + col] = if (bit) fg else bg;
+            pixels[row * layout.cell_width + col] = if (bit) fg else bg;
         }
     }
+}
 
-    scene.blitXrgb32(x, y, @intCast(w), @intCast(h), pixels[0 .. w * h]);
+fn clipGlyphCell(bounds: surface.Rect, x: i32, y: i32, width: usize, height: usize, limit_w: i32, limit_h: i32) ?surface.Rect {
+    if (bounds.isEmpty() or limit_w <= 0 or limit_h <= 0) return null;
+    const left = @max(@as(i64, 0), @max(@as(i64, bounds.x), @as(i64, x)));
+    const top = @max(@as(i64, 0), @max(@as(i64, bounds.y), @as(i64, y)));
+    const right = @min(
+        @as(i64, limit_w),
+        @min(@as(i64, bounds.x) + @as(i64, bounds.w), @as(i64, x) + @as(i64, @intCast(width))),
+    );
+    const bottom = @min(
+        @as(i64, limit_h),
+        @min(@as(i64, bounds.y) + @as(i64, bounds.h), @as(i64, y) + @as(i64, @intCast(height))),
+    );
+    if (right <= left or bottom <= top) return null;
+    return .{ .x = @intCast(left), .y = @intCast(top), .w = @intCast(right - left), .h = @intCast(bottom - top) };
+}
+
+fn blitClippedGlyph(draw: *const r4os.r4draw.Context, pixels: []const u32, source_width: usize, x: i32, y: i32, clipped: surface.Rect) void {
+    const source_height = pixels.len / source_width;
+    if (clipped.x == x and clipped.y == y and clipped.w == source_width and clipped.h == source_height) {
+        _ = draw.displayBlitXrgb32(x, y, @intCast(source_width), @intCast(source_height), pixels);
+        return;
+    }
+    const source_x: usize = @intCast(clipped.x - x);
+    const source_y: usize = @intCast(clipped.y - y);
+    const copy_width: usize = @intCast(clipped.w);
+    var row: usize = 0;
+    while (row < @as(usize, @intCast(clipped.h))) : (row += 1) {
+        const offset = (source_y + row) * source_width + source_x;
+        _ = draw.displayBlitXrgb32(clipped.x, clipped.y + @as(i32, @intCast(row)), @intCast(copy_width), 1, pixels[offset .. offset + copy_width]);
+    }
+}
+
+fn blitClippedGlyphScene(scene: *scene_buffer.SceneBuffer, pixels: []const u32, source_width: usize, x: i32, y: i32, clipped: surface.Rect) void {
+    const source_height = pixels.len / source_width;
+    if (clipped.x == x and clipped.y == y and clipped.w == source_width and clipped.h == source_height) {
+        scene.blitXrgb32(x, y, @intCast(source_width), @intCast(source_height), pixels);
+        return;
+    }
+    const source_x: usize = @intCast(clipped.x - x);
+    const source_y: usize = @intCast(clipped.y - y);
+    const copy_width: usize = @intCast(clipped.w);
+    var row: usize = 0;
+    while (row < @as(usize, @intCast(clipped.h))) : (row += 1) {
+        const offset = (source_y + row) * source_width + source_x;
+        scene.blitXrgb32(clipped.x, clipped.y + @as(i32, @intCast(row)), @intCast(copy_width), 1, pixels[offset .. offset + copy_width]);
+    }
 }
 
 fn glyphPattern(codepoint: u32) [8]u8 {
@@ -447,4 +496,43 @@ test "length delimited text coordinates saturate at i32 edges" {
         bounds,
     );
     try std.testing.expectEqual(@as(u32, 0x0012_3456), pixels[0]);
+}
+
+test "frame text replays every intersecting glyph edge inside incremental damage" {
+    const width = 24;
+    const height = 24;
+    const untouched: u32 = 0x0012_3456;
+    const bounds = surface.Rect{ .x = 0, .y = 0, .w = width, .h = height };
+
+    var reference: [width * height]u32 = .{untouched} ** (width * height);
+    var reference_scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(reference_scene.attach(std.mem.sliceAsBytes(reference[0..]), width, height));
+    textFontSliceScene(&reference_scene, undefined, r4os.abi.gui_font_builtin_id, 8, 8, "A", 0x00FF_FFFF, 0, bounds);
+
+    const clips = [_]surface.Rect{
+        .{ .x = 8, .y = 10, .w = 2, .h = 3 },
+        .{ .x = 14, .y = 10, .w = 2, .h = 3 },
+        .{ .x = 10, .y = 8, .w = 3, .h = 2 },
+        .{ .x = 10, .y = 14, .w = 3, .h = 2 },
+    };
+    for (clips) |clip| {
+        var actual: [width * height]u32 = .{untouched} ** (width * height);
+        var scene = scene_buffer.SceneBuffer{};
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(actual[0..]), width, height));
+        scene.setPaintClip(clip);
+        textFontSliceScene(&scene, undefined, r4os.abi.gui_font_builtin_id, 8, 8, "A", 0x00FF_FFFF, 0, clip);
+
+        var py: i32 = 0;
+        while (py < height) : (py += 1) {
+            var px: i32 = 0;
+            while (px < width) : (px += 1) {
+                const index = @as(usize, @intCast(py * width + px));
+                if (clip.contains(px, py)) {
+                    try std.testing.expectEqual(reference[index], actual[index]);
+                } else {
+                    try std.testing.expectEqual(untouched, actual[index]);
+                }
+            }
+        }
+    }
 }

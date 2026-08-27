@@ -1638,8 +1638,9 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
                 const raw_text_h = if (command.text_h != 0) command.text_h else command.line_height;
                 const text_h: i32 = @intCast(@min(raw_text_h, @as(u32, @intCast(std.math.maxInt(i32)))));
                 const text_bottom = std.math.add(i32, y, @max(1, text_h)) catch continue;
-                if (x >= bounds.right() or y < bounds.y or text_bottom > bounds.bottom()) continue;
-                ctx.paintTextFontSlice(command.font_id, x, y, text, command.fg, command.bg, paint_bounds);
+                if (x >= bounds.right() or y >= bounds.bottom() or text_bottom <= bounds.y) continue;
+                const text_clip = rectIntersection(bounds, paint_bounds) orelse continue;
+                ctx.paintTextFontSlice(command.font_id, x, y, text, command.fg, command.bg, text_clip);
             },
             r4os.abi.gui_frame_command_kind_raster => hostedFrameRaster(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_indexed8 => hostedFrameIndexed8(ctx, bounds, command, frame.resources),
@@ -1696,6 +1697,15 @@ fn frameCommandPaintRect(bounds: surface.Rect, command: r4os.abi.GuiFrameCommand
 
 fn rectsIntersect(a: surface.Rect, b: surface.Rect) bool {
     return a.x < b.right() and b.x < a.right() and a.y < b.bottom() and b.y < a.bottom();
+}
+
+fn rectIntersection(a: surface.Rect, b: surface.Rect) ?surface.Rect {
+    const left = @max(@as(i64, a.x), @as(i64, b.x));
+    const top = @max(@as(i64, a.y), @as(i64, b.y));
+    const right = @min(@as(i64, a.x) + @as(i64, a.w), @as(i64, b.x) + @as(i64, b.w));
+    const bottom = @min(@as(i64, a.y) + @as(i64, a.h), @as(i64, b.y) + @as(i64, b.h));
+    if (right <= left or bottom <= top) return null;
+    return .{ .x = @intCast(left), .y = @intCast(top), .w = @intCast(right - left), .h = @intCast(bottom - top) };
 }
 
 fn hostedFrameShape(ctx: *const desk_api.Context, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, resources: []const u8) void {
