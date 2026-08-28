@@ -10,6 +10,7 @@ const quick_launch = @import("quick_launch.zig");
 const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
 const theme = @import("theme.zig");
+const tray = @import("tray.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
 
@@ -70,6 +71,9 @@ pub fn compose(
     active_window: usize,
     clock: [*:0]const u8,
     keyboard_layout: [*:0]const u8,
+    tray_registry: *const tray.Registry,
+    tray_hover: tray.Identity,
+    tray_pressed: tray.Identity,
     items: *const desktop_items.Items,
     quick_bar: *const quick_launch.Bar,
     selected_item: usize,
@@ -157,7 +161,13 @@ pub fn compose(
 
     const taskbar_rect = surface.taskbar(screen_w, screen_h, theme.taskbar_h).rect;
     if (layerVisible(&stats, damage, taskbar_rect)) {
-        draw.taskbar(ctx, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, hover_target, pressed_target);
+        draw.taskbar(ctx, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
+    }
+
+    if (tray_registry.tooltipRect(tray_hover, screen_w, screen_h, theme.taskbar_h)) |tooltip_rect| {
+        if (layerVisible(&stats, damage, tooltip_rect)) {
+            draw.trayTooltip(ctx, tray_registry, tray_hover, screen_w, screen_h);
+        }
     }
 
     if (start_open) {

@@ -14,6 +14,7 @@ const quick_launch = @import("quick_launch.zig");
 const theme = @import("theme.zig");
 const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
+const tray = @import("tray.zig");
 const window = @import("window.zig");
 
 const console_output_render_max: usize = 16 * 1024;
@@ -242,7 +243,7 @@ const CachedIco = struct {
 pub fn desktop(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
     desktopBackground(ctx, screen_w, screen_h, bg);
     desktopInfoLayer(ctx, screen_w, screen_h, bg);
-    taskbar(ctx, screen_w, screen_h, null, null, 0, null, null, .none, .none);
+    taskbar(ctx, screen_w, screen_h, null, null, 0, null, null, null, .{}, .{}, .none, .none);
 }
 
 pub fn desktopBackground(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, bg: u32) void {
@@ -690,6 +691,9 @@ pub fn taskbar(
     active_index: usize,
     clock: ?[*:0]const u8,
     keyboard_layout: ?[*:0]const u8,
+    tray_registry: ?*const tray.Registry,
+    tray_hover: tray.Identity,
+    tray_pressed: tray.Identity,
     hover_target: model.UiTarget,
     pressed_target: model.UiTarget,
 ) void {
@@ -706,21 +710,47 @@ pub fn taskbar(
     if (quick_bar) |bar| quickLaunchBar(ctx, screen_h, bar, hover_target, pressed_target);
 
     if (windows) |list| {
-        var x: i32 = quick_launch.taskbarWindowStartX(quick_count);
+        const window_start = quick_launch.taskbarWindowStartX(quick_count);
+        const window_right = if (tray_registry) |registry|
+            registry.window_right
+        else
+            taskbarKeyboardLayoutRect(screen_w, screen_h, clock != null).x - tray.window_gap;
+        const visible_count = visibleWindowCount(list);
+        var ordinal: usize = 0;
         for (list, 0..) |win, i| {
             if (!win.visible) continue;
+            const rect = tray.windowButtonRect(window_start, window_right, visible_count, ordinal, top + 4, theme.start_h);
+            ordinal += 1;
+            if (rect.isEmpty()) continue;
             const target = taskbarTarget(win, i);
             const active = i == active_index and !win.minimized;
             const hovered = hover_target == target and pressed_target != target;
             const pressed = active or pressed_target == target;
             const bg = if (pressed) theme.taskbar_pressed else if (hovered) theme.taskbar_hover else theme.taskbar;
-            const title = clippedText(std.mem.span(win.title()), 108);
-            bevel(ctx, x, top + 4, 150, theme.start_h, pressed);
-            ctx.paintRect(x + 2, top + 6, 146, @intCast(theme.start_h - 4), bg);
-            taskbarStatusGlyph(ctx, x + 8, top + 11, active, win.minimized);
-            if (hovered) focusRect(ctx, x + 3, top + 7, 144, theme.start_h - 6);
-            ctx.paintText(x + 22, top + 11, @ptrCast(&title), theme.text, bg);
-            x += 156;
+            const title = clippedText(std.mem.span(win.title()), @max(0, rect.w - 34));
+            bevel(ctx, rect.x, rect.y, rect.w, rect.h, pressed);
+            ctx.paintRect(rect.x + 2, rect.y + 2, @intCast(@max(0, rect.w - 4)), @intCast(@max(0, rect.h - 4)), bg);
+            if (rect.w >= 20) taskbarStatusGlyph(ctx, rect.x + 8, top + 11, active, win.minimized);
+            if (hovered and rect.w >= 8) focusRect(ctx, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+            if (rect.w >= 30) ctx.paintText(rect.x + 22, top + 11, @ptrCast(&title), theme.text, bg);
+        }
+    }
+
+    if (tray_registry) |registry| {
+        for (&registry.entries) |*entry| {
+            if (!entry.used or !entry.layout_visible) continue;
+            const identity = entry.identity();
+            const pressed = tray_pressed.eql(identity);
+            const hovered = tray_hover.eql(identity) and !pressed;
+            const bg = if (pressed) theme.taskbar_pressed else if (hovered) theme.taskbar_hover else theme.taskbar;
+            if (pressed or hovered) {
+                bevel(ctx, entry.rect.x, entry.rect.y, entry.rect.w, entry.rect.h, pressed);
+                ctx.paintRect(entry.rect.x + 2, entry.rect.y + 2, @intCast(entry.rect.w - 4), @intCast(entry.rect.h - 4), bg);
+            }
+            _ = ctx.paintArgb32(entry.rect.x + 4, entry.rect.y + 4, r4os.abi.tray_icon_width, r4os.abi.tray_icon_height, entry.icon[0..]);
+            if ((entry.flags & r4os.abi.tray_item_flag_attention) != 0) {
+                ctx.paintRect(entry.rect.x + 3, entry.rect.y + entry.rect.h - 3, @intCast(entry.rect.w - 6), 1, 0xE08020);
+            }
         }
     }
 
@@ -745,6 +775,23 @@ pub fn taskbar(
         if (hovered) focusRect(ctx, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
         ctx.paintText(rect.x + 10, top + 11, value, theme.text, bg);
     }
+}
+
+pub fn trayTooltip(ctx: *const desk_api.Context, registry: *const tray.Registry, identity: tray.Identity, screen_w: i32, screen_h: i32) void {
+    const entry = registry.findByIdentity(identity) orelse return;
+    const rect = registry.tooltipRect(identity, screen_w, screen_h, theme.taskbar_h) orelse return;
+    ctx.paintRect(rect.x + 2, rect.y + 2, @intCast(rect.w), @intCast(rect.h), theme.shadow);
+    ctx.paintRect(rect.x, rect.y, @intCast(rect.w), @intCast(rect.h), theme.text);
+    ctx.paintRect(rect.x + 1, rect.y + 1, @intCast(rect.w - 2), @intCast(rect.h - 2), 0xFFFFE1);
+    ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, rect.x + 6, rect.y + 7, entry.tooltipSlice(), theme.text, 0xFFFFE1, rect.inset(4, 3));
+}
+
+fn visibleWindowCount(windows: []const window.Window) usize {
+    var count: usize = 0;
+    for (windows) |win| if (win.visible) {
+        count += 1;
+    };
+    return count;
 }
 
 fn quickLaunchBar(ctx: *const desk_api.Context, screen_h: i32, bar: *const quick_launch.Bar, hover_target: model.UiTarget, pressed_target: model.UiTarget) void {

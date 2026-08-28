@@ -21,6 +21,7 @@ const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
 const text_field = @import("text_field.zig");
 const theme = @import("theme.zig");
+const tray = @import("tray.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
 const window_service_gate = @import("window_service_gate.zig");
@@ -132,6 +133,9 @@ const desktop_layout_path = r4std.settings.paths.desktop_layout;
 const time_config_path = r4std.settings.paths.time;
 const terminal_path = "/R4OS/SOFTWARE/TERMINAL/TERMINAL.R4X";
 const terminal_desktop_args = "/NOAUTOEXEC";
+const tray_provider_test_path = "/R4OS/SOFTWARE/TERMINAL/DIAG/APPZCON.R4X";
+const tray_provider_test_args = "/TRAYSMOKE";
+const tray_provider_test_item_id: u64 = 0x7103_0001;
 const subsystem_host_test_path = "/R4OS/SUBSYSTEMS/test.basic/SUBSYSOK.R4X";
 const subsystem_guest_a_path = "C:\\TEMP\\SUBSYSTEM-A.BAS";
 const subsystem_guest_b_path = "C:\\TEMP\\SUBSYSTEM-B.BAS";
@@ -145,6 +149,7 @@ const subsystem_host_test_marker =
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
     "R4BASIC source-probe: info_calls=1 read_calls=0 read_bytes=0 limit_bytes=262144\r\n" ++
     "DESKTOP terminal-close selftest: OK target=chrome request=cooperative duplicate=idempotent exit=0 reap=generation\r\n" ++
+    "DESKTOP tray selftest: OK ipc=service owner=generation registry=16 icon=argb32 events=sequenced wait=bounded cleanup=owner\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
@@ -172,6 +177,9 @@ const blink_half_ms: u32 = 500;
 const close_kill_timeout_ms: u32 = 2000;
 const time_config_check_ms: u32 = 1000;
 const window_service_retry_ms: u32 = 2000;
+const tray_service_retry_ms: u32 = 2000;
+const tray_sync_ms: u32 = 50;
+const tray_sync_page_burst: u32 = 16;
 const remote_input_burst: u32 = 16;
 const console_scroll_wheel_lines: u32 = 3;
 const console_scroll_max_fallback: u32 = 512;
@@ -306,6 +314,19 @@ pub const App = struct {
     win_service_snapshot: r4os.abi.WindowServiceSnapshot = .{},
     win_service_gate: window_service_gate.Gate = .{},
     window_service_retry_ticks: u64 = 200,
+    tray_service_retry_ticks: u64 = 200,
+    tray_sync_ticks: u64 = 5,
+    tray_registry: tray.Registry = .{},
+    tray_staging: tray.Registry = .{},
+    tray_broker_revision: u64 = 0,
+    tray_sync_revision: u64 = 0,
+    tray_sync_cursor: u16 = r4os.abi.tray_desktop_cursor_poll,
+    tray_next_sync_tick: u64 = 0,
+    tray_visibility_dirty: bool = false,
+    tray_hover_identity: tray.Identity = .{},
+    tray_pressed_identity: tray.Identity = .{},
+    tray_right_pressed_identity: tray.Identity = .{},
+    last_mouse_down_tray_identity: tray.Identity = .{},
     window_service_mirrored: [4]bool = .{false} ** 4,
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
@@ -401,6 +422,10 @@ pub const App = struct {
         self.readInitialCursor();
         self.ctx.mouseHide();
         self.resetWindowServiceState();
+        self.tray_registry = tray.Registry.init(self.ctx.self_handle.generation);
+        self.tray_staging = tray.Registry.init(self.ctx.self_handle.generation);
+        _ = self.syncTrayBroker();
+        _ = self.updateTrayLayout();
         self.invalidateFull();
         self.redraw();
         _ = self.ctx.bootReady();
@@ -422,6 +447,7 @@ pub const App = struct {
                 continue;
             }
             var needs_redraw = false;
+            if (self.syncTrayBroker()) needs_redraw = true;
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
@@ -450,6 +476,12 @@ pub const App = struct {
             return;
         }
         _ = self.retryWindowServiceIfDue();
+        // WINSVC registry changes do not participate in Desktop activity.
+        // A bounded sleep keeps the visual mirror current without busy-looping.
+        if (self.tray_broker_revision != 0 or self.tray_next_sync_tick <= self.ctx.ticks()) {
+            self.ctx.sleepTicks(self.loop_sleep_ticks);
+            return;
+        }
         if (self.activity_wait_supported) {
             const rc = self.ctx.desktopActivityWait(self.activity_seq, self.blink_half_ticks, &self.activity_seq);
             if (rc >= 0) {
@@ -463,6 +495,186 @@ pub const App = struct {
             self.activity_wait_supported = false;
         }
         self.ctx.sleepTicks(self.loop_sleep_ticks);
+    }
+
+    fn syncTrayBroker(self: *App) bool {
+        const now = self.ctx.ticks();
+        if (self.tray_sync_cursor == r4os.abi.tray_desktop_cursor_poll and now < self.tray_next_sync_tick) return false;
+
+        var changed = false;
+        var pages: u32 = 0;
+        while (pages < tray_sync_page_burst) : (pages += 1) {
+            var request: r4os.abi.TrayDesktopExchange = .{
+                .desktop_owner = self.ctx.self_handle,
+                .known_revision = if (self.tray_sync_cursor == r4os.abi.tray_desktop_cursor_poll)
+                    self.tray_broker_revision
+                else
+                    self.tray_sync_revision,
+                .cursor = self.tray_sync_cursor,
+            };
+            var response: r4os.abi.TrayDesktopExchange = .{};
+            const rc = self.ctx.trayDesktopExchange(r4os.abi.tray_service_op_desktop_sync, &request, &response);
+            if (rc != r4os.abi.service_api_result_ok or !self.validTrayDesktopResponse(&response) or response.result != r4os.abi.tray_result_ok) {
+                return self.loseTrayBroker() or changed;
+            }
+
+            const restarting = (response.flags & r4os.abi.tray_desktop_flag_restart) != 0;
+            if (restarting) {
+                self.tray_staging = tray.Registry.init(self.ctx.self_handle.generation);
+                self.tray_sync_revision = response.registry_revision;
+            } else if (self.tray_sync_cursor != r4os.abi.tray_desktop_cursor_poll and response.registry_revision != self.tray_sync_revision) {
+                return self.loseTrayBroker() or changed;
+            }
+
+            if ((response.flags & r4os.abi.tray_desktop_flag_item) != 0) {
+                const mutation = self.tray_staging.upsert(&response.item);
+                if (mutation.result != r4os.abi.tray_result_ok) return self.loseTrayBroker() or changed;
+            }
+
+            if ((response.flags & r4os.abi.tray_desktop_flag_complete) != 0) {
+                self.tray_sync_cursor = r4os.abi.tray_desktop_cursor_poll;
+                self.tray_next_sync_tick = now +| self.tray_sync_ticks;
+                if (response.registered_count != self.tray_staging.registered_count and response.registry_revision != self.tray_broker_revision) {
+                    return self.loseTrayBroker() or changed;
+                }
+                if (response.registry_revision != self.tray_broker_revision) {
+                    if (self.publishTraySnapshot(response.registry_revision)) changed = true;
+                } else if (self.tray_visibility_dirty) {
+                    _ = self.publishTrayVisibility();
+                }
+                return changed;
+            }
+            if (response.next_cursor == r4os.abi.tray_desktop_cursor_poll) return self.loseTrayBroker() or changed;
+            self.tray_sync_cursor = response.next_cursor;
+        }
+        return changed;
+    }
+
+    fn validTrayDesktopResponse(self: *const App, response: *const r4os.abi.TrayDesktopExchange) bool {
+        const valid_flags = r4os.abi.tray_desktop_flag_item |
+            r4os.abi.tray_desktop_flag_complete |
+            r4os.abi.tray_desktop_flag_restart |
+            r4os.abi.tray_desktop_flag_layout_visible;
+        return response.magic == r4os.abi.tray_desktop_exchange_magic and
+            response.version == r4os.abi.tray_desktop_exchange_version and
+            response.size == @sizeOf(r4os.abi.TrayDesktopExchange) and
+            tray.sameOwner(response.desktop_owner, self.ctx.self_handle) and
+            response.desktop_epoch == self.ctx.self_handle.generation and
+            response.registry_revision != 0 and
+            response.capacity == tray.max_items and
+            response.registered_count <= tray.max_items and
+            (response.flags & ~valid_flags) == 0;
+    }
+
+    fn publishTraySnapshot(self: *App, revision: u64) bool {
+        const old_tooltip = self.currentTrayTooltipRect();
+        self.tray_registry = self.tray_staging;
+        self.tray_broker_revision = revision;
+        self.tray_hover_identity = .{};
+        self.tray_pressed_identity = .{};
+        self.tray_right_pressed_identity = .{};
+        self.last_mouse_down_tray_identity = .{};
+        self.tray_visibility_dirty = true;
+        _ = self.updateTrayLayout();
+        self.afterTrayRegistryChange(old_tooltip);
+        return true;
+    }
+
+    fn loseTrayBroker(self: *App) bool {
+        const changed = self.tray_registry.registered_count != 0;
+        const old_tooltip = self.currentTrayTooltipRect();
+        self.tray_registry = tray.Registry.init(self.ctx.self_handle.generation);
+        self.tray_staging = tray.Registry.init(self.ctx.self_handle.generation);
+        self.tray_broker_revision = 0;
+        self.tray_sync_revision = 0;
+        self.tray_sync_cursor = r4os.abi.tray_desktop_cursor_poll;
+        self.tray_visibility_dirty = false;
+        self.tray_next_sync_tick = self.ctx.ticks() +| self.tray_service_retry_ticks;
+        self.tray_hover_identity = .{};
+        self.tray_pressed_identity = .{};
+        self.tray_right_pressed_identity = .{};
+        self.last_mouse_down_tray_identity = .{};
+        if (old_tooltip) |rect| self.damage.invalidate(rect);
+        if (changed) self.invalidateTaskbar();
+        _ = self.updateTrayLayout();
+        return changed;
+    }
+
+    fn publishTrayVisibility(self: *App) bool {
+        if (self.tray_broker_revision == 0) return false;
+        var index: usize = 0;
+        while (index < tray.max_items) : (index += 1) {
+            const entry = self.tray_registry.entryAt(index) orelse continue;
+            var request: r4os.abi.TrayDesktopExchange = .{
+                .desktop_owner = self.ctx.self_handle,
+                .known_revision = self.tray_broker_revision,
+                .flags = if (entry.layout_visible) r4os.abi.tray_desktop_flag_layout_visible else 0,
+            };
+            request.event.owner = entry.owner;
+            request.event.item_id = entry.item_id;
+            request.event.item_revision = entry.revision;
+            var response: r4os.abi.TrayDesktopExchange = .{};
+            const rc = self.ctx.trayDesktopExchange(r4os.abi.tray_service_op_desktop_visibility, &request, &response);
+            if (rc != r4os.abi.service_api_result_ok or !self.validTrayDesktopResponse(&response) or
+                response.result != r4os.abi.tray_result_ok or response.registry_revision != self.tray_broker_revision)
+            {
+                self.tray_visibility_dirty = true;
+                return false;
+            }
+        }
+        self.tray_visibility_dirty = false;
+        return true;
+    }
+
+    fn submitTrayActivation(self: *App, identity: tray.Identity, kind: u16, wheel_delta: i32, x: i32, y: i32, tick: u64) bool {
+        const entry = self.tray_registry.findByIdentity(identity) orelse return false;
+        if (!entry.enabled() or !entry.layout_visible or self.tray_broker_revision == 0) return false;
+        var request: r4os.abi.TrayDesktopExchange = .{
+            .desktop_owner = self.ctx.self_handle,
+            .known_revision = self.tray_broker_revision,
+        };
+        request.event.owner = entry.owner;
+        request.event.item_id = entry.item_id;
+        request.event.item_revision = entry.revision;
+        request.event.kind = kind;
+        request.event.wheel_delta = wheel_delta;
+        request.event.x = x;
+        request.event.y = y;
+        request.event.tick = tick;
+        var response: r4os.abi.TrayDesktopExchange = .{};
+        const rc = self.ctx.trayDesktopExchange(r4os.abi.tray_service_op_desktop_activate, &request, &response);
+        return rc == r4os.abi.service_api_result_ok and self.validTrayDesktopResponse(&response) and
+            response.result == r4os.abi.tray_result_ok and response.registry_revision == self.tray_broker_revision;
+    }
+
+    fn updateTrayLayout(self: *App) bool {
+        const old_tooltip = self.currentTrayTooltipRect();
+        const changed = self.tray_registry.layout(.{
+            .screen_w = self.screen_w,
+            .screen_h = self.screen_h,
+            .taskbar_h = theme.taskbar_h,
+            .item_y = 4,
+            .system_left = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, self.config.taskbar_clock).x,
+            .window_start = quick_launch.taskbarWindowStartX(self.quick_launch.count),
+            .visible_windows = self.visibleWindowCount(),
+        });
+        if (!changed) return false;
+        self.tray_visibility_dirty = true;
+        _ = self.publishTrayVisibility();
+        if (old_tooltip) |rect| self.damage.invalidate(rect);
+        self.invalidateTaskbar();
+        return true;
+    }
+
+    fn afterTrayRegistryChange(self: *App, old_tooltip: ?surface.Rect) void {
+        if (old_tooltip) |rect| self.damage.invalidate(rect);
+        self.invalidateTaskbar();
+        self.updateHover(self.cursor_x, self.cursor_y);
+        if (self.currentTrayTooltipRect()) |rect| self.damage.invalidate(rect);
+    }
+
+    fn currentTrayTooltipRect(self: *const App) ?surface.Rect {
+        return self.tray_registry.tooltipRect(self.tray_hover_identity, self.screen_w, self.screen_h, theme.taskbar_h);
     }
 
     fn pollRemoteFrameDemand(self: *App) bool {
@@ -2130,11 +2342,117 @@ pub const App = struct {
         }
     }
 
+    fn smokeTrayContract(self: *App) bool {
+        var handle: r4os.abi.ProgramProcessHandle = .{};
+        const spawn_rc = self.ctx.programSpawnHandle(tray_provider_test_path, tray_provider_test_args, .console, &handle);
+        if (spawn_rc != r4os.abi.program_handle_ok or !processHandleValid(handle)) return self.headlessSubsystemFailure("tray-provider-spawn");
+
+        const started = self.ctx.ticks();
+        const timeout_ticks = @as(u64, self.monotonic_hz) * 15;
+        while (self.tray_registry.statusResult(handle, tray_provider_test_item_id) != r4os.abi.tray_result_ok) {
+            _ = self.syncTrayBroker();
+            self.ctx.sleepTicks(1);
+            if (self.ctx.ticks() -| started >= timeout_ticks) {
+                _ = self.ctx.programHandleKill(&handle);
+                return self.headlessSubsystemFailure("tray-provider-register");
+            }
+        }
+
+        _ = self.updateTrayLayout();
+        const hit = self.smokeFindTrayIdentity(handle, tray_provider_test_item_id) orelse {
+            _ = self.ctx.programHandleKill(&handle);
+            return self.headlessSubsystemFailure("tray-provider-layout");
+        };
+        self.last_mouse_down_target = .none;
+        self.last_mouse_down_tray_identity = .{};
+        self.last_mouse_down_tick = 0;
+        self.double_click_pending = false;
+        self.prev_buttons = 0;
+        self.smokeTrayMouse(hit.x, hit.y, model.MouseButton.left);
+        self.smokeTrayMouse(hit.x, hit.y, 0);
+
+        var exit_code: i32 = -1;
+        var completed = false;
+        while (self.ctx.ticks() -| started < timeout_ticks) {
+            _ = self.syncTrayBroker();
+            var info: r4os.abi.ProgramInstanceInfo = .{};
+            const status = self.ctx.programHandleStatus(&handle, &info);
+            if (status == r4os.abi.program_handle_ok and info.state == @intFromEnum(r4os.abi.ProgramInstanceState.done)) {
+                completed = true;
+                exit_code = info.exit_code;
+                break;
+            }
+            if (status != r4os.abi.program_handle_ok and status != r4os.abi.program_handle_error_would_block) break;
+            self.ctx.sleepTicks(1);
+        }
+        if (!completed or exit_code != 0) {
+            _ = self.ctx.programHandleKill(&handle);
+            return self.headlessSubsystemFailure("tray-provider-event");
+        }
+
+        // A done process no longer owns UI state even before its completion
+        // record is reaped. Exercise that normal bounded owner sweep first.
+        var cleanup_wait: u32 = 0;
+        while (cleanup_wait < self.monotonic_hz and self.tray_registry.registered_count != 0) : (cleanup_wait += 1) {
+            self.tray_next_sync_tick = 0;
+            _ = self.syncTrayBroker();
+            self.ctx.sleepTicks(1);
+        }
+        if (self.tray_registry.registered_count != 0 or self.tray_registry.ownerAt(0) != null) {
+            return self.headlessSubsystemFailure("tray-provider-cleanup");
+        }
+
+        var completion: r4os.abi.ProgramProcessCompletion = .{};
+        var reaped = false;
+        var reap_attempt: u32 = 0;
+        while (reap_attempt < 80) : (reap_attempt += 1) {
+            const reap_status = self.ctx.programHandleReap(&handle, &completion);
+            if (reap_status == r4os.abi.program_handle_ok or processHandleDefinitelyGone(reap_status)) {
+                reaped = true;
+                break;
+            }
+            if (reap_status != r4os.abi.program_handle_error_would_block and reap_status != r4os.abi.program_handle_error_not_running) break;
+            self.ctx.sleepTicks(1);
+        }
+        if (!reaped or (completion.sequence != 0 and completion.exit_code != 0)) {
+            return self.headlessSubsystemFailure("tray-provider-reap");
+        }
+
+        return true;
+    }
+
+    fn smokeFindTrayIdentity(self: *const App, owner: r4os.abi.ProgramProcessHandle, item_id: u64) ?struct { x: i32, y: i32 } {
+        const y = self.screen_h - theme.taskbar_h + 12;
+        var x: i32 = 0;
+        while (x < self.screen_w) : (x += 1) {
+            const identity = self.tray_registry.hit(x, y) orelse continue;
+            if (tray.sameOwner(identity.owner, owner) and identity.item_id == item_id) return .{ .x = x, .y = y };
+        }
+        return null;
+    }
+
+    fn smokeTrayMouse(self: *App, x: i32, y: i32, buttons: u8) void {
+        self.beginEvent(.mouse);
+        self.event_mouse = .{
+            .x = x,
+            .y = y,
+            .dx = 0,
+            .dy = 0,
+            .wheel = 0,
+            .buttons = buttons,
+            .present = 1,
+            .reserved = 0,
+            .packets = 0,
+        };
+        if (self.prepareMouseEvent(.mouse)) _ = self.dispatchEvent();
+    }
+
     fn startHeadlessSubsystemAcceptance(self: *App) bool {
         _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
         _ = self.ctx.fileDelete(r4basic_baseline_marker_path);
         if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
         if (!self.smokeLaunchMultipleTerminalWindows()) return self.headlessSubsystemFailure("terminal-window-close");
+        if (!self.smokeTrayContract()) return false;
         self.window_completion_handles = .{r4os.abi.ProgramProcessHandle{}} ** self.window_completion_handles.len;
         self.window_completion_exit_codes = .{0} ** self.window_completion_exit_codes.len;
         if (r4std.subsystem_runtime.load(&self.ctx.sys) != .loaded) return self.headlessSubsystemFailure("catalog-load");
@@ -2490,6 +2808,8 @@ pub const App = struct {
         self.close_kill_timeout_ticks = ticksFromMs(self.monotonic_hz, close_kill_timeout_ms);
         self.time_config_check_ticks = ticksFromMs(self.monotonic_hz, time_config_check_ms);
         self.window_service_retry_ticks = ticksFromMs(self.monotonic_hz, window_service_retry_ms);
+        self.tray_service_retry_ticks = ticksFromMs(self.monotonic_hz, tray_service_retry_ms);
+        self.tray_sync_ticks = ticksFromMs(self.monotonic_hz, tray_sync_ms);
         self.desktop_layout_writeback.configure(r4std.settings.WritebackPolicy.forHz(.lazy, self.monotonic_hz), self.ctx.ticks());
     }
 
@@ -2606,6 +2926,12 @@ pub const App = struct {
             self.event.mouse_y = self.event_mouse.y;
             self.event.button = model.MouseButton.right;
             const target = self.targetAt(self.event_mouse.x, self.event_mouse.y);
+            if (target == .taskbar_tray_external) {
+                self.tray_right_pressed_identity = self.tray_registry.hit(self.event_mouse.x, self.event_mouse.y) orelse .{};
+                self.tray_pressed_identity = self.tray_right_pressed_identity;
+            } else {
+                self.tray_right_pressed_identity = .{};
+            }
             if (target != .none) self.event.setTarget(target);
             return true;
         } else if (!right_down and right_was_down) {
@@ -2626,14 +2952,21 @@ pub const App = struct {
             self.event.mouse_y = self.event_mouse.y;
             self.event.button = model.MouseButton.left;
             const target = self.targetAt(self.event_mouse.x, self.event_mouse.y);
+            const tray_identity = if (target == .taskbar_tray_external)
+                self.tray_registry.hit(self.event_mouse.x, self.event_mouse.y) orelse tray.Identity{}
+            else
+                tray.Identity{};
             self.double_click_pending = self.last_mouse_down_tick != 0 and
                 self.event_tick >= self.last_mouse_down_tick and
                 self.event_tick - self.last_mouse_down_tick <= self.double_click_ticks and
                 target != .none and
-                target == self.last_mouse_down_target;
+                target == self.last_mouse_down_target and
+                (target != .taskbar_tray_external or tray_identity.eql(self.last_mouse_down_tray_identity));
             self.event.click_count = if (self.double_click_pending) 2 else 1;
             self.last_mouse_down_tick = self.event_tick;
             self.last_mouse_down_target = target;
+            self.last_mouse_down_tray_identity = tray_identity;
+            self.tray_pressed_identity = tray_identity;
             if (target != .none) self.event.setTarget(target);
         } else if (!down and was_down) {
             self.startStructuredEvent(.mouse_up, source);
@@ -2731,6 +3064,18 @@ pub const App = struct {
         self.updateHover(mouse.x, mouse.y);
         if (self.event.button == model.MouseButton.right) {
             self.setInputPreviousButtons(mouse.buttons);
+            if (self.event.target == .taskbar_tray_external or self.tray_right_pressed_identity.valid()) {
+                if (self.event.kind == .mouse_up) {
+                    const released = self.tray_registry.hit(mouse.x, mouse.y) orelse tray.Identity{};
+                    if (released.eql(self.tray_right_pressed_identity)) {
+                        _ = self.submitTrayActivation(released, r4os.abi.tray_event_kind_context, 0, mouse.x, mouse.y, self.event_tick);
+                    }
+                    self.tray_right_pressed_identity = .{};
+                    self.tray_pressed_identity = .{};
+                }
+                self.invalidateTaskbar();
+                return self.hasDamage();
+            }
             if (self.event.kind == .mouse_down) {
                 if (self.time_menu_open) {
                     self.closeTop();
@@ -2760,14 +3105,23 @@ pub const App = struct {
             const resize_index = self.resize.window_index;
             if (was_desktop_drag) _ = self.finishDesktopItemDrag();
             if (was_down and pressed_target != .none and !was_desktop_drag) {
-                self.deliverGuiMouseButton(.mouse_up, pressed_target, mouse.x, mouse.y, mouse.buttons);
-                if (pressed_target == self.event.target) self.dispatchMouseCommand(pressed_target);
+                if (pressed_target == .taskbar_tray_external) {
+                    const released = self.tray_registry.hit(mouse.x, mouse.y) orelse tray.Identity{};
+                    if (released.eql(self.tray_pressed_identity)) {
+                        const kind: u16 = if (self.double_click_pending) r4os.abi.tray_event_kind_double else r4os.abi.tray_event_kind_primary;
+                        _ = self.submitTrayActivation(released, kind, 0, mouse.x, mouse.y, self.event_tick);
+                    }
+                } else {
+                    self.deliverGuiMouseButton(.mouse_up, pressed_target, mouse.x, mouse.y, mouse.buttons);
+                    if (pressed_target == self.event.target) self.dispatchMouseCommand(pressed_target);
+                }
             }
             self.setInputPreviousButtons(mouse.buttons);
             self.drag.active = false;
             self.desktop_drag = .{};
             self.resize.active = false;
             self.mouse_down_target = .none;
+            self.tray_pressed_identity = .{};
             if (was_down) self.invalidatePointerRelease(pressed_target, was_drag, drag_index, was_desktop_drag, desktop_drag_index, was_resize, resize_index);
             return self.hasDamage();
         }
@@ -2791,9 +3145,15 @@ pub const App = struct {
 
     fn updateHover(self: *App, x: i32, y: i32) void {
         const target = self.targetAt(x, y);
-        if (target == self.hover_target) return;
+        const next_tray_identity = if (target == .taskbar_tray_external)
+            self.tray_registry.hit(x, y) orelse tray.Identity{}
+        else
+            tray.Identity{};
+        if (target == self.hover_target and next_tray_identity.eql(self.tray_hover_identity)) return;
         const old_target = self.hover_target;
+        const old_tooltip = self.currentTrayTooltipRect();
         self.hover_target = target;
+        self.tray_hover_identity = next_tray_identity;
         if (self.start_open) {
             if (self.nestedIndexForTarget(target)) |hit| {
                 self.menu_submenu_open = true;
@@ -2832,6 +3192,8 @@ pub const App = struct {
             }
         }
         self.invalidateHoverChange(old_target, target);
+        if (old_tooltip) |rect| self.damage.invalidate(rect);
+        if (self.currentTrayTooltipRect()) |rect| self.damage.invalidate(rect);
     }
 
     fn dispatchMouseDown(self: *App, target: model.UiTarget, x: i32, y: i32) void {
@@ -3052,6 +3414,7 @@ pub const App = struct {
 
         if (self.startButtonHit(x, y)) return .start_button;
         if (self.quick_launch.hit(self.screen_h, x, y)) |index| return self.quick_launch.target(index);
+        if (self.tray_registry.hit(x, y) != null) return .taskbar_tray_external;
         if (self.keyboardLayoutHit(x, y)) return .taskbar_keyboard_layout;
         if (self.clockHit(x, y)) return .taskbar_clock;
         if (self.taskbarHit(x, y)) |index| {
@@ -3489,6 +3852,7 @@ pub const App = struct {
     }
 
     fn redraw(self: *App) void {
+        _ = self.updateTrayLayout();
         var regions: [surface.max_damage_regions]surface.Rect = undefined;
         var region_count = self.damage.takeRegions(&regions);
         const cursor_only = region_count == 0 and !self.taskbar_damage and self.cursor_damage.active;
@@ -3646,6 +4010,9 @@ pub const App = struct {
             self.active_window,
             zptr(self.clock[0..]),
             zptr(self.keyboard_layout.display[0..]),
+            &self.tray_registry,
+            self.tray_hover_identity,
+            self.tray_pressed_identity,
             &self.desktop_items,
             &self.quick_launch,
             self.desktop_item_selected,
@@ -5176,6 +5543,12 @@ pub const App = struct {
         if (self.dialog == .tasks) {
             return self.scrollTaskInventory(if (wheel > 0) -3 else 3);
         }
+        if (self.tray_registry.hit(x, y)) |identity| {
+            if (self.submitTrayActivation(identity, r4os.abi.tray_event_kind_wheel, wheel, x, y, self.ctx.ticks())) {
+                self.invalidateTaskbar();
+                return true;
+            }
+        }
         const target = self.targetAt(x, y);
         const index = self.windowIndexForTarget(target) orelse return false;
         if (self.windows[index].kind != .terminal) return false;
@@ -6496,13 +6869,24 @@ pub const App = struct {
     fn taskbarHit(self: *const App, x: i32, y: i32) ?usize {
         const top = self.screen_h - theme.taskbar_h;
         if (y < top + 4 or y >= top + 4 + theme.start_h) return null;
-        var bx: i32 = quick_launch.taskbarWindowStartX(self.quick_launch.count);
+        const window_start = quick_launch.taskbarWindowStartX(self.quick_launch.count);
+        const visible_count = self.visibleWindowCount();
+        var ordinal: usize = 0;
         for (self.windows, 0..) |win, i| {
             if (!win.visible) continue;
-            if (x >= bx and x < bx + 150) return i;
-            bx += 156;
+            const rect = tray.windowButtonRect(window_start, self.tray_registry.window_right, visible_count, ordinal, top + 4, theme.start_h);
+            ordinal += 1;
+            if (rect.contains(x, y)) return i;
         }
         return null;
+    }
+
+    fn visibleWindowCount(self: *const App) usize {
+        var count: usize = 0;
+        for (self.windows) |win| if (win.visible) {
+            count += 1;
+        };
+        return count;
     }
 
     fn dialogButtonHit(self: *const App, x: i32, y: i32) bool {

@@ -81,6 +81,8 @@ pub const UiTarget = enum(u16) {
     time_menu_backdrop = 145,
     quick_show_desktop = 146,
     quick_computer = 147,
+    taskbar_volume = 148,
+    taskbar_tray_external = 149,
     desktop_icon_1 = 150,
     desktop_icon_2 = 151,
     desktop_icon_3 = 152,
@@ -587,6 +589,8 @@ pub const ps_constants = [_]PsConstant{
     .{ .name = "UiTargetTimeMenuBackdrop", .value = @intFromEnum(UiTarget.time_menu_backdrop) },
     .{ .name = "UiTargetQuickShowDesktop", .value = @intFromEnum(UiTarget.quick_show_desktop) },
     .{ .name = "UiTargetQuickComputer", .value = @intFromEnum(UiTarget.quick_computer) },
+    .{ .name = "UiTargetTaskbarVolume", .value = @intFromEnum(UiTarget.taskbar_volume) },
+    .{ .name = "UiTargetTaskbarTrayExternal", .value = @intFromEnum(UiTarget.taskbar_tray_external) },
     .{ .name = "UiTargetDesktopIcon1", .value = @intFromEnum(UiTarget.desktop_icon_1) },
     .{ .name = "UiTargetDesktopIcon2", .value = @intFromEnum(UiTarget.desktop_icon_2) },
     .{ .name = "UiTargetDesktopIcon3", .value = @intFromEnum(UiTarget.desktop_icon_3) },
@@ -759,6 +763,8 @@ test "target owner and layer mapping follows Desktop ids" {
     try testing.expectEqual(UiOwner.taskbar, ownerForTarget(.taskbar_clock));
     try testing.expectEqual(UiOwner.taskbar, ownerForTarget(.quick_show_desktop));
     try testing.expectEqual(UiOwner.taskbar, ownerForTarget(.quick_computer));
+    try testing.expectEqual(UiOwner.taskbar, ownerForTarget(.taskbar_volume));
+    try testing.expectEqual(UiOwner.taskbar, ownerForTarget(.taskbar_tray_external));
     try testing.expectEqual(UiOwner.desktop, ownerForTarget(.desktop_icon_1));
     try testing.expectEqual(UiOwner.desktop, ownerForTarget(.desktop_icon_8));
     try testing.expectEqual(UiOwner.desktop, ownerForTarget(.desktop_item_32));
@@ -833,7 +839,7 @@ test "target activation preserves existing hit-test target" {
 }
 
 test "PowerShell export keeps current builder constants covered" {
-    try testing.expectEqual(@as(usize, 140), ps_constants.len);
+    try testing.expectEqual(@as(usize, 142), ps_constants.len);
     try testing.expectEqual(@as(usize, 12), start_menu_items.len);
     try testing.expectEqual(@as(usize, 3), policy_labels.len);
     try testing.expectEqual(@as(u8, 1), start_menu_first_id);

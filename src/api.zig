@@ -9,14 +9,21 @@ pub const Context = struct {
     dev: r4os.r4dev.Context,
     desk: r4os.r4desk.Context,
     draw: r4os.r4draw.Context,
+    self_handle: r4os.abi.ProgramProcessHandle,
     scene: ?*scene_buffer.SceneBuffer = null,
 
     pub fn init(app: *r4os.App) ?Context {
+        const sys = app.system();
+        const instance_id = app.startContext().instance_id;
+        if (instance_id == 0 or instance_id > std.math.maxInt(u32)) return null;
+        var self_handle: r4os.abi.ProgramProcessHandle = .{};
+        if (sys.programOpenHandle(@intCast(instance_id), &self_handle) != r4os.abi.program_handle_ok) return null;
         return .{
-            .sys = app.system(),
+            .sys = sys,
             .dev = app.devicesLowLevel() orelse return null,
             .desk = app.desktop() orelse return null,
             .draw = app.drawing() orelse return null,
+            .self_handle = self_handle,
             .scene = null,
         };
     }
@@ -309,6 +316,31 @@ pub const Context = struct {
         return self.desk.consolePushInput(instance_id, data);
     }
 
+    pub fn trayDesktopExchange(
+        self: *const Context,
+        op: u16,
+        request: *const r4os.abi.TrayDesktopExchange,
+        out: *r4os.abi.TrayDesktopExchange,
+    ) i32 {
+        var info: r4os.abi.ServiceInfo = .{};
+        const opened = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
+        if (opened != r4os.abi.service_api_result_ok or info.handle == 0) return opened;
+        defer _ = self.sys.serviceClose(info.handle);
+
+        var header: r4os.abi.ServiceMessageHeader = .{};
+        const got = self.sys.serviceCall(
+            info.handle,
+            op,
+            std.mem.asBytes(request),
+            &header,
+            std.mem.asBytes(out),
+            self.sys.ticksFromMilliseconds(250),
+        );
+        if (got != @as(i32, @intCast(@sizeOf(r4os.abi.TrayDesktopExchange)))) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
+        if (header.status != r4os.abi.service_api_result_ok) return header.status;
+        return r4os.abi.service_api_result_ok;
+    }
+
     pub fn windowServiceStatus(self: *const Context, out: *r4os.abi.WindowServiceStatus) i32 {
         var info: r4os.abi.ServiceInfo = .{};
         const rc = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
@@ -531,6 +563,34 @@ pub const Context = struct {
             return;
         }
         paint.xrgb32(&self.draw, x, y, w, h, pixels);
+    }
+
+    pub fn paintArgb32(self: *const Context, x: i32, y: i32, w: u32, h: u32, pixels: []const u32) bool {
+        const needed = std.math.mul(usize, @as(usize, w), @as(usize, h)) catch return false;
+        if (w == 0 or h == 0 or pixels.len != needed) return false;
+        if (self.scene) |scene| {
+            return scene.blendArgb32(scene.fullRect(), x, y, w, h, 1, std.mem.sliceAsBytes(pixels));
+        }
+
+        // The Desktop normally renders through the XRGB scene. Keep the
+        // direct-display fallback bounded and transparent-pixel preserving;
+        // partial alpha is flattened only on this emergency path.
+        var row: usize = 0;
+        while (row < h) : (row += 1) {
+            var column: usize = 0;
+            while (column < w) {
+                while (column < w and (pixels[row * @as(usize, w) + column] >> 24) == 0) : (column += 1) {}
+                const start = column;
+                while (column < w and (pixels[row * @as(usize, w) + column] >> 24) != 0) : (column += 1) {}
+                if (column == start) continue;
+                var flattened: [r4os.abi.tray_icon_width]u32 = .{0} ** r4os.abi.tray_icon_width;
+                const count = @min(column - start, flattened.len);
+                var index: usize = 0;
+                while (index < count) : (index += 1) flattened[index] = pixels[row * @as(usize, w) + start + index] & 0x00ff_ffff;
+                paint.xrgb32(&self.draw, x + @as(i32, @intCast(start)), y + @as(i32, @intCast(row)), @intCast(count), 1, flattened[0..count]);
+            }
+        }
+        return true;
     }
 
     pub fn paintAlpha8(self: *const Context, x: i32, y: i32, w: u32, h: u32, stride: u32, rgb: u32, alpha: []const u8) bool {
