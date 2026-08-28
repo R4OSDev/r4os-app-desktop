@@ -144,6 +144,7 @@ const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=sequenced+policy-filtered idle=no-frame fps>=20\r\n" ++
     "SUBSYSTEM runtime selftest: OK instances=2 slices=bounded time=monotonic audio=s16le-buffered lifecycle=pause+resume+reset+complete+close errors=isolated resources=closed\r\n" ++
     "R4BASIC source-probe: info_calls=1 read_calls=0 read_bytes=0 limit_bytes=262144\r\n" ++
+    "DESKTOP terminal-close selftest: OK target=chrome request=cooperative duplicate=idempotent exit=0 reap=generation\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
@@ -1243,13 +1244,25 @@ pub const App = struct {
             self.forceCloseWindowsByLaunchPath(terminal_path);
             return false;
         }
-        const close_result = self.ctx.programHandleRequestClose(&second_handle);
-        if (close_result != r4os.abi.program_handle_ok) {
+        const close_window = &self.windows[second];
+        const close_x = close_window.x + close_window.w - 4 - (theme.button + 2) + @divTrunc(theme.button, 2);
+        const close_y = close_window.y + 2 + @divTrunc(theme.button, 2);
+        const close_target = self.targetAt(close_x, close_y);
+        if (close_target != self.closeTargetForIndex(second)) {
+            self.ctx.println("FAILED-close-target");
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return false;
+        }
+        self.dispatchMouseCommand(close_target);
+        self.dispatchMouseCommand(close_target);
+        if (!self.windows[second].close_requested or
+            !sameProcessHandle(self.window_process_handles[second], second_handle) or
+            self.windows[first].close_requested)
+        {
             self.ctx.println("FAILED-close-request");
             self.forceCloseWindowsByLaunchPath(terminal_path);
             return false;
         }
-        self.windows[second].requestClose(self.ctx.ticks());
 
         var closed = false;
         var close_attempt: u32 = 0;
@@ -2120,9 +2133,10 @@ pub const App = struct {
     fn startHeadlessSubsystemAcceptance(self: *App) bool {
         _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
         _ = self.ctx.fileDelete(r4basic_baseline_marker_path);
+        if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
+        if (!self.smokeLaunchMultipleTerminalWindows()) return self.headlessSubsystemFailure("terminal-window-close");
         self.window_completion_handles = .{r4os.abi.ProgramProcessHandle{}} ** self.window_completion_handles.len;
         self.window_completion_exit_codes = .{0} ** self.window_completion_exit_codes.len;
-        if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
         if (r4std.subsystem_runtime.load(&self.ctx.sys) != .loaded) return self.headlessSubsystemFailure("catalog-load");
 
         const first = self.launchHeadlessSubsystemGuest(subsystem_guest_a_path) orelse return false;
@@ -3234,22 +3248,16 @@ pub const App = struct {
 
     fn closeWindow(self: *App, index: usize) void {
         if (index >= self.windows.len) return;
-        if (self.windows[index].kind == .terminal) {
-            self.closeConsoleHostFromDesk(index);
-            return;
-        }
-        if (index == 0) self.terminal_mode = false;
         if (self.windows[index].instance_id != 0) {
-            if (self.windows[index].close_requested) {
-                self.forceCloseWindow(index);
-                return;
-            }
+            if (self.windows[index].close_requested) return;
             const result = self.requestWindowProcessClose(index);
             if (result == r4os.abi.program_handle_ok) {
                 self.windows[index].requestClose(self.ctx.ticks());
                 self.mirrorWindowClose(index);
-                self.updateGuiWindowInfo(index);
-                self.pushGuiEvent(index, .close);
+                if (self.windows[index].kind == .app) {
+                    self.updateGuiWindowInfo(index);
+                    self.pushGuiEvent(index, .close);
+                }
                 self.invalidateWindow(index);
                 self.invalidateTaskbar();
                 return;
@@ -5006,8 +5014,10 @@ pub const App = struct {
             const result = self.ctx.programHandleKill(&handle);
             if (result == r4os.abi.program_handle_ok) {
                 self.windows[index].requestClose(self.ctx.ticks());
+                if (index == 0) self.terminal_mode = false;
                 self.invalidateWindow(index);
                 self.invalidateTaskbar();
+                self.invalidateFull();
                 return;
             }
             if (!processHandleDefinitelyGone(result)) return;

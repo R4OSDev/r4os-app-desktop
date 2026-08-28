@@ -54,7 +54,7 @@ Textbefehle gehosteter GUI-Frames rasterisieren jede den aktuellen Damage-
 und Clientclip schneidende Glyphenzelle. Nur die sichtbaren Teilpixel werden
 uebernommen; dadurch liefern Vollkomposition und regionale Komposition an
 allen Glyphenkanten dasselbe Bild, ohne Pixel ausserhalb des Clips zu
-veraendern. Diese Regel gilt fuer den eingebauten und installierte Fonts.
+veraendern. Diese Regel gilt fuer den eingebauten und installierten Fontpfad.
 
 Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Snapshot mit
 kompakten Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Konsolenstatus,
@@ -67,8 +67,16 @@ Der Desktop-Smoke startet zwei unabhaengige Terminalfenster und belegt seit
 0.69.67 ueber Task- und Konsolentelemetrie, dass beide nach dem Prompt ohne
 weitere CPU-Ticks, Reads, Revisionen oder Desktop-Signale blockiert bleiben.
 Danach prueft er gebuendelte Eingabe, den erneuten Wait in `PAUSE`, den
-generationengebundenen Wake, normalen Exit sowie einen Close-Request auf das
-zweite Fenster und dessen generationstreuen Reap.
+generationengebundenen Wake und normalen Exit. Das zweite Fenster wird ueber
+die echte Hit-Test- und Maus-Command-Kette seiner sichtbaren Schliessen-
+Schaltflaeche geschlossen. Ein wiederholtes Close waehrend der Grace-Phase
+bleibt idempotent; Request-Close weckt das wartende Terminal, das normal mit
+Exitcode 0 endet und generationstreu gereapt wird.
+
+Der Benutzer-Close eines Terminalfensters ist vom `DESKTOP`-Rueckweg aus dem
+Terminal Mode und von ausdruecklicher erzwungener Testbereinigung getrennt.
+Nur diese Sonderpfade beziehungsweise der zeitlich begrenzte Grace-Timeout
+verwenden den Hard-Kill.
 
 Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
 Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
