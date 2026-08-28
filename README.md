@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.20`
+- Version: `0.1.25`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -28,6 +28,12 @@ last verified standalone dependency identities; workspace builds use the
 mapped local checkouts.
 
 ## Documentation
+
+The taskbar owns the notification-area layout. Its built-in volume item sits
+immediately left of the clock and controls AUDSVC's persistent global master
+volume and mute state through the bounded app-audio service facade. The
+anchored popup remains part of the desktop instead of creating a second
+window or mixer process.
 
 Detailed German technical notes from the migration are preserved in
 `DOCUMENTATION.de.txt`. Source-transfer provenance is recorded in

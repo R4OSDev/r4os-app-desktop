@@ -15,6 +15,7 @@ const theme = @import("theme.zig");
 const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
 const tray = @import("tray.zig");
+const volume = @import("volume.zig");
 const window = @import("window.zig");
 
 const console_output_render_max: usize = 16 * 1024;
@@ -656,9 +657,20 @@ pub fn taskbarClockRect(screen_w: i32, screen_h: i32) surface.Rect {
     };
 }
 
-pub fn taskbarKeyboardLayoutRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
+pub fn taskbarVolumeRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
     const top = screen_h - theme.taskbar_h;
     const right = if (clock_visible)
+        taskbarClockRect(screen_w, screen_h).x - volume.icon_gap
+    else
+        screen_w - taskbar_clock_right_margin;
+    return volume.iconRect(right, top + 4, theme.start_h);
+}
+
+pub fn taskbarKeyboardLayoutRect(screen_w: i32, screen_h: i32, clock_visible: bool, volume_visible: bool) surface.Rect {
+    const top = screen_h - theme.taskbar_h;
+    const right = if (volume_visible)
+        taskbarVolumeRect(screen_w, screen_h, clock_visible).x - taskbar_layout_gap
+    else if (clock_visible)
         taskbarClockRect(screen_w, screen_h).x - taskbar_layout_gap
     else
         screen_w - taskbar_clock_right_margin;
@@ -668,6 +680,21 @@ pub fn taskbarKeyboardLayoutRect(screen_w: i32, screen_h: i32, clock_visible: bo
         .w = taskbar_layout_w,
         .h = theme.start_h,
     };
+}
+
+pub fn volumePopupRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
+    return volume.popupRect(
+        taskbarVolumeRect(screen_w, screen_h, clock_visible),
+        surface.workArea(screen_w, screen_h, theme.taskbar_h),
+    );
+}
+
+pub fn volumeTrackRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
+    return volume.trackRect(volumePopupRect(screen_w, screen_h, clock_visible));
+}
+
+pub fn volumeMuteRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
+    return volume.muteRect(volumePopupRect(screen_w, screen_h, clock_visible));
 }
 
 pub fn timeMenuRect(screen_w: i32, screen_h: i32) surface.Rect {
@@ -691,6 +718,7 @@ pub fn taskbar(
     active_index: usize,
     clock: ?[*:0]const u8,
     keyboard_layout: ?[*:0]const u8,
+    volume_view: volume.View,
     tray_registry: ?*const tray.Registry,
     tray_hover: tray.Identity,
     tray_pressed: tray.Identity,
@@ -714,7 +742,7 @@ pub fn taskbar(
         const window_right = if (tray_registry) |registry|
             registry.window_right
         else
-            taskbarKeyboardLayoutRect(screen_w, screen_h, clock != null).x - tray.window_gap;
+            taskbarKeyboardLayoutRect(screen_w, screen_h, clock != null, volume_view.installed).x - tray.window_gap;
         const visible_count = visibleWindowCount(list);
         var ordinal: usize = 0;
         for (list, 0..) |win, i| {
@@ -754,8 +782,21 @@ pub fn taskbar(
         }
     }
 
+    if (volume_view.installed) {
+        const rect = taskbarVolumeRect(screen_w, screen_h, clock != null);
+        const pressed = pressed_target == .taskbar_volume;
+        const hovered = hover_target == .taskbar_volume and !pressed;
+        const bg = if (pressed) theme.taskbar_pressed else if (hovered) theme.taskbar_hover else theme.taskbar;
+        if (pressed or hovered) {
+            bevel(ctx, rect.x, rect.y, rect.w, rect.h, pressed);
+            ctx.paintRect(rect.x + 2, rect.y + 2, @intCast(rect.w - 4), @intCast(rect.h - 4), bg);
+        }
+        volumeGlyph(ctx, rect.x + 5, rect.y + 5, volume.iconState(volume_view), bg);
+        if (hovered) focusRect(ctx, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
+    }
+
     if (keyboard_layout) |value| {
-        const rect = taskbarKeyboardLayoutRect(screen_w, screen_h, clock != null);
+        const rect = taskbarKeyboardLayoutRect(screen_w, screen_h, clock != null, volume_view.installed);
         const pressed = pressed_target == .taskbar_keyboard_layout;
         const hovered = hover_target == .taskbar_keyboard_layout and !pressed;
         const bg = if (pressed) theme.taskbar_pressed else if (hovered) theme.taskbar_hover else theme.taskbar;
@@ -775,6 +816,100 @@ pub fn taskbar(
         if (hovered) focusRect(ctx, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
         ctx.paintText(rect.x + 10, top + 11, value, theme.text, bg);
     }
+}
+
+fn volumeGlyph(ctx: *const desk_api.Context, x: i32, y: i32, state: volume.IconState, bg: u32) void {
+    const color = if (state == .unavailable) theme.taskbar_dark else theme.text;
+    ctx.paintRect(x, y + 6, 4, 7, color);
+    ctx.paintRect(x + 4, y + 4, 2, 11, color);
+    ctx.paintRect(x + 6, y + 2, 2, 15, color);
+    switch (state) {
+        .normal, .loud => {
+            ctx.paintRect(x + 10, y + 6, 1, 7, color);
+            ctx.paintRect(x + 12, y + 4, 1, 11, color);
+            if (state == .loud) {
+                ctx.paintRect(x + 14, y + 2, 1, 15, color);
+                ctx.paintRect(x + 16, y + 5, 1, 9, color);
+            }
+        },
+        .quiet => ctx.paintRect(x + 10, y + 7, 1, 5, color),
+        .muted, .unavailable => {
+            const mark = if (state == .unavailable) 0xA00000 else color;
+            var offset: i32 = 0;
+            while (offset < 7) : (offset += 1) {
+                ctx.paintRect(x + 10 + offset, y + 5 + offset, 1, 1, mark);
+                ctx.paintRect(x + 16 - offset, y + 5 + offset, 1, 1, mark);
+            }
+        },
+        .hidden => ctx.paintRect(x, y, 1, 1, bg),
+    }
+}
+
+pub fn volumeTooltipRect(screen_w: i32, screen_h: i32, clock_visible: bool) surface.Rect {
+    const icon = taskbarVolumeRect(screen_w, screen_h, clock_visible);
+    const work = surface.workArea(screen_w, screen_h, theme.taskbar_h);
+    return (surface.Rect{ .x = icon.x - 74, .y = icon.y - 34, .w = 176, .h = 28 }).clampInside(work);
+}
+
+pub fn volumeTooltip(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, clock_visible: bool, view: volume.View) void {
+    if (!view.installed) return;
+    const rect = volumeTooltipRect(screen_w, screen_h, clock_visible);
+    ctx.paintRect(rect.x + 2, rect.y + 2, @intCast(rect.w), @intCast(rect.h), theme.shadow);
+    ctx.paintRect(rect.x, rect.y, @intCast(rect.w), @intCast(rect.h), theme.text);
+    ctx.paintRect(rect.x + 1, rect.y + 1, @intCast(rect.w - 2), @intCast(rect.h - 2), 0xFFFFE1);
+    if (!view.reachable) {
+        textLit(ctx, rect.x + 6, rect.y + 10, "Audio service unavailable", theme.text, 0xFFFFE1);
+    } else if (view.muted) {
+        textLit(ctx, rect.x + 6, rect.y + 10, "System volume: muted", theme.text, 0xFFFFE1);
+    } else {
+        var number: [4]u8 = .{0} ** 4;
+        writeU32Z(number[0..], view.percent);
+        textLit(ctx, rect.x + 6, rect.y + 10, "System volume:", theme.text, 0xFFFFE1);
+        ctx.paintText(rect.x + 118, rect.y + 10, @ptrCast(&number), theme.text, 0xFFFFE1);
+        textLit(ctx, rect.x + 143, rect.y + 10, "%", theme.text, 0xFFFFE1);
+    }
+}
+
+pub fn volumePopup(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, clock_visible: bool, view: volume.View, hover_target: model.UiTarget, pressed_target: model.UiTarget) void {
+    if (!view.installed or !view.popup_open) return;
+    const rect = volumePopupRect(screen_w, screen_h, clock_visible);
+    const track = volume.trackRect(rect);
+    const mute = volume.muteRect(rect);
+    ctx.paintRect(rect.x + 3, rect.y + 3, @intCast(rect.w), @intCast(rect.h), theme.shadow);
+    ctx.paintRect(rect.x, rect.y, @intCast(rect.w), @intCast(rect.h), theme.window_bg);
+    bevel(ctx, rect.x, rect.y, rect.w, rect.h, false);
+    textLit(ctx, rect.x + 14, rect.y + 13, "System volume", theme.text, theme.window_bg);
+
+    var number: [4]u8 = .{0} ** 4;
+    writeU32Z(number[0..], view.percent);
+    ctx.paintText(rect.right() - 42, rect.y + 13, @ptrCast(&number), theme.text, theme.window_bg);
+    textLit(ctx, rect.right() - 16, rect.y + 13, "%", theme.text, theme.window_bg);
+
+    const enabled = view.reachable;
+    const track_bg = if (enabled) theme.client_bg else theme.taskbar;
+    ctx.paintRect(track.x, track.y + 5, @intCast(track.w), 4, theme.taskbar_dark);
+    ctx.paintRect(track.x + 1, track.y + 6, @intCast(@max(0, track.w - 2)), 2, track_bg);
+    const fill_w: i32 = if (track.w <= 1) 0 else @intCast(@divTrunc(@as(i64, track.w - 1) * view.percent, 100));
+    if (enabled and fill_w > 0) ctx.paintRect(track.x + 1, track.y + 6, @intCast(fill_w), 2, theme.title_active);
+    const thumb_x = track.x + fill_w - 4;
+    ctx.paintRect(thumb_x, track.y, 9, @intCast(track.h), if (enabled) theme.window_bg else theme.taskbar);
+    bevel(ctx, thumb_x, track.y, 9, track.h, pressed_target == .volume_popup_slider);
+    if (hover_target == .volume_popup_slider and enabled) focusRect(ctx, track.x - 2, track.y - 2, track.w + 4, track.h + 4);
+
+    const mute_pressed = pressed_target == .volume_popup_mute or view.muted;
+    const mute_hot = hover_target == .volume_popup_mute and !mute_pressed;
+    const mute_bg = if (!enabled) theme.taskbar else if (mute_pressed) theme.taskbar_pressed else if (mute_hot) theme.taskbar_hover else theme.window_bg;
+    bevel(ctx, mute.x, mute.y, mute.w, mute.h, mute_pressed);
+    ctx.paintRect(mute.x + 2, mute.y + 2, @intCast(mute.w - 4), @intCast(mute.h - 4), mute_bg);
+    ctx.paintRect(mute.x + 10, mute.y + 7, 10, 10, theme.client_bg);
+    bevel(ctx, mute.x + 9, mute.y + 6, 12, 12, true);
+    if (view.muted) {
+        ctx.paintRect(mute.x + 11, mute.y + 11, 3, 2, theme.text);
+        ctx.paintRect(mute.x + 13, mute.y + 13, 3, 2, theme.text);
+        ctx.paintRect(mute.x + 15, mute.y + 9, 3, 2, theme.text);
+    }
+    textLit(ctx, mute.x + 29, mute.y + 9, "Mute", if (enabled) theme.text else theme.taskbar_dark, mute_bg);
+    if (!enabled) textLit(ctx, rect.x + 119, mute.y + 9, "Unavailable", theme.taskbar_dark, theme.window_bg);
 }
 
 pub fn trayTooltip(ctx: *const desk_api.Context, registry: *const tray.Registry, identity: tray.Identity, screen_w: i32, screen_h: i32) void {

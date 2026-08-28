@@ -11,6 +11,7 @@ const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
 const theme = @import("theme.zig");
 const tray = @import("tray.zig");
+const volume = @import("volume.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
 
@@ -71,6 +72,7 @@ pub fn compose(
     active_window: usize,
     clock: [*:0]const u8,
     keyboard_layout: [*:0]const u8,
+    volume_view: volume.View,
     tray_registry: *const tray.Registry,
     tray_hover: tray.Identity,
     tray_pressed: tray.Identity,
@@ -161,12 +163,19 @@ pub fn compose(
 
     const taskbar_rect = surface.taskbar(screen_w, screen_h, theme.taskbar_h).rect;
     if (layerVisible(&stats, damage, taskbar_rect)) {
-        draw.taskbar(ctx, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
+        draw.taskbar(ctx, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, volume_view, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
     }
 
     if (tray_registry.tooltipRect(tray_hover, screen_w, screen_h, theme.taskbar_h)) |tooltip_rect| {
         if (layerVisible(&stats, damage, tooltip_rect)) {
             draw.trayTooltip(ctx, tray_registry, tray_hover, screen_w, screen_h);
+        }
+    }
+
+    if (hover_target == .taskbar_volume and !volume_view.popup_open) {
+        const tooltip_rect = draw.volumeTooltipRect(screen_w, screen_h, config.taskbar_clock);
+        if (layerVisible(&stats, damage, tooltip_rect)) {
+            draw.volumeTooltip(ctx, screen_w, screen_h, config.taskbar_clock, volume_view);
         }
     }
 
@@ -188,6 +197,13 @@ pub fn compose(
         const rect = draw.timeMenuRect(screen_w, screen_h);
         if (layerVisible(&stats, damage, rect)) {
             draw.timeMenu(ctx, screen_w, screen_h, hover_target, pressed_target);
+        }
+    }
+
+    if (volume_view.popup_open) {
+        const rect = draw.volumePopupRect(screen_w, screen_h, config.taskbar_clock);
+        if (layerVisible(&stats, damage, rect)) {
+            draw.volumePopup(ctx, screen_w, screen_h, config.taskbar_clock, volume_view, hover_target, pressed_target);
         }
     }
 

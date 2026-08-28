@@ -73,6 +73,9 @@ pub const UiTarget = enum(u16) {
     wm_taskbar = 121,
     app2_taskbar = 122,
     app3_taskbar = 123,
+    volume_popup_backdrop = 124,
+    volume_popup_slider = 125,
+    volume_popup_mute = 126,
     start_button = 140,
     taskbar_keyboard_layout = 141,
     time_menu_clock = 142,
@@ -581,6 +584,9 @@ pub const ps_constants = [_]PsConstant{
     .{ .name = "UiTargetWmTaskbar", .value = @intFromEnum(UiTarget.wm_taskbar) },
     .{ .name = "UiTargetApp2Taskbar", .value = @intFromEnum(UiTarget.app2_taskbar) },
     .{ .name = "UiTargetApp3Taskbar", .value = @intFromEnum(UiTarget.app3_taskbar) },
+    .{ .name = "UiTargetVolumePopupBackdrop", .value = @intFromEnum(UiTarget.volume_popup_backdrop) },
+    .{ .name = "UiTargetVolumePopupSlider", .value = @intFromEnum(UiTarget.volume_popup_slider) },
+    .{ .name = "UiTargetVolumePopupMute", .value = @intFromEnum(UiTarget.volume_popup_mute) },
     .{ .name = "UiTargetStartButton", .value = @intFromEnum(UiTarget.start_button) },
     .{ .name = "UiTargetTaskbarKeyboardLayout", .value = @intFromEnum(UiTarget.taskbar_keyboard_layout) },
     .{ .name = "UiTargetTimeMenuClock", .value = @intFromEnum(UiTarget.time_menu_clock) },
@@ -839,7 +845,7 @@ test "target activation preserves existing hit-test target" {
 }
 
 test "PowerShell export keeps current builder constants covered" {
-    try testing.expectEqual(@as(usize, 142), ps_constants.len);
+    try testing.expectEqual(@as(usize, 145), ps_constants.len);
     try testing.expectEqual(@as(usize, 12), start_menu_items.len);
     try testing.expectEqual(@as(usize, 3), policy_labels.len);
     try testing.expectEqual(@as(u8, 1), start_menu_first_id);

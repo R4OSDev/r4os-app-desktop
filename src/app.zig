@@ -22,6 +22,7 @@ const surface = @import("surface.zig");
 const text_field = @import("text_field.zig");
 const theme = @import("theme.zig");
 const tray = @import("tray.zig");
+const volume = @import("volume.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
 const window_service_gate = @import("window_service_gate.zig");
@@ -136,6 +137,7 @@ const terminal_desktop_args = "/NOAUTOEXEC";
 const tray_provider_test_path = "/R4OS/SOFTWARE/TERMINAL/DIAG/APPZCON.R4X";
 const tray_provider_test_args = "/TRAYSMOKE";
 const tray_provider_test_item_id: u64 = 0x7103_0001;
+const audio_service_module_path = "C:\\R4OS\\SERVICES\\AUDSVC.R4X";
 const subsystem_host_test_path = "/R4OS/SUBSYSTEMS/test.basic/SUBSYSOK.R4X";
 const subsystem_guest_a_path = "C:\\TEMP\\SUBSYSTEM-A.BAS";
 const subsystem_guest_b_path = "C:\\TEMP\\SUBSYSTEM-B.BAS";
@@ -150,6 +152,7 @@ const subsystem_host_test_marker =
     "R4BASIC source-probe: info_calls=1 read_calls=0 read_bytes=0 limit_bytes=262144\r\n" ++
     "DESKTOP terminal-close selftest: OK target=chrome request=cooperative duplicate=idempotent exit=0 reap=generation\r\n" ++
     "DESKTOP tray selftest: OK ipc=service owner=generation registry=16 icon=argb32 events=sequenced wait=bounded cleanup=owner\r\n" ++
+    "DESKTOP volume selftest: OK tray=system states=5 popup=anchored input=mouse+keyboard gain=perceptual service=AUDSVC persistence=owned\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
@@ -179,6 +182,8 @@ const time_config_check_ms: u32 = 1000;
 const window_service_retry_ms: u32 = 2000;
 const tray_service_retry_ms: u32 = 2000;
 const tray_sync_ms: u32 = 50;
+const volume_poll_ms: u32 = 500;
+const volume_send_ms: u32 = 50;
 const tray_sync_page_burst: u32 = 16;
 const remote_input_burst: u32 = 16;
 const console_scroll_wheel_lines: u32 = 3;
@@ -327,6 +332,16 @@ pub const App = struct {
     tray_pressed_identity: tray.Identity = .{},
     tray_right_pressed_identity: tray.Identity = .{},
     last_mouse_down_tray_identity: tray.Identity = .{},
+    volume_ui: volume.View = .{},
+    volume_master: r4os.abi.AudioServiceMasterState = .{},
+    volume_next_poll_tick: u64 = 0,
+    volume_next_send_tick: u64 = 0,
+    volume_poll_ticks: u64 = 50,
+    volume_send_ticks: u64 = 5,
+    volume_pending_flags: u32 = 0,
+    volume_pending_percent: u8 = 100,
+    volume_pending_muted: bool = false,
+    volume_dragging: bool = false,
     window_service_mirrored: [4]bool = .{false} ** 4,
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
@@ -424,6 +439,7 @@ pub const App = struct {
         self.resetWindowServiceState();
         self.tray_registry = tray.Registry.init(self.ctx.self_handle.generation);
         self.tray_staging = tray.Registry.init(self.ctx.self_handle.generation);
+        _ = self.syncVolume();
         _ = self.syncTrayBroker();
         _ = self.updateTrayLayout();
         self.invalidateFull();
@@ -654,7 +670,7 @@ pub const App = struct {
             .screen_h = self.screen_h,
             .taskbar_h = theme.taskbar_h,
             .item_y = 4,
-            .system_left = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, self.config.taskbar_clock).x,
+            .system_left = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, self.config.taskbar_clock, self.volume_ui.installed).x,
             .window_start = quick_launch.taskbarWindowStartX(self.quick_launch.count),
             .visible_windows = self.visibleWindowCount(),
         });
@@ -675,6 +691,120 @@ pub const App = struct {
 
     fn currentTrayTooltipRect(self: *const App) ?surface.Rect {
         return self.tray_registry.tooltipRect(self.tray_hover_identity, self.screen_w, self.screen_h, theme.taskbar_h);
+    }
+
+    fn syncVolume(self: *App) bool {
+        const now = self.ctx.ticks();
+        var changed = false;
+        if (self.volume_pending_flags != 0 and now >= self.volume_next_send_tick) {
+            if (self.flushVolumeUpdate(false)) changed = true;
+        }
+        if (now < self.volume_next_poll_tick) return changed;
+        self.volume_next_poll_tick = now +| self.volume_poll_ticks;
+
+        const old = self.volume_ui;
+        const installed = self.ctx.exists(audio_service_module_path);
+        self.volume_ui.installed = installed;
+        if (!installed) {
+            self.volume_ui.reachable = false;
+            self.volume_ui.popup_open = false;
+            self.volume_dragging = false;
+            self.volume_pending_flags = 0;
+        } else {
+            var state: r4os.abi.AudioServiceMasterState = .{};
+            const result = self.ctx.audioMasterState(&state);
+            if (result == r4os.abi.service_api_result_ok) {
+                self.acceptVolumeState(state);
+            } else {
+                self.volume_ui.reachable = false;
+            }
+        }
+        if (!volumeViewEqual(old, self.volume_ui)) {
+            if (old.installed != self.volume_ui.installed) _ = self.updateTrayLayout();
+            self.invalidateVolumeFeedback();
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn acceptVolumeState(self: *App, state: r4os.abi.AudioServiceMasterState) void {
+        self.volume_master = state;
+        self.volume_ui.installed = true;
+        self.volume_ui.reachable = true;
+        self.volume_ui.muted = (state.flags & r4os.abi.audio_master_state_flag_muted) != 0;
+        self.volume_ui.percent = volume.percentForGain(state.selected_volume_fixed);
+    }
+
+    fn setVolumePercent(self: *App, percent: u8, immediate: bool) bool {
+        if (!self.volume_ui.installed or !self.volume_ui.reachable) return false;
+        const next = @min(percent, 100);
+        const old = self.volume_ui;
+        self.volume_ui.percent = next;
+        if (next != 0) self.volume_ui.muted = false;
+        if (self.volume_pending_flags == 0) self.volume_next_send_tick = self.ctx.ticks();
+        self.volume_pending_flags |= r4os.abi.audio_master_request_flag_set_volume;
+        self.volume_pending_percent = next;
+        if (!volumeViewEqual(old, self.volume_ui)) self.invalidateVolumeFeedback();
+        if (immediate or self.ctx.ticks() >= self.volume_next_send_tick) _ = self.flushVolumeUpdate(immediate);
+        return true;
+    }
+
+    fn toggleVolumeMute(self: *App) bool {
+        if (!self.volume_ui.installed or !self.volume_ui.reachable) return false;
+        const old = self.volume_ui;
+        self.volume_ui.muted = !self.volume_ui.muted;
+        if (self.volume_pending_flags == 0) self.volume_next_send_tick = self.ctx.ticks();
+        self.volume_pending_flags |= r4os.abi.audio_master_request_flag_set_muted;
+        self.volume_pending_muted = self.volume_ui.muted;
+        if (!volumeViewEqual(old, self.volume_ui)) self.invalidateVolumeFeedback();
+        _ = self.flushVolumeUpdate(true);
+        return true;
+    }
+
+    fn adjustVolume(self: *App, direction: i32) bool {
+        return self.setVolumePercent(volume.stepped(self.volume_ui.percent, direction), true);
+    }
+
+    fn flushVolumeUpdate(self: *App, force: bool) bool {
+        if (self.volume_pending_flags == 0 or !self.volume_ui.installed) return false;
+        const now = self.ctx.ticks();
+        if (!force and now < self.volume_next_send_tick) return false;
+        const old = self.volume_ui;
+        var request: r4os.abi.AudioServiceMasterRequest = .{
+            .flags = self.volume_pending_flags,
+            .fixed_volume = volume.gainForPercent(self.volume_pending_percent),
+        };
+        if ((request.flags & r4os.abi.audio_master_request_flag_set_muted) != 0 and self.volume_pending_muted) {
+            request.flags |= r4os.abi.audio_master_request_flag_muted;
+        }
+        self.volume_pending_flags = 0;
+        self.volume_next_send_tick = now +| self.volume_send_ticks;
+        var state: r4os.abi.AudioServiceMasterState = .{};
+        if (self.ctx.audioSetMasterState(&request, &state) == r4os.abi.service_api_result_ok) {
+            self.acceptVolumeState(state);
+            self.volume_next_poll_tick = now +| self.volume_poll_ticks;
+        } else {
+            self.volume_ui.reachable = false;
+            self.volume_next_poll_tick = now +| self.volume_poll_ticks;
+        }
+        if (!volumeViewEqual(old, self.volume_ui)) self.invalidateVolumeFeedback();
+        return !volumeViewEqual(old, self.volume_ui);
+    }
+
+    fn updateVolumeFromPointer(self: *App, x: i32, force: bool) bool {
+        const track = draw.volumeTrackRect(self.screen_w, self.screen_h, self.config.taskbar_clock);
+        return self.setVolumePercent(volume.percentAtX(track, x), force);
+    }
+
+    fn invalidateVolumeFeedback(self: *App) void {
+        self.invalidateTaskbar();
+        if (self.volume_ui.popup_open) self.invalidateVolumePopup();
+        if (self.currentVolumeTooltipRect()) |rect| self.damage.invalidate(rect);
+    }
+
+    fn currentVolumeTooltipRect(self: *const App) ?surface.Rect {
+        if (self.hover_target != .taskbar_volume or self.volume_ui.popup_open or !self.volume_ui.installed) return null;
+        return draw.volumeTooltipRect(self.screen_w, self.screen_h, self.config.taskbar_clock);
     }
 
     fn pollRemoteFrameDemand(self: *App) bool {
@@ -2421,6 +2551,101 @@ pub const App = struct {
         return true;
     }
 
+    fn restoreSmokeVolumeState(self: *App, original: r4os.abi.AudioServiceMasterState) bool {
+        var restored: r4os.abi.AudioServiceMasterState = .{};
+        var request: r4os.abi.AudioServiceMasterRequest = .{
+            .flags = r4os.abi.audio_master_request_flag_set_volume,
+            .fixed_volume = original.last_audible_volume_fixed,
+        };
+        if (self.ctx.audioSetMasterState(&request, &restored) != r4os.abi.service_api_result_ok) return false;
+
+        request = .{
+            .flags = r4os.abi.audio_master_request_flag_set_volume |
+                r4os.abi.audio_master_request_flag_set_muted |
+                (if ((original.flags & r4os.abi.audio_master_state_flag_muted) != 0)
+                    r4os.abi.audio_master_request_flag_muted
+                else
+                    0),
+            .fixed_volume = original.selected_volume_fixed,
+        };
+        if (self.ctx.audioSetMasterState(&request, &restored) != r4os.abi.service_api_result_ok) return false;
+        return restored.selected_volume_fixed == original.selected_volume_fixed and
+            restored.last_audible_volume_fixed == original.last_audible_volume_fixed and
+            (restored.flags & r4os.abi.audio_master_state_flag_muted) ==
+                (original.flags & r4os.abi.audio_master_state_flag_muted);
+    }
+
+    fn smokeVolumeContract(self: *App) bool {
+        if (!self.config.taskbar_clock or !self.ctx.exists(audio_service_module_path)) {
+            return self.headlessSubsystemFailure("volume-profile");
+        }
+
+        var original: r4os.abi.AudioServiceMasterState = .{};
+        if (self.ctx.audioMasterState(&original) != r4os.abi.service_api_result_ok) {
+            return self.headlessSubsystemFailure("volume-service-status");
+        }
+        self.acceptVolumeState(original);
+        _ = self.updateTrayLayout();
+
+        const clock = draw.taskbarClockRect(self.screen_w, self.screen_h);
+        const icon = draw.taskbarVolumeRect(self.screen_w, self.screen_h, true);
+        const keyboard = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, true, true);
+        if (icon.right() + volume.icon_gap != clock.x or keyboard.right() + draw.taskbar_layout_gap != icon.x) {
+            return self.headlessSubsystemFailure("volume-layout");
+        }
+
+        const popup_was_open = self.volume_ui.popup_open;
+        var restore_needed = false;
+        defer {
+            self.volume_ui.popup_open = popup_was_open;
+            if (restore_needed) _ = self.restoreSmokeVolumeState(original);
+        }
+
+        var changed: r4os.abi.AudioServiceMasterState = .{};
+        var request: r4os.abi.AudioServiceMasterRequest = .{
+            .flags = r4os.abi.audio_master_request_flag_set_volume |
+                r4os.abi.audio_master_request_flag_set_muted |
+                r4os.abi.audio_master_request_flag_muted,
+            .fixed_volume = volume.gainForPercent(35),
+        };
+        if (self.ctx.audioSetMasterState(&request, &changed) != r4os.abi.service_api_result_ok) {
+            return self.headlessSubsystemFailure("volume-set-muted");
+        }
+        restore_needed = true;
+        if ((changed.flags & r4os.abi.audio_master_state_flag_muted) == 0 or
+            changed.selected_volume_fixed != request.fixed_volume or changed.effective_volume_fixed != 0)
+        {
+            return self.headlessSubsystemFailure("volume-muted-state");
+        }
+
+        request = .{
+            .flags = r4os.abi.audio_master_request_flag_set_volume,
+            .fixed_volume = volume.gainForPercent(40),
+        };
+        if (self.ctx.audioSetMasterState(&request, &changed) != r4os.abi.service_api_result_ok or
+            (changed.flags & r4os.abi.audio_master_state_flag_muted) != 0 or
+            changed.selected_volume_fixed != request.fixed_volume or
+            changed.effective_volume_fixed != request.fixed_volume)
+        {
+            return self.headlessSubsystemFailure("volume-positive-unmute");
+        }
+
+        self.volume_ui.popup_open = true;
+        const track = draw.volumeTrackRect(self.screen_w, self.screen_h, true);
+        const mute = draw.volumeMuteRect(self.screen_w, self.screen_h, true);
+        if (self.volumePopupTargetAt(track.x + @divTrunc(track.w, 2), track.y + @divTrunc(track.h, 2)) != .volume_popup_slider or
+            self.volumePopupTargetAt(mute.x + @divTrunc(mute.w, 2), mute.y + @divTrunc(mute.h, 2)) != .volume_popup_mute or
+            self.volumePopupTargetAt(icon.x + @divTrunc(icon.w, 2), icon.y + @divTrunc(icon.h, 2)) != .taskbar_volume or
+            self.volumePopupTargetAt(0, 0) != .volume_popup_backdrop)
+        {
+            return self.headlessSubsystemFailure("volume-popup-targets");
+        }
+
+        if (!self.restoreSmokeVolumeState(original)) return self.headlessSubsystemFailure("volume-restore");
+        restore_needed = false;
+        return true;
+    }
+
     fn smokeFindTrayIdentity(self: *const App, owner: r4os.abi.ProgramProcessHandle, item_id: u64) ?struct { x: i32, y: i32 } {
         const y = self.screen_h - theme.taskbar_h + 12;
         var x: i32 = 0;
@@ -2453,6 +2678,7 @@ pub const App = struct {
         if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
         if (!self.smokeLaunchMultipleTerminalWindows()) return self.headlessSubsystemFailure("terminal-window-close");
         if (!self.smokeTrayContract()) return false;
+        if (!self.smokeVolumeContract()) return false;
         self.window_completion_handles = .{r4os.abi.ProgramProcessHandle{}} ** self.window_completion_handles.len;
         self.window_completion_exit_codes = .{0} ** self.window_completion_exit_codes.len;
         if (r4std.subsystem_runtime.load(&self.ctx.sys) != .loaded) return self.headlessSubsystemFailure("catalog-load");
@@ -2810,6 +3036,8 @@ pub const App = struct {
         self.window_service_retry_ticks = ticksFromMs(self.monotonic_hz, window_service_retry_ms);
         self.tray_service_retry_ticks = ticksFromMs(self.monotonic_hz, tray_service_retry_ms);
         self.tray_sync_ticks = ticksFromMs(self.monotonic_hz, tray_sync_ms);
+        self.volume_poll_ticks = ticksFromMs(self.monotonic_hz, volume_poll_ms);
+        self.volume_send_ticks = ticksFromMs(self.monotonic_hz, volume_send_ms);
         self.desktop_layout_writeback.configure(r4std.settings.WritebackPolicy.forHz(.lazy, self.monotonic_hz), self.ctx.ticks());
     }
 
@@ -2988,6 +3216,7 @@ pub const App = struct {
         self.refreshConsoleSnapshots();
         const display_changed = self.syncDisplayRevision();
         const keyboard_layout_changed = self.updateKeyboardLayout();
+        const volume_changed = self.syncVolume();
         const time_config_changed = self.syncTimeConfig();
         const desktop_layout_writeback = self.flushDesktopLayoutIfDue();
         const clock_changed = self.updateClock();
@@ -2995,7 +3224,7 @@ pub const App = struct {
         const blink_changed = next_blink != self.blink_phase;
         self.blink_phase = next_blink;
         const cursor_blink_changed = blink_changed and self.invalidateConsoleCursors();
-        if (!program_changed and !host_launch_changed and !gui_changed and !console_changed and !display_changed and !keyboard_layout_changed and !time_config_changed and !desktop_layout_writeback and !clock_changed and !cursor_blink_changed) return false;
+        if (!program_changed and !host_launch_changed and !gui_changed and !console_changed and !display_changed and !keyboard_layout_changed and !volume_changed and !time_config_changed and !desktop_layout_writeback and !clock_changed and !cursor_blink_changed) return false;
         self.startStructuredEvent(.timer, .timer);
         return true;
     }
@@ -3021,6 +3250,7 @@ pub const App = struct {
             _ = self.deliverTerminalKeyToActiveConsole(key);
             return self.hasDamage();
         }
+        if (self.volume_ui.popup_open and legacy_key != 0 and self.handleVolumeKey(legacy_key)) return true;
         if (legacy_key != 0 and self.dialog == .run and self.handleRunKey(legacy_key)) return true;
         if (legacy_key != 0 and self.dialog == .tasks and self.handleTaskInventoryKey(legacy_key)) return true;
         if (legacy_key != 0 and self.dialog == .none and !self.start_open and self.handleTerminalScrollKey(legacy_key)) return true;
@@ -3103,6 +3333,10 @@ pub const App = struct {
             const desktop_drag_index = self.desktop_drag.index;
             const was_resize = self.resize.active;
             const resize_index = self.resize.window_index;
+            if (was_down and pressed_target == .volume_popup_slider and self.volume_dragging) {
+                _ = self.updateVolumeFromPointer(mouse.x, true);
+                self.volume_dragging = false;
+            }
             if (was_desktop_drag) _ = self.finishDesktopItemDrag();
             if (was_down and pressed_target != .none and !was_desktop_drag) {
                 if (pressed_target == .taskbar_tray_external) {
@@ -3126,7 +3360,9 @@ pub const App = struct {
             return self.hasDamage();
         }
         if ((previous_buttons & 1) != 0) {
-            if (self.resize.active) {
+            if (self.volume_dragging and self.mouse_down_target == .volume_popup_slider) {
+                _ = self.updateVolumeFromPointer(mouse.x, false);
+            } else if (self.resize.active) {
                 _ = self.updateResize(mouse.x, mouse.y);
             } else if (self.drag.active) {
                 _ = self.updateDrag(mouse.x, mouse.y);
@@ -3152,6 +3388,7 @@ pub const App = struct {
         if (target == self.hover_target and next_tray_identity.eql(self.tray_hover_identity)) return;
         const old_target = self.hover_target;
         const old_tooltip = self.currentTrayTooltipRect();
+        const old_volume_tooltip = self.currentVolumeTooltipRect();
         self.hover_target = target;
         self.tray_hover_identity = next_tray_identity;
         if (self.start_open) {
@@ -3194,11 +3431,19 @@ pub const App = struct {
         self.invalidateHoverChange(old_target, target);
         if (old_tooltip) |rect| self.damage.invalidate(rect);
         if (self.currentTrayTooltipRect()) |rect| self.damage.invalidate(rect);
+        if (old_volume_tooltip) |rect| self.damage.invalidate(rect);
+        if (self.currentVolumeTooltipRect()) |rect| self.damage.invalidate(rect);
     }
 
     fn dispatchMouseDown(self: *App, target: model.UiTarget, x: i32, y: i32) void {
         if (target == .none) return;
         self.activateEventCommand(target, .mouse);
+        if (target == .volume_popup_slider) {
+            self.volume_dragging = self.volume_ui.reachable;
+            _ = self.updateVolumeFromPointer(x, false);
+            self.invalidateVolumePopup();
+            return;
+        }
         if (self.time_menu_open) {
             self.invalidateTimeMenu();
             return;
@@ -3313,7 +3558,7 @@ pub const App = struct {
         switch (target) {
             .run_browse => self.browseRunProgram(),
             .run_ok => self.submitRunDialog(),
-            .run_cancel, .run_backdrop, .task_overview_ok, .settings_ok, .settings_cancel, .time_menu_backdrop => self.closeTop(),
+            .run_cancel, .run_backdrop, .task_overview_ok, .settings_ok, .settings_cancel, .time_menu_backdrop, .volume_popup_backdrop => self.closeTop(),
             .message_ok, .message_no, .message_backdrop => self.closeMessageBoxWithTarget(target),
             .message_yes => {
                 self.message_box_result = message_box.targetResult(self.message_box_buttons, target);
@@ -3336,6 +3581,8 @@ pub const App = struct {
             .app2_taskbar => self.focusOrRestore(2),
             .app3_taskbar => self.focusOrRestore(3),
             .taskbar_keyboard_layout => self.cycleKeyboardLayout(),
+            .taskbar_volume => self.toggleVolumePopup(),
+            .volume_popup_mute => _ = self.toggleVolumeMute(),
             .taskbar_clock => self.launchClockFromTaskbar(),
             .time_menu_clock => self.launchClockFromTimeMenu(),
             .time_menu_settings => self.launchTimeSettingsFromTimeMenu(),
@@ -3372,6 +3619,7 @@ pub const App = struct {
             if (self.timeMenuTargetAt(x, y)) |target| return target;
             return .time_menu_backdrop;
         }
+        if (self.volume_ui.popup_open) return self.volumePopupTargetAt(x, y);
 
         if (self.dialog != .none) {
             if (self.dialog == .run) {
@@ -3415,6 +3663,7 @@ pub const App = struct {
         if (self.startButtonHit(x, y)) return .start_button;
         if (self.quick_launch.hit(self.screen_h, x, y)) |index| return self.quick_launch.target(index);
         if (self.tray_registry.hit(x, y) != null) return .taskbar_tray_external;
+        if (self.volumeHit(x, y)) return .taskbar_volume;
         if (self.keyboardLayoutHit(x, y)) return .taskbar_keyboard_layout;
         if (self.clockHit(x, y)) return .taskbar_clock;
         if (self.taskbarHit(x, y)) |index| {
@@ -3473,9 +3722,17 @@ pub const App = struct {
         return target == .time_menu_clock or target == .time_menu_settings;
     }
 
+    fn volumePopupTargetAt(self: *const App, x: i32, y: i32) model.UiTarget {
+        if (self.volumeHit(x, y)) return .taskbar_volume;
+        if (draw.volumeTrackRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y)) return .volume_popup_slider;
+        if (draw.volumeMuteRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y)) return .volume_popup_mute;
+        return .volume_popup_backdrop;
+    }
+
     fn captureOwner(self: *const App) ?model.UiOwner {
         if (self.system_menu_open) return .window;
         if (self.time_menu_open) return .taskbar;
+        if (self.volume_ui.popup_open) return .taskbar;
         if (self.dialog != .none) return .dialog;
         if (self.start_open) return .start_menu;
         return null;
@@ -4010,6 +4267,7 @@ pub const App = struct {
             self.active_window,
             zptr(self.clock[0..]),
             zptr(self.keyboard_layout.display[0..]),
+            self.volume_ui,
             &self.tray_registry,
             self.tray_hover_identity,
             self.tray_pressed_identity,
@@ -4683,10 +4941,13 @@ pub const App = struct {
         }
         const was_system_menu_open = self.system_menu_open;
         const was_time_menu_open = self.time_menu_open;
+        const was_volume_popup_open = self.volume_ui.popup_open;
         const was_start_open = self.start_open;
         const old_dialog = self.dialog;
         self.system_menu_open = false;
         self.time_menu_open = false;
+        self.volume_ui.popup_open = false;
+        self.volume_dragging = false;
         self.dialog = dialog;
         self.prepareDialogText(dialog);
         if (was_start_open) self.invalidateStartMenu();
@@ -4700,6 +4961,7 @@ pub const App = struct {
         if (dialog == .run and self.run_path.len == 0) self.run_path.set(default_run_path);
         if (was_system_menu_open) self.invalidateSystemMenu();
         if (was_time_menu_open) self.invalidateTimeMenu();
+        if (was_volume_popup_open) self.invalidateVolumePopup();
         if (was_start_open) {
             self.invalidateTaskbar();
         }
@@ -4780,6 +5042,13 @@ pub const App = struct {
             self.time_menu_open = false;
             self.mouse_down_target = .none;
             self.keyboard_focus = self.activeWindowTargetOrNone();
+        } else if (self.volume_ui.popup_open) {
+            self.invalidateVolumePopup();
+            self.volume_ui.popup_open = false;
+            self.volume_dragging = false;
+            self.mouse_down_target = .none;
+            self.keyboard_focus = self.activeWindowTargetOrNone();
+            self.invalidateTaskbar();
         } else if (self.dialog != .none) {
             const old_dialog = self.dialog;
             self.dialog = .none;
@@ -5540,6 +5809,11 @@ pub const App = struct {
 
     fn handleMouseWheel(self: *App, x: i32, y: i32, wheel: i32) bool {
         if (self.terminal_mode) return self.scrollConsoleBy(0, signedScrollLines(wheel, console_scroll_wheel_lines));
+        if (self.volume_ui.installed and (self.volumeHit(x, y) or
+            (self.volume_ui.popup_open and draw.volumePopupRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y))))
+        {
+            return self.adjustVolume(if (wheel > 0) 1 else -1);
+        }
         if (self.dialog == .tasks) {
             return self.scrollTaskInventory(if (wheel > 0) -3 else 3);
         }
@@ -5553,6 +5827,19 @@ pub const App = struct {
         const index = self.windowIndexForTarget(target) orelse return false;
         if (self.windows[index].kind != .terminal) return false;
         return self.scrollConsoleBy(index, signedScrollLines(wheel, console_scroll_wheel_lines));
+    }
+
+    fn handleVolumeKey(self: *App, key: u8) bool {
+        switch (key) {
+            r4os.gui.Key.escape => self.closeTop(),
+            r4os.gui.Key.left, r4os.gui.Key.down => _ = self.adjustVolume(-1),
+            r4os.gui.Key.right, r4os.gui.Key.up => _ = self.adjustVolume(1),
+            r4os.gui.Key.home => _ = self.setVolumePercent(0, true),
+            r4os.gui.Key.end => _ = self.setVolumePercent(100, true),
+            ' ' => _ = self.toggleVolumeMute(),
+            else => return false,
+        }
+        return true;
     }
 
     fn handleTaskInventoryKey(self: *App, key: u8) bool {
@@ -5980,10 +6267,13 @@ pub const App = struct {
         const was_start_open = self.start_open;
         const was_system_menu_open = self.system_menu_open;
         const was_time_menu_open = self.time_menu_open;
+        const was_volume_popup_open = self.volume_ui.popup_open;
         const old_dialog = self.dialog;
         self.start_open = !self.start_open;
         self.system_menu_open = false;
         self.time_menu_open = false;
+        self.volume_ui.popup_open = false;
+        self.volume_dragging = false;
         self.dialog = .none;
         self.dialog_focus = .none;
         self.menu_submenu_open = false;
@@ -5993,6 +6283,7 @@ pub const App = struct {
         self.keyboard_focus = if (self.start_open) .start_button else self.activeWindowTargetOrNone();
         if (was_system_menu_open) self.invalidateSystemMenu();
         if (was_time_menu_open) self.invalidateTimeMenu();
+        if (was_volume_popup_open) self.invalidateVolumePopup();
         self.invalidateDialogFor(old_dialog);
         if (was_start_open or self.start_open) self.invalidateStartMenu();
         self.invalidateTaskbar();
@@ -6150,6 +6441,10 @@ pub const App = struct {
         self.damage.invalidate(draw.timeMenuRect(self.screen_w, self.screen_h));
     }
 
+    fn invalidateVolumePopup(self: *App) void {
+        self.damage.invalidate(draw.volumePopupRect(self.screen_w, self.screen_h, self.config.taskbar_clock));
+    }
+
     fn invalidateDialog(self: *App) void {
         const rect = self.dialogRect() orelse return;
         self.damage.invalidate(rect);
@@ -6207,6 +6502,11 @@ pub const App = struct {
             self.invalidateTimeMenu();
             return;
         }
+        if (self.volume_ui.popup_open) {
+            self.invalidateVolumePopup();
+            if (old_target == .taskbar_volume or new_target == .taskbar_volume) self.invalidateTaskbar();
+            return;
+        }
         if (self.dialog != .none) {
             self.invalidateDialog();
             return;
@@ -6238,6 +6538,10 @@ pub const App = struct {
     }
 
     fn invalidateTargetVisual(self: *App, target: model.UiTarget) void {
+        if (target == .volume_popup_backdrop or target == .volume_popup_slider or target == .volume_popup_mute) {
+            self.invalidateVolumePopup();
+            return;
+        }
         switch (model.ownerForTarget(target)) {
             .none => {},
             .start_menu => self.invalidateStartMenu(),
@@ -6859,7 +7163,11 @@ pub const App = struct {
     }
 
     fn keyboardLayoutHit(self: *const App, x: i32, y: i32) bool {
-        return draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y);
+        return draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, self.config.taskbar_clock, self.volume_ui.installed).contains(x, y);
+    }
+
+    fn volumeHit(self: *const App, x: i32, y: i32) bool {
+        return self.volume_ui.installed and draw.taskbarVolumeRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y);
     }
 
     fn clockHit(self: *const App, x: i32, y: i32) bool {
@@ -7131,12 +7439,15 @@ pub const App = struct {
         if (!self.config.taskbar_clock) return;
         const was_start_open = self.start_open;
         const was_system_menu_open = self.system_menu_open;
+        const was_volume_popup_open = self.volume_ui.popup_open;
         const old_dialog = self.dialog;
         if (was_start_open) self.invalidateStartMenu();
         if (was_system_menu_open) self.invalidateSystemMenu();
         self.invalidateDialogFor(old_dialog);
         self.start_open = false;
         self.system_menu_open = false;
+        self.volume_ui.popup_open = false;
+        self.volume_dragging = false;
         self.dialog = .none;
         self.dialog_focus = .none;
         self.menu_submenu_open = false;
@@ -7145,8 +7456,42 @@ pub const App = struct {
             self.time_menu_open = true;
             self.invalidateTimeMenu();
         }
+        if (was_volume_popup_open) self.invalidateVolumePopup();
         self.keyboard_focus = .taskbar_clock;
         self.invalidateTaskbar();
+    }
+
+    fn toggleVolumePopup(self: *App) void {
+        if (!self.volume_ui.installed) return;
+        if (self.volume_ui.popup_open) {
+            self.closeTop();
+            return;
+        }
+        const was_start_open = self.start_open;
+        const was_system_menu_open = self.system_menu_open;
+        const was_time_menu_open = self.time_menu_open;
+        const old_dialog = self.dialog;
+        if (was_start_open) self.invalidateStartMenu();
+        if (was_system_menu_open) self.invalidateSystemMenu();
+        if (was_time_menu_open) self.invalidateTimeMenu();
+        self.invalidateDialogFor(old_dialog);
+        self.start_open = false;
+        self.system_menu_open = false;
+        self.time_menu_open = false;
+        self.dialog = .none;
+        self.dialog_focus = .none;
+        self.menu_submenu_open = false;
+        self.menu_submenu_focus = false;
+        self.volume_ui.popup_open = true;
+        self.volume_dragging = false;
+        self.keyboard_focus = .volume_popup_slider;
+        self.volume_next_poll_tick = 0;
+        _ = self.syncVolume();
+        if (self.volume_ui.installed) {
+            self.volume_ui.popup_open = true;
+            self.invalidateVolumePopup();
+            self.invalidateTaskbar();
+        }
     }
 
     fn launchClockFromTimeMenu(self: *App) void {
@@ -7847,6 +8192,14 @@ fn keyboardLayoutInfoEqual(a: r4os.abi.KeyboardLayoutInfo, b: r4os.abi.KeyboardL
         a.count == b.count and
         fixedBytesEqual(a.name[0..], b.name[0..]) and
         fixedBytesEqual(a.display[0..], b.display[0..]);
+}
+
+fn volumeViewEqual(a: volume.View, b: volume.View) bool {
+    return a.installed == b.installed and
+        a.reachable == b.reachable and
+        a.muted == b.muted and
+        a.percent == b.percent and
+        a.popup_open == b.popup_open;
 }
 
 fn fixedBytesEqual(a: []const u8, b: []const u8) bool {

@@ -78,6 +78,30 @@ Terminal Mode und von ausdruecklicher erzwungener Testbereinigung getrennt.
 Nur diese Sonderpfade beziehungsweise der zeitlich begrenzte Grace-Timeout
 verwenden den Hard-Kill.
 
+Notification Area und Lautstaerke
+---------------------------------
+
+Der Desktop besitzt die Notification-Area-Anordnung, Hit-Tests, Tooltips und
+Popups. Externe TrayItems werden generationstreu ueber WINSVC vermittelt und
+liegen links vom Tastaturlayout. Das eingebaute Lautstaerkeelement liegt
+unmittelbar links von der Uhr; das Tastaturlayout weicht entsprechend nach
+links aus. Fehlt AUDSVC im aktuellen Imageprofil, wird das Element nicht
+gezeigt. Ist das installierte Modul nur voruebergehend nicht erreichbar,
+bleibt ein deaktivierter Zustand sichtbar.
+
+Der Lautstaerkeklick oeffnet ein am Tray verankertes Desktop-Popup ohne
+eigenes Fenster und ohne Taskbar-Eintrag. Regler, Spur-Klick, Mausrad,
+Pfeiltasten, Pos1/Ende und Mute arbeiten auf einer Skala von 0 bis 100;
+Escape oder ein Klick ausserhalb schliessen das Popup. Die quadratische
+Kennlinie wird monoton in den unsigned-16.16-Mastergain von AUDSVC abgebildet.
+Waehrend Ziehen werden Aenderungen begrenzt und zusammengefasst; ausbleibende
+Serviceantworten blockieren den UI-Thread nicht.
+
+AUDSVC bleibt Besitzer von Masterzustand, explizitem Mute und Persistenz. Der
+Desktop speichert daher keine zweite Lautstaerkekonfiguration. Sein Headless-
+Smoke prueft Anordnung, Popup-Ziele, Mute, positives Entstummen und stellt den
+vorherigen Masterzustand auch bei einem Testfehler wieder her.
+
 Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
 Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
 GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,
