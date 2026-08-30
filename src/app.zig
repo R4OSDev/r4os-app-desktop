@@ -186,6 +186,7 @@ const volume_poll_ms: u32 = 500;
 const volume_send_ms: u32 = 50;
 const tray_sync_page_burst: u32 = 16;
 const remote_input_burst: u32 = 16;
+const physical_input_burst: u32 = 32;
 const console_scroll_wheel_lines: u32 = 3;
 const console_scroll_max_fallback: u32 = 512;
 const clipboard_buffer_size: usize = @as(usize, r4os.clipboard.max_text_bytes) + 1;
@@ -260,6 +261,10 @@ pub const App = struct {
     remote_input_keys: u32 = 0,
     remote_input_mouse: u32 = 0,
     last_remote_input_sequence: u32 = 0,
+    physical_input_events: u64 = 0,
+    physical_input_forwarded: u64 = 0,
+    physical_input_invalid: u64 = 0,
+    last_physical_input_sequence: u64 = 0,
     remote_frame_consumers: u32 = 0,
     next_event_id: u32 = 0,
     last_mouse_down_tick: u64 = 0,
@@ -469,11 +474,13 @@ pub const App = struct {
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
                 if (self.dispatchEvent()) needs_redraw = true;
             }
+            var physical_events: u32 = 0;
+            while (physical_events < physical_input_burst and self.pollPhysicalKeyEvent()) : (physical_events += 1) {}
             if (self.pollKeyboardEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             if (needs_redraw) self.redraw();
-            self.idleWait(needs_redraw or remote_events != 0);
+            self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
         }
     }
 
@@ -3076,6 +3083,28 @@ pub const App = struct {
         self.event.modifiers = modifiersForKey(key);
         self.last_key_tick = self.event_tick;
         self.key_repeat_armed = true;
+        return true;
+    }
+
+    fn pollPhysicalKeyEvent(self: *App) bool {
+        var input: r4os.abi.PhysicalKeyEvent = .{};
+        const result = self.ctx.physicalKeyPoll(&input);
+        if (result <= 0) return false;
+        self.physical_input_events +%= 1;
+        if (input.magic != r4os.abi.physical_key_magic or
+            input.version != r4os.abi.physical_key_version or
+            input.size != @sizeOf(r4os.abi.PhysicalKeyEvent) or
+            input.sequence == 0 or
+            input.sequence <= self.last_physical_input_sequence or
+            (input.kind != r4os.abi.physical_key_kind_down and
+                input.kind != r4os.abi.physical_key_kind_up and
+                input.kind != r4os.abi.physical_key_kind_reset))
+        {
+            self.physical_input_invalid +%= 1;
+            return true;
+        }
+        self.last_physical_input_sequence = input.sequence;
+        if (self.forwardPhysicalKeyToActiveApp(input)) self.physical_input_forwarded +%= 1;
         return true;
     }
 
@@ -5769,6 +5798,28 @@ pub const App = struct {
         if (!isAppKey(key)) return false;
         self.pushGuiKeyEvent(self.active_window, key);
         return true;
+    }
+
+    fn forwardPhysicalKeyToActiveApp(self: *App, input: r4os.abi.PhysicalKeyEvent) bool {
+        if (!self.isHostedAppWindow(self.active_window)) return false;
+        if (self.keyboard_focus != self.windowTargetForIndex(self.active_window)) return false;
+        const instance_id = self.windows[self.active_window].instance_id;
+        if (instance_id == 0) return false;
+        const kind: r4os.abi.GuiEventKind = if (input.kind == r4os.abi.physical_key_kind_down)
+            .physical_key_down
+        else if (input.kind == r4os.abi.physical_key_kind_up)
+            .physical_key_up
+        else
+            .physical_key_reset;
+        const event = r4os.abi.GuiEvent{
+            .kind = @intFromEnum(kind),
+            .window_id = @intCast(self.active_window),
+            .key = input.key,
+            .modifiers = input.modifiers,
+            .buttons = input.flags,
+            .tick = input.tick,
+        };
+        return self.pushGuiEventBounded(instance_id, &event, true);
     }
 
     fn deliverTerminalKeyToActiveConsole(self: *App, key: u32) bool {

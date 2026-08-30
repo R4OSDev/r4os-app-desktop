@@ -200,6 +200,10 @@ pub const Context = struct {
         self.desk.mouseHide();
     }
 
+    pub fn physicalKeyPoll(self: *const Context, out: *r4os.abi.PhysicalKeyEvent) i32 {
+        return self.desk.physicalKeyPoll(out);
+    }
+
     pub fn keyboardLayoutCurrent(self: *const Context, out: *r4os.abi.KeyboardLayoutInfo) i32 {
         return self.desk.keyboardLayoutCurrent(out);
     }
