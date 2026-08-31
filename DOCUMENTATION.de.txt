@@ -125,7 +125,15 @@ Dateimetadaten. `R4BASIC source-probe` belegt einen `fileInfo`-Aufruf sowie
 null Inhaltslesungen und null gelesene Bytes vor dem Prozessstart; der
 R4Basic-Host bleibt damit alleiniger Besitzer des vollstaendigen Quellloads.
 
-Nur wenn beide urspruenglichen Handles mit Exitcode 0 abgeschlossen sind, der
+Anschliessend startet derselbe Headless-Ablauf den produktiven R4GB-Host mit
+einem echten Desktop-Fensterhandle. Dessen endlicher `/HOSTTEST` prueft eine
+private DMG-Maschine, begrenzte Gast-Scheiben, physische Eingabe und
+Fokusfreigabe, generationstreues 160x144-Video, App-Audio sowie
+Pause/Resume/Reset/Mute/Close. Erst nach Exitcode 0 und der separaten Datei
+`C:\\TEMP\\R4GB.HOST` gilt dieser Teil als bestanden; AUTOEXEC liest die Datei
+nur fuer die serielle Markerauswertung aus.
+
+Nur wenn alle gestarteten Handles mit Exitcode 0 abgeschlossen sind, der
 Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
 und der Stride-/Damage-/Cursorblink-/Remote-Demand-Presenttest erfolgreich
 war, schreibt der Desktop die Video-/Eingabe-, Runtime-/Audio- und Present-

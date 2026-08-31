@@ -145,6 +145,8 @@ const subsystem_host_test_marker_path = "C:\\TEMP\\SUBSYS.OK";
 const r4basic_host_path = "/R4OS/SUBSYSTEMS/r4os.basic/R4BASIC.R4X";
 const r4basic_baseline_guest_path = "C:\\TEMP\\GORILLA.BAS";
 const r4basic_baseline_marker_path = "C:\\TEMP\\R4BASIC.BASELINE";
+const r4gb_host_path = "/R4OS/SUBSYSTEMS/r4os.gb/R4GB.R4X";
+const r4gb_host_test_marker_path = "C:\\TEMP\\R4GB.HOST";
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=sequenced+policy-filtered idle=no-frame fps>=20\r\n" ++
@@ -453,6 +455,8 @@ pub const App = struct {
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
             self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);
+            self.forceCloseWindowsByLaunchPath(r4basic_host_path);
+            self.forceCloseWindowsByLaunchPath(r4gb_host_path);
             _ = self.syncProgramWindows();
             self.enterTerminalModeWithArgs("");
             if (!self.terminal_mode or self.windows[0].instance_id == 0) self.ctx.systemPoweroff();
@@ -2682,6 +2686,7 @@ pub const App = struct {
     fn startHeadlessSubsystemAcceptance(self: *App) bool {
         _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
         _ = self.ctx.fileDelete(r4basic_baseline_marker_path);
+        _ = self.ctx.fileDelete(r4gb_host_test_marker_path);
         if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
         if (!self.smokeLaunchMultipleTerminalWindows()) return self.headlessSubsystemFailure("terminal-window-close");
         if (!self.smokeTrayContract()) return false;
@@ -2726,6 +2731,17 @@ pub const App = struct {
         if (!sameProcessHandle(self.window_completion_handles[baseline.index], baseline.handle)) return self.headlessSubsystemFailure("r4basic-completion-handle");
         if (self.window_completion_exit_codes[baseline.index] != 0) return self.headlessSubsystemFailure("r4basic-completion-exit");
         if (!self.ctx.exists(r4basic_baseline_marker_path)) return self.headlessSubsystemFailure("r4basic-marker");
+
+        const r4gb = self.launchHeadlessR4GbHostSelfTest() orelse return false;
+        const r4gb_started = self.ctx.ticks();
+        const r4gb_timeout_ticks = @as(u64, self.monotonic_hz) * 30;
+        while (sameProcessHandle(self.window_process_handles[r4gb.index], r4gb.handle)) {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| r4gb_started >= r4gb_timeout_ticks) return self.headlessSubsystemFailure("r4gb-timeout");
+        }
+        if (!sameProcessHandle(self.window_completion_handles[r4gb.index], r4gb.handle)) return self.headlessSubsystemFailure("r4gb-completion-handle");
+        if (self.window_completion_exit_codes[r4gb.index] != 0) return self.headlessSubsystemFailure("r4gb-completion-exit");
+        if (!self.ctx.exists(r4gb_host_test_marker_path)) return self.headlessSubsystemFailure("r4gb-marker");
         if (self.ctx.fileWrite(subsystem_host_test_marker_path, subsystem_host_test_marker) != @as(i32, @intCast(subsystem_host_test_marker.len))) return false;
 
         self.enterTerminalModeWithArgs("");
@@ -3003,6 +3019,15 @@ pub const App = struct {
         self.launchGuiPath(zptr(path_z[0..]), zptr(args_storage[0 .. args.len + 1]), zptr(title_z[0..]), .gui);
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("r4basic-program-spawn");
+        return .{ .index = index, .handle = handle };
+    }
+
+    fn launchHeadlessR4GbHostSelfTest(self: *App) ?HeadlessSubsystemLaunch {
+        if (!r4std.subsystem_runtime.hostPresent(&self.ctx.sys, r4gb_host_path)) return self.headlessSubsystemLaunchFailure("r4gb-host-missing");
+        const index = self.findFreeAppWindow() orelse return self.headlessSubsystemLaunchFailure("r4gb-window-slot");
+        self.launchGuiPath(r4gb_host_path, "/HOSTTEST", "R4GB host selftest", .gui);
+        const handle = self.window_process_handles[index];
+        if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("r4gb-program-spawn");
         return .{ .index = index, .handle = handle };
     }
 
