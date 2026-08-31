@@ -153,6 +153,7 @@ const r4gb_fixture_cgb_path = "C:\\TEMP\\R4GB-CGB-ONLY.GBC";
 const r4gb_trace_a = "00000000000000A1";
 const r4gb_trace_b = "00000000000000B2";
 const r4gb_trace_cgb = "00000000000000C3";
+const r4gb_trace_end_key = "end";
 const r4gb_report_a_path = "C:\\TEMP\\R4GB-00000000000000A1.REPORT";
 const r4gb_report_b_path = "C:\\TEMP\\R4GB-00000000000000B2.REPORT";
 const r4gb_report_cgb_path = "C:\\TEMP\\R4GB-00000000000000C3.REPORT";
@@ -166,7 +167,8 @@ const subsystem_host_test_marker =
     "DESKTOP tray selftest: OK ipc=service owner=generation registry=16 icon=argb32 events=sequenced wait=bounded cleanup=owner\r\n" ++
     "DESKTOP volume selftest: OK tray=system states=5 popup=anchored input=mouse+keyboard gain=perceptual service=AUDSVC persistence=owned\r\n" ++
     "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n" ++
-    "R4GB explorer E2E: OK catalog=MODULES.JSON assoc=ids-only formats=.gb+.gbc probe=bounded instances=2 input=physical video=frames audio=app-audio save=sram+rtc rejection=cgb-only close=separate\r\n";
+    "R4GB explorer E2E: OK catalog=MODULES.JSON assoc=ids-only formats=.gb+.gbc probe=bounded instances=2 input=physical video=frames audio=app-audio save=sram+rtc rejection=cgb-only close=witness+separate\r\n" ++
+    "R4GB long-run E2E: OK duration=60s instances=2 focus=alternating lifecycle=pause+resume+reset+mute endings=witness+close desktop=responsive\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -3047,8 +3049,8 @@ pub const App = struct {
     }
 
     fn smokeR4GbProductPath(self: *App) bool {
-        const first = self.launchHeadlessR4GbGuest(r4gb_fixture_a_path, r4gb_trace_a) orelse return false;
-        const second = self.launchHeadlessR4GbGuest(r4gb_fixture_b_path, r4gb_trace_b) orelse return false;
+        const first = self.launchHeadlessR4GbGuest(r4gb_fixture_a_path, r4gb_trace_a, "witness") orelse return false;
+        const second = self.launchHeadlessR4GbGuest(r4gb_fixture_b_path, r4gb_trace_b, "close") orelse return false;
         if (first.index == second.index or sameProcessHandle(first.handle, second.handle)) return self.headlessSubsystemFailure("r4gb-instance-identity");
 
         self.toggleMaximizeWindow(first.index);
@@ -3076,27 +3078,54 @@ pub const App = struct {
         if (!self.pushGuiPhysicalKeyEvent(second.index, 0x43, true)) return self.headlessSubsystemFailure("r4gb-controls-b");
 
         const exercise_started = self.ctx.ticks();
-        const exercise_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 3;
+        const exercise_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 60;
+        const focus_interval = @as(u64, @max(self.monotonic_hz, 1)) * 10;
+        var next_focus = focus_interval;
+        var focus_round: u32 = 0;
+        const redraws_before = self.render_stats.redraws;
+        const lost_frames_before = self.render_stats.present_lost_frames;
+        const present_failures_before = self.render_stats.present_failures;
         while (self.ctx.ticks() -| exercise_started < exercise_ticks) {
             if (!sameProcessHandle(self.window_process_handles[first.index], first.handle) or
                 !sameProcessHandle(self.window_process_handles[second.index], second.handle))
             {
                 return self.headlessSubsystemFailure("r4gb-early-exit");
             }
+            const elapsed = self.ctx.ticks() -| exercise_started;
+            if (elapsed >= next_focus) {
+                const target = if ((focus_round & 1) == 0) first.index else second.index;
+                const usage = if ((focus_round & 1) == 0) r4os.abi.physical_key_usage_up else r4os.abi.physical_key_usage_space;
+                self.activateWindow(target, false);
+                if (!self.pushGuiPhysicalKeyEvent(target, usage, true) or !self.pushGuiPhysicalKeyEvent(target, usage, false)) {
+                    return self.headlessSubsystemFailure("r4gb-longrun-input");
+                }
+                focus_round +%= 1;
+                next_focus +|= focus_interval;
+            }
             self.smokePumpCooperativeFrames(1);
             self.ctx.sleepTicks(1);
         }
+        if (focus_round < 5 or self.render_stats.redraws <= redraws_before or
+            self.render_stats.present_lost_frames != lost_frames_before or
+            self.render_stats.present_failures != present_failures_before)
+        {
+            return self.headlessSubsystemFailure("r4gb-longrun-desktop");
+        }
 
-        // Exercise the cooperative GUI-close contract directly. The normal
-        // desktop chrome escalates an unanswered close request after 200 ms;
-        // nested QEMU intentionally runs slowly enough that an atomic SRAM/RTC
-        // publication can exceed that wall-clock grace period.
-        self.pushGuiEvent(first.index, .close);
+        // The first original fixture ends from a guest-authored Start+Select
+        // witness. This exercises the natural completion path independently
+        // from the explicit close used for the second instance.
+        self.activateWindow(first.index, false);
+        if (!self.pushGuiPhysicalKeyEvent(first.index, r4os.abi.physical_key_usage_enter, true) or
+            !self.pushGuiPhysicalKeyEvent(first.index, r4os.abi.physical_key_usage_right_control, true))
+        {
+            return self.headlessSubsystemFailure("r4gb-witness-input");
+        }
         const first_started = self.ctx.ticks();
         const close_timeout_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 30;
         while (sameProcessHandle(self.window_process_handles[first.index], first.handle)) {
             self.smokePumpCooperativeFrames(1);
-            if (self.ctx.ticks() -| first_started >= close_timeout_ticks) return self.headlessSubsystemFailure("r4gb-close-a-timeout");
+            if (self.ctx.ticks() -| first_started >= close_timeout_ticks) return self.headlessSubsystemFailure("r4gb-witness-a-timeout");
         }
         if (!sameProcessHandle(self.window_process_handles[second.index], second.handle)) return self.headlessSubsystemFailure("r4gb-close-isolation");
         if (!sameProcessHandle(self.window_completion_handles[first.index], first.handle)) return self.headlessSubsystemFailure("r4gb-completion-a-handle");
@@ -3113,7 +3142,7 @@ pub const App = struct {
         if (self.window_completion_exit_codes[second.index] != 0) return self.headlessSubsystemFailure("r4gb-completion-b-exit");
         if (!self.ctx.exists(r4gb_report_b_path)) return self.headlessSubsystemFailure("r4gb-completion-b-report");
 
-        const rejected = self.launchHeadlessR4GbGuest(r4gb_fixture_cgb_path, r4gb_trace_cgb) orelse return false;
+        const rejected = self.launchHeadlessR4GbGuest(r4gb_fixture_cgb_path, r4gb_trace_cgb, "reject") orelse return false;
         const rejection_ready_started = self.ctx.ticks();
         const rejection_ready_timeout = @as(u64, @max(self.monotonic_hz, 1)) * 10;
         while (!std.mem.startsWith(u8, spanZPtr(self.windows[rejected.index].title()), "R4GB - Cartridgefehler") or
@@ -3150,7 +3179,7 @@ pub const App = struct {
         return true;
     }
 
-    fn launchHeadlessR4GbGuest(self: *App, guest_path: []const u8, trace_id: []const u8) ?HeadlessSubsystemLaunch {
+    fn launchHeadlessR4GbGuest(self: *App, guest_path: []const u8, trace_id: []const u8, expected_end: []const u8) ?HeadlessSubsystemLaunch {
         var inspection = r4std.subsystem_runtime.inspect(&self.ctx.sys, guest_path) catch return self.headlessSubsystemLaunchFailure("r4gb-inspect");
         const metadata_input = inspection.input;
         const probed_input = r4std.subsystem_runtime.completeProbe(&self.ctx.sys, metadata_input, &inspection.access) catch return self.headlessSubsystemLaunchFailure("r4gb-probe");
@@ -3197,6 +3226,7 @@ pub const App = struct {
         const options = [_]r4os.subsystem_launch.Option{
             .{ .key = r4os.subsystem_launch.trace_key, .value = trace_id },
             .{ .key = r4os.subsystem_launch.trace_mode_key, .value = r4os.subsystem_launch.trace_mode_headless },
+            .{ .key = r4gb_trace_end_key, .value = expected_end },
         };
         var traced_storage: [r4os.subsystem_launch.max_args_bytes + 1]u8 = .{0} ** (r4os.subsystem_launch.max_args_bytes + 1);
         const traced = r4os.subsystem_launch.encode(guest_path, &options, traced_storage[0..r4os.subsystem_launch.max_args_bytes]) catch return self.headlessSubsystemLaunchFailure("r4gb-trace-args");
