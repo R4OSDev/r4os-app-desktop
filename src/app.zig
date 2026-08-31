@@ -147,6 +147,16 @@ const r4basic_baseline_guest_path = "C:\\TEMP\\GORILLA.BAS";
 const r4basic_baseline_marker_path = "C:\\TEMP\\R4BASIC.BASELINE";
 const r4gb_host_path = "/R4OS/SUBSYSTEMS/r4os.gb/R4GB.R4X";
 const r4gb_host_test_marker_path = "C:\\TEMP\\R4GB.HOST";
+const r4gb_fixture_a_path = "C:\\TEMP\\R4GB-E2E-A.GB";
+const r4gb_fixture_b_path = "C:\\TEMP\\R4GB-E2E-B.GBC";
+const r4gb_fixture_cgb_path = "C:\\TEMP\\R4GB-CGB-ONLY.GBC";
+const r4gb_trace_a = "00000000000000A1";
+const r4gb_trace_b = "00000000000000B2";
+const r4gb_trace_cgb = "00000000000000C3";
+const r4gb_report_a_path = "C:\\TEMP\\R4GB-00000000000000A1.REPORT";
+const r4gb_report_b_path = "C:\\TEMP\\R4GB-00000000000000B2.REPORT";
+const r4gb_report_cgb_path = "C:\\TEMP\\R4GB-00000000000000C3.REPORT";
+const r4gb_cgb_rejection_exit: i32 = 71;
 const subsystem_audio_service = "AUDSVC";
 const subsystem_host_test_marker =
     "SUBSYSTEM host selftest: OK modes=640x350+320x200+256x224 formats=indexed8+xrgb32 damage=sparse indexed8=abi tiles=bounded input=sequenced+policy-filtered idle=no-frame fps>=20\r\n" ++
@@ -155,7 +165,8 @@ const subsystem_host_test_marker =
     "DESKTOP terminal-close selftest: OK target=chrome request=cooperative duplicate=idempotent exit=0 reap=generation\r\n" ++
     "DESKTOP tray selftest: OK ipc=service owner=generation registry=16 icon=argb32 events=sequenced wait=bounded cleanup=owner\r\n" ++
     "DESKTOP volume selftest: OK tray=system states=5 popup=anchored input=mouse+keyboard gain=perceptual service=AUDSVC persistence=owned\r\n" ++
-    "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n";
+    "DESKTOP present selftest: OK regions=2 cursorblink=regional fence=sync backend=DISPBLIT fallback=armed remote=on-demand\r\n" ++
+    "R4GB explorer E2E: OK catalog=MODULES.JSON assoc=ids-only formats=.gb+.gbc probe=bounded instances=2 input=physical video=frames audio=app-audio save=sram+rtc rejection=cgb-only close=separate\r\n";
 const console_title_max: usize = 31;
 const console_path_max: usize = 63;
 const console_args_max: usize = 127;
@@ -2687,6 +2698,9 @@ pub const App = struct {
         _ = self.ctx.fileDelete(subsystem_host_test_marker_path);
         _ = self.ctx.fileDelete(r4basic_baseline_marker_path);
         _ = self.ctx.fileDelete(r4gb_host_test_marker_path);
+        _ = self.ctx.fileDelete(r4gb_report_a_path);
+        _ = self.ctx.fileDelete(r4gb_report_b_path);
+        _ = self.ctx.fileDelete(r4gb_report_cgb_path);
         if (!self.waitForHeadlessSubsystemAudio()) return self.headlessSubsystemFailure("audio-service");
         if (!self.smokeLaunchMultipleTerminalWindows()) return self.headlessSubsystemFailure("terminal-window-close");
         if (!self.smokeTrayContract()) return false;
@@ -2742,6 +2756,7 @@ pub const App = struct {
         if (!sameProcessHandle(self.window_completion_handles[r4gb.index], r4gb.handle)) return self.headlessSubsystemFailure("r4gb-completion-handle");
         if (self.window_completion_exit_codes[r4gb.index] != 0) return self.headlessSubsystemFailure("r4gb-completion-exit");
         if (!self.ctx.exists(r4gb_host_test_marker_path)) return self.headlessSubsystemFailure("r4gb-marker");
+        if (!self.smokeR4GbProductPath()) return false;
         if (self.ctx.fileWrite(subsystem_host_test_marker_path, subsystem_host_test_marker) != @as(i32, @intCast(subsystem_host_test_marker.len))) return false;
 
         self.enterTerminalModeWithArgs("");
@@ -3028,6 +3043,171 @@ pub const App = struct {
         self.launchGuiPath(r4gb_host_path, "/HOSTTEST", "R4GB host selftest", .gui);
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("r4gb-program-spawn");
+        return .{ .index = index, .handle = handle };
+    }
+
+    fn smokeR4GbProductPath(self: *App) bool {
+        const first = self.launchHeadlessR4GbGuest(r4gb_fixture_a_path, r4gb_trace_a) orelse return false;
+        const second = self.launchHeadlessR4GbGuest(r4gb_fixture_b_path, r4gb_trace_b) orelse return false;
+        if (first.index == second.index or sameProcessHandle(first.handle, second.handle)) return self.headlessSubsystemFailure("r4gb-instance-identity");
+
+        self.toggleMaximizeWindow(first.index);
+        self.smokePumpCooperativeFrames(1);
+        if (sameProcessHandle(self.window_process_handles[first.index], first.handle)) self.toggleMaximizeWindow(first.index);
+        self.activateWindow(first.index, false);
+        if (!self.pushGuiPhysicalKeyEvent(first.index, r4os.abi.physical_key_usage_right, true) or
+            !self.pushGuiPhysicalKeyEvent(first.index, r4os.abi.physical_key_usage_right, false) or
+            !self.pushGuiPhysicalKeyEvent(first.index, 0x3E, true))
+        {
+            return self.headlessSubsystemFailure("r4gb-input-a");
+        }
+        self.ctx.sleepTicks(ticksFromMs(self.monotonic_hz, 20));
+        if (!self.pushGuiPhysicalKeyEvent(first.index, 0x3F, true) or
+            !self.pushGuiPhysicalKeyEvent(first.index, 0x41, true)) return self.headlessSubsystemFailure("r4gb-controls-a");
+
+        self.activateWindow(second.index, false);
+        if (!self.pushGuiPhysicalKeyEvent(second.index, r4os.abi.physical_key_usage_space, true) or
+            !self.pushGuiPhysicalKeyEvent(second.index, r4os.abi.physical_key_usage_space, false) or
+            !self.pushGuiPhysicalKeyEvent(second.index, 0x42, true))
+        {
+            return self.headlessSubsystemFailure("r4gb-input-b");
+        }
+        self.ctx.sleepTicks(ticksFromMs(self.monotonic_hz, 20));
+        if (!self.pushGuiPhysicalKeyEvent(second.index, 0x43, true)) return self.headlessSubsystemFailure("r4gb-controls-b");
+
+        const exercise_started = self.ctx.ticks();
+        const exercise_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 3;
+        while (self.ctx.ticks() -| exercise_started < exercise_ticks) {
+            if (!sameProcessHandle(self.window_process_handles[first.index], first.handle) or
+                !sameProcessHandle(self.window_process_handles[second.index], second.handle))
+            {
+                return self.headlessSubsystemFailure("r4gb-early-exit");
+            }
+            self.smokePumpCooperativeFrames(1);
+            self.ctx.sleepTicks(1);
+        }
+
+        // Exercise the cooperative GUI-close contract directly. The normal
+        // desktop chrome escalates an unanswered close request after 200 ms;
+        // nested QEMU intentionally runs slowly enough that an atomic SRAM/RTC
+        // publication can exceed that wall-clock grace period.
+        self.pushGuiEvent(first.index, .close);
+        const first_started = self.ctx.ticks();
+        const close_timeout_ticks = @as(u64, @max(self.monotonic_hz, 1)) * 30;
+        while (sameProcessHandle(self.window_process_handles[first.index], first.handle)) {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| first_started >= close_timeout_ticks) return self.headlessSubsystemFailure("r4gb-close-a-timeout");
+        }
+        if (!sameProcessHandle(self.window_process_handles[second.index], second.handle)) return self.headlessSubsystemFailure("r4gb-close-isolation");
+        if (!sameProcessHandle(self.window_completion_handles[first.index], first.handle)) return self.headlessSubsystemFailure("r4gb-completion-a-handle");
+        if (self.window_completion_exit_codes[first.index] != 0) return self.headlessSubsystemFailure("r4gb-completion-a-exit");
+        if (!self.ctx.exists(r4gb_report_a_path)) return self.headlessSubsystemFailure("r4gb-completion-a-report");
+
+        self.pushGuiEvent(second.index, .close);
+        const second_started = self.ctx.ticks();
+        while (sameProcessHandle(self.window_process_handles[second.index], second.handle)) {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| second_started >= close_timeout_ticks) return self.headlessSubsystemFailure("r4gb-close-b-timeout");
+        }
+        if (!sameProcessHandle(self.window_completion_handles[second.index], second.handle)) return self.headlessSubsystemFailure("r4gb-completion-b-handle");
+        if (self.window_completion_exit_codes[second.index] != 0) return self.headlessSubsystemFailure("r4gb-completion-b-exit");
+        if (!self.ctx.exists(r4gb_report_b_path)) return self.headlessSubsystemFailure("r4gb-completion-b-report");
+
+        const rejected = self.launchHeadlessR4GbGuest(r4gb_fixture_cgb_path, r4gb_trace_cgb) orelse return false;
+        const rejection_ready_started = self.ctx.ticks();
+        const rejection_ready_timeout = @as(u64, @max(self.monotonic_hz, 1)) * 10;
+        while (!std.mem.startsWith(u8, spanZPtr(self.windows[rejected.index].title()), "R4GB - Cartridgefehler") or
+            !self.gui_frame_caches[rejected.index].view().valid)
+        {
+            if (!sameProcessHandle(self.window_process_handles[rejected.index], rejected.handle)) return self.headlessSubsystemFailure("r4gb-rejection-early-exit");
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| rejection_ready_started >= rejection_ready_timeout) return self.headlessSubsystemFailure("r4gb-rejection-not-visible");
+            self.ctx.sleepTicks(1);
+        }
+        const rejection_visible = self.ctx.ticks();
+        const visibility_ticks = ticksFromMs(self.monotonic_hz, 100);
+        while (self.ctx.ticks() -| rejection_visible < visibility_ticks) {
+            if (!sameProcessHandle(self.window_process_handles[rejected.index], rejected.handle)) return self.headlessSubsystemFailure("r4gb-rejection-early-exit");
+            self.smokePumpCooperativeFrames(1);
+            self.ctx.sleepTicks(1);
+        }
+        if (self.requestWindowProcessClose(rejected.index) != r4os.abi.program_handle_ok) return self.headlessSubsystemFailure("r4gb-rejection-close-request");
+        // Mark the close as user-requested without arming Desktop's 200 ms
+        // forced-kill timer; the test below owns its longer bounded timeout.
+        self.windows[rejected.index].requestClose(0);
+        self.pushGuiEvent(rejected.index, .close);
+        const rejection_started = self.ctx.ticks();
+        while (sameProcessHandle(self.window_process_handles[rejected.index], rejected.handle)) {
+            self.smokePumpCooperativeFrames(1);
+            if (self.ctx.ticks() -| rejection_started >= close_timeout_ticks) return self.headlessSubsystemFailure("r4gb-rejection-timeout");
+        }
+        if (!sameProcessHandle(self.window_completion_handles[rejected.index], rejected.handle) or
+            self.window_completion_exit_codes[rejected.index] != r4gb_cgb_rejection_exit or
+            !self.ctx.exists(r4gb_report_cgb_path))
+        {
+            return self.headlessSubsystemFailure("r4gb-rejection-result");
+        }
+        return true;
+    }
+
+    fn launchHeadlessR4GbGuest(self: *App, guest_path: []const u8, trace_id: []const u8) ?HeadlessSubsystemLaunch {
+        var inspection = r4std.subsystem_runtime.inspect(&self.ctx.sys, guest_path) catch return self.headlessSubsystemLaunchFailure("r4gb-inspect");
+        const metadata_input = inspection.input;
+        const probed_input = r4std.subsystem_runtime.completeProbe(&self.ctx.sys, metadata_input, &inspection.access) catch return self.headlessSubsystemLaunchFailure("r4gb-probe");
+        if (inspection.access.info_calls != 1 or inspection.access.read_calls == 0 or
+            inspection.access.read_bytes == 0 or inspection.access.read_bytes > r4os.subsystem_catalog.max_probe_bytes)
+        {
+            return self.headlessSubsystemLaunchFailure("r4gb-probe-bounds");
+        }
+        var probed: r4os.subsystem_catalog.Resolution = .{};
+        r4os.subsystem_catalog.resolve(r4std.subsystem_runtime.catalog(), probed_input, .{}, &probed) catch return self.headlessSubsystemLaunchFailure("r4gb-probe-resolve");
+        const probe_target = probed.selected() orelse return self.headlessSubsystemLaunchFailure("r4gb-probe-target");
+        if (!equalsIgnoreCase(probe_target.subsystem_id, "r4os.gb") or
+            !equalsIgnoreCase(probe_target.format_id, "gameboy.dmg-cartridge") or
+            probe_target.evidence != .confirmed_probe)
+        {
+            return self.headlessSubsystemLaunchFailure("r4gb-probe-identity");
+        }
+
+        var args_storage: [r4os.subsystem_launch.max_args_bytes]u8 = undefined;
+        var resolution: r4std.file_handler.Resolution = .{};
+        r4std.file_handler.resolve(&self.assoc, r4std.subsystem_runtime.catalog(), metadata_input, args_storage[0..], &resolution) catch return self.headlessSubsystemLaunchFailure("r4gb-assoc-resolve");
+        const target = resolution.target orelse return self.headlessSubsystemLaunchFailure("r4gb-assoc-target");
+        if (target.kind != .subsystem or !equalsIgnoreCase(target.handler_id, "r4os.gb") or
+            !equalsIgnoreCase(target.format_id, "gameboy.dmg-cartridge") or
+            !equalsIgnoreCase(target.app_path, r4gb_host_path))
+        {
+            return self.headlessSubsystemLaunchFailure("r4gb-assoc-identity");
+        }
+        const request = r4os.subsystem_launch.parse(target.args) catch return self.headlessSubsystemLaunchFailure("r4gb-request");
+        if (!equalsIgnoreCase(request.guest_path, guest_path)) return self.headlessSubsystemLaunchFailure("r4gb-guest-identity");
+
+        var choices: r4std.file_handler.ChoiceList = .{};
+        var choice_access: r4std.subsystem_runtime.AccessStats = .{};
+        r4std.file_handler.collectPathChoices(&self.ctx.sys, &self.assoc, r4std.subsystem_runtime.catalog(), guest_path, &choices, &choice_access) catch return self.headlessSubsystemLaunchFailure("r4gb-open-with");
+        if (choice_access.info_calls != 1 or choice_access.read_calls != 0 or choice_access.read_bytes != 0) return self.headlessSubsystemLaunchFailure("r4gb-open-with-probe");
+        var found = false;
+        for (choices.slice()) |choice| if (choice.kind == .subsystem and
+            equalsIgnoreCase(choice.handler_id, "r4os.gb") and equalsIgnoreCase(choice.format_id, "gameboy.dmg-cartridge"))
+        {
+            found = true;
+        };
+        if (!found) return self.headlessSubsystemLaunchFailure("r4gb-open-with-choice");
+
+        const options = [_]r4os.subsystem_launch.Option{
+            .{ .key = r4os.subsystem_launch.trace_key, .value = trace_id },
+            .{ .key = r4os.subsystem_launch.trace_mode_key, .value = r4os.subsystem_launch.trace_mode_headless },
+        };
+        var traced_storage: [r4os.subsystem_launch.max_args_bytes + 1]u8 = .{0} ** (r4os.subsystem_launch.max_args_bytes + 1);
+        const traced = r4os.subsystem_launch.encode(guest_path, &options, traced_storage[0..r4os.subsystem_launch.max_args_bytes]) catch return self.headlessSubsystemLaunchFailure("r4gb-trace-args");
+        const index = self.findFreeAppWindow() orelse return self.headlessSubsystemLaunchFailure("r4gb-window-slot");
+        var path_z: [window_launch_path_max + 1]u8 = .{0} ** (window_launch_path_max + 1);
+        var title_z: [console_title_max + 1]u8 = .{0} ** (console_title_max + 1);
+        copySliceZ(path_z[0..], target.app_path);
+        copySliceZ(title_z[0..], target.title);
+        self.launchGuiPath(zptr(path_z[0..]), zptr(traced_storage[0 .. traced.len + 1]), zptr(title_z[0..]), .gui);
+        const handle = self.window_process_handles[index];
+        if (!processHandleValid(handle)) return self.headlessSubsystemLaunchFailure("r4gb-product-spawn");
         return .{ .index = index, .handle = handle };
     }
 
@@ -5790,6 +5970,19 @@ pub const App = struct {
             .tick = self.ctx.ticks(),
         };
         _ = self.pushGuiEventBounded(instance_id, &event, true);
+    }
+
+    fn pushGuiPhysicalKeyEvent(self: *App, index: usize, usage: u32, down: bool) bool {
+        if (index >= self.windows.len) return false;
+        const instance_id = self.windows[index].instance_id;
+        if (instance_id == 0) return false;
+        const event = r4os.abi.GuiEvent{
+            .kind = @intFromEnum(if (down) r4os.abi.GuiEventKind.physical_key_down else r4os.abi.GuiEventKind.physical_key_up),
+            .window_id = @intCast(index),
+            .key = usage,
+            .tick = self.ctx.ticks(),
+        };
+        return self.pushGuiEventBounded(instance_id, &event, true);
     }
 
     fn pushGuiEventBounded(self: *App, instance_id: u32, event: *const r4os.abi.GuiEvent, ordering_sensitive: bool) bool {

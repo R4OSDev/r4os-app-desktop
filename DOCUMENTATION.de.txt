@@ -125,13 +125,23 @@ Dateimetadaten. `R4BASIC source-probe` belegt einen `fileInfo`-Aufruf sowie
 null Inhaltslesungen und null gelesene Bytes vor dem Prozessstart; der
 R4Basic-Host bleibt damit alleiniger Besitzer des vollstaendigen Quellloads.
 
-Anschliessend startet derselbe Headless-Ablauf den produktiven R4GB-Host mit
-einem echten Desktop-Fensterhandle. Dessen endlicher `/HOSTTEST` prueft eine
-private DMG-Maschine, begrenzte Gast-Scheiben, physische Eingabe und
-Fokusfreigabe, generationstreues 160x144-Video, App-Audio sowie
-Pause/Resume/Reset/Mute/Close. Erst nach Exitcode 0 und der separaten Datei
-`C:\\TEMP\\R4GB.HOST` gilt dieser Teil als bestanden; AUTOEXEC liest die Datei
-nur fuer die serielle Markerauswertung aus.
+Anschliessend startet derselbe Headless-Ablauf zuerst den endlichen
+R4GB-`/HOSTTEST` und danach den produktiven Explorer-Pfad. Drei aus
+oeffentlichem Originalquelltext erzeugte Cartridges pruefen `.GB`, dual-mode
+`.GBC` mit MBC3-Batterie/RTC und eine CGB-only-Ablehnung. Katalog,
+`ASSOC.R4S`, begrenzter Probe und Open With muessen jeweils die stabilen IDs
+`r4os.gb` und `gameboy.dmg-cartridge` verwenden; der Desktop uebergibt nur den
+`R4SUBSYS1`-Datensatz an den installierten Host.
+
+Die beiden gueltigen Dateien laufen gleichzeitig in getrennten Fenstern und
+Prozessen. Der Desktop setzt den Fokus gezielt, sendet physische Pfeil- und
+Leertastenereignisse, prueft generationstreues 160x144-Video, App-Audio,
+Pause/Resume/Reset/Mute/Unmute, SRAM-/RTC-Persistenz und schliesst beide
+Instanzen getrennt kooperativ. Die CGB-only-Datei muss vor ihrem ebenfalls
+kooperativen Close ein gueltiges Fenster mit der konkreten Cartridge-Diagnose
+anzeigen. Erst nach den separaten Berichten in `C:\\TEMP` und fehlerfreiem
+Ressourcenabbau gilt dieser Teil als bestanden. Kommerzielle ROMs werden in
+diesem automatischen Lauf weder geoeffnet noch benoetigt.
 
 Nur wenn alle gestarteten Handles mit Exitcode 0 abgeschlossen sind, der
 Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
