@@ -14,6 +14,7 @@ const gui_frame_snapshot = @import("gui_frame_snapshot.zig");
 const message_box = @import("message_box.zig");
 const model = @import("model.zig");
 const paint = @import("paint.zig");
+const physical_input = @import("physical_input.zig");
 const quick_launch = @import("quick_launch.zig");
 const run_command = @import("run_command.zig");
 const scene_buffer = @import("scene_buffer.zig");
@@ -3326,15 +3327,7 @@ pub const App = struct {
         const result = self.ctx.physicalKeyPoll(&input);
         if (result <= 0) return false;
         self.physical_input_events +%= 1;
-        if (input.magic != r4os.abi.physical_key_magic or
-            input.version != r4os.abi.physical_key_version or
-            input.size != @sizeOf(r4os.abi.PhysicalKeyEvent) or
-            input.sequence == 0 or
-            input.sequence <= self.last_physical_input_sequence or
-            (input.kind != r4os.abi.physical_key_kind_down and
-                input.kind != r4os.abi.physical_key_kind_up and
-                input.kind != r4os.abi.physical_key_kind_reset))
-        {
+        if (!physical_input.valid(input, self.last_physical_input_sequence)) {
             self.physical_input_invalid +%= 1;
             return true;
         }
@@ -6053,20 +6046,7 @@ pub const App = struct {
         if (self.keyboard_focus != self.windowTargetForIndex(self.active_window)) return false;
         const instance_id = self.windows[self.active_window].instance_id;
         if (instance_id == 0) return false;
-        const kind: r4os.abi.GuiEventKind = if (input.kind == r4os.abi.physical_key_kind_down)
-            .physical_key_down
-        else if (input.kind == r4os.abi.physical_key_kind_up)
-            .physical_key_up
-        else
-            .physical_key_reset;
-        const event = r4os.abi.GuiEvent{
-            .kind = @intFromEnum(kind),
-            .window_id = @intCast(self.active_window),
-            .key = input.key,
-            .modifiers = input.modifiers,
-            .buttons = input.flags,
-            .tick = input.tick,
-        };
+        const event = physical_input.toGuiEvent(input, @intCast(self.active_window)) orelse return false;
         return self.pushGuiEventBounded(instance_id, &event, true);
     }
 
