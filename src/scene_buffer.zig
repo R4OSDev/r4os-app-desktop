@@ -121,6 +121,67 @@ pub const SceneBuffer = struct {
         }
     }
 
+    pub const Indexed8Nearest = struct {
+        indices: []const u8,
+        palette: []const u32,
+        source_x: u32,
+        source_y: u32,
+        source_w: u32,
+        source_h: u32,
+        source_stride: u32,
+        guest_w: u32,
+        guest_h: u32,
+        viewport: surface.Rect,
+    };
+
+    /// Replays one bounded Indexed8 source block directly into the XRGB scene.
+    /// The full guest/viewport mapping keeps adjacent blocks pixel-identical;
+    /// palette expansion happens once per source block instead of once per
+    /// scaled destination pixel.
+    pub fn blitIndexed8Nearest(self: *SceneBuffer, clip: surface.Rect, image: Indexed8Nearest) bool {
+        if (image.source_w == 0 or image.source_h == 0 or image.source_stride < image.source_w or
+            image.guest_w == 0 or image.guest_h == 0 or image.viewport.w <= 0 or image.viewport.h <= 0 or
+            image.palette.len < 256 or
+            @as(u64, image.source_x) + image.source_w > image.guest_w or
+            @as(u64, image.source_y) + image.source_h > image.guest_h)
+        {
+            return false;
+        }
+        const preceding_rows = std.math.mul(usize, @as(usize, image.source_h - 1), @as(usize, image.source_stride)) catch return false;
+        const required = std.math.add(usize, preceding_rows, @as(usize, image.source_w)) catch return false;
+        if (image.indices.len < required) return false;
+
+        const scene_clip = self.paintClipRect(clip) orelse return true;
+        const left = @max(scene_clip.x, image.viewport.x);
+        const top = @max(scene_clip.y, image.viewport.y);
+        const right = @min(scene_clip.right(), image.viewport.right());
+        const bottom = @min(scene_clip.bottom(), image.viewport.bottom());
+        if (right <= left or bottom <= top) return true;
+
+        const pixels = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const viewport_w: u64 = @intCast(image.viewport.w);
+        const viewport_h: u64 = @intCast(image.viewport.h);
+        var destination_y = top;
+        while (destination_y < bottom) : (destination_y += 1) {
+            const viewport_y: u64 = @intCast(destination_y - image.viewport.y);
+            const guest_y: u32 = @intCast((viewport_y * image.guest_h) / viewport_h);
+            if (guest_y < image.source_y or guest_y >= image.source_y + image.source_h) return false;
+            const source_row = @as(usize, guest_y - image.source_y) * image.source_stride;
+            const destination_row = @as(usize, @intCast(destination_y)) * destination_stride;
+            var destination_x = left;
+            while (destination_x < right) : (destination_x += 1) {
+                const viewport_x: u64 = @intCast(destination_x - image.viewport.x);
+                const guest_x: u32 = @intCast((viewport_x * image.guest_w) / viewport_w);
+                if (guest_x < image.source_x or guest_x >= image.source_x + image.source_w) return false;
+                const source_index = source_row + @as(usize, guest_x - image.source_x);
+                const palette_index = image.indices[source_index];
+                pixels[destination_row + @as(usize, @intCast(destination_x))] = image.palette[palette_index] & 0x00FF_FFFF;
+            }
+        }
+        return true;
+    }
+
     /// Blends an Alpha8 coverage mask over the current XRGB scene.  The source
     /// may contain row padding; clipping advances into the original stride.
     pub fn blendAlpha8(self: *SceneBuffer, x: i32, y: i32, w: u32, h: u32, stride: u32, rgb: u32, alpha: []const u8) bool {
@@ -227,6 +288,80 @@ test "scene buffer fills clipped rectangles" {
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[5]);
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[7]);
     try std.testing.expectEqual(@as(u32, 0), pixels[8]);
+}
+
+test "scene buffer expands scaled Indexed8 blocks directly with paint clipping" {
+    var pixels: [16]u32 = .{0xA0A0A0} ** 16;
+    var memory: [pixels.len * @sizeOf(u32)]u8 align(@alignOf(u32)) = undefined;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(memory[0..], 4, 4));
+    @memcpy(buffer.pixels.?, pixels[0..]);
+
+    var palette: [256]u32 = .{0} ** 256;
+    palette[0] = 0x00112233;
+    palette[1] = 0x00445566;
+    palette[2] = 0x00778899;
+    palette[3] = 0x00AABBCC;
+    const indices = [_]u8{ 0, 1, 2, 3 };
+    buffer.setPaintClip(.{ .x = 1, .y = 0, .w = 3, .h = 3 });
+    try std.testing.expect(buffer.blitIndexed8Nearest(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, .{
+        .indices = indices[0..],
+        .palette = palette[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 2,
+        .source_stride = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport = .{ .x = 0, .y = 0, .w = 4, .h = 4 },
+    }));
+
+    try std.testing.expectEqualSlices(u32, &.{
+        0xA0A0A0, 0x112233, 0x445566, 0x445566,
+        0xA0A0A0, 0x112233, 0x445566, 0x445566,
+        0xA0A0A0, 0x778899, 0xAABBCC, 0xAABBCC,
+        0xA0A0A0, 0xA0A0A0, 0xA0A0A0, 0xA0A0A0,
+    }, buffer.pixels.?);
+}
+
+test "scene buffer maps adjacent Indexed8 blocks without scaling seams" {
+    var memory: [7 * @sizeOf(u32)]u8 align(@alignOf(u32)) = undefined;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(memory[0..], 7, 1));
+    var palette: [256]u32 = .{0} ** 256;
+    palette[0] = 0x10;
+    palette[1] = 0x20;
+    palette[2] = 0x30;
+    palette[3] = 0x40;
+    const viewport = surface.Rect{ .x = 0, .y = 0, .w = 7, .h = 1 };
+
+    try std.testing.expect(buffer.blitIndexed8Nearest(.{ .x = 0, .y = 0, .w = 4, .h = 1 }, .{
+        .indices = &.{ 0, 1 },
+        .palette = palette[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 1,
+        .source_stride = 2,
+        .guest_w = 4,
+        .guest_h = 1,
+        .viewport = viewport,
+    }));
+    try std.testing.expect(buffer.blitIndexed8Nearest(.{ .x = 4, .y = 0, .w = 3, .h = 1 }, .{
+        .indices = &.{ 2, 3 },
+        .palette = palette[0..],
+        .source_x = 2,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 1,
+        .source_stride = 2,
+        .guest_w = 4,
+        .guest_h = 1,
+        .viewport = viewport,
+    }));
+
+    try std.testing.expectEqualSlices(u32, &.{ 0x10, 0x10, 0x20, 0x20, 0x30, 0x30, 0x40 }, buffer.pixels.?);
 }
 
 test "scene buffer paint clip preserves pixels outside incremental damage" {

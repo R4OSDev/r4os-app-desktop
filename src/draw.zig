@@ -1969,68 +1969,28 @@ fn hostedFrameIndexed8(ctx: *const desk_api.Context, bounds: surface.Rect, comma
     const screen_x = std.math.add(i32, bounds.x, command.x) catch return;
     const screen_y = std.math.add(i32, bounds.y, command.y) catch return;
     const item = surface.Rect{ .x = screen_x, .y = screen_y, .w = @intCast(command.w), .h = @intCast(command.h) };
-    const paint = ctx.scenePaintBounds() orelse bounds;
-    const left = @max(item.x, @max(bounds.x, paint.x));
-    const top = @max(item.y, @max(bounds.y, paint.y));
-    const right = @min(item.right(), @min(bounds.right(), paint.right()));
-    const bottom = @min(item.bottom(), @min(bounds.bottom(), paint.bottom()));
-    if (right <= left or bottom <= top) return;
-
-    const client_start_x = @as(i64, command.x) + (left - screen_x);
-    const client_start_y = @as(i64, command.y) + (top - screen_y);
-    const viewport_local_x = client_start_x - header.viewport_x;
-    const viewport_local_y = client_start_y - header.viewport_y;
-    if (viewport_local_x < 0 or viewport_local_y < 0) return;
-    const x_numerator = @as(u64, @intCast(viewport_local_x)) * header.guest_w;
-    const y_numerator = @as(u64, @intCast(viewport_local_y)) * header.guest_h;
-    const x_start: u32 = @intCast(x_numerator / header.viewport_w);
-    const x_start_remainder: u32 = @intCast(x_numerator % header.viewport_w);
-    const x_step = header.guest_w / header.viewport_w;
-    const x_remainder_step = header.guest_w % header.viewport_w;
-    var source_y: u32 = @intCast(y_numerator / header.viewport_h);
-    var y_remainder: u32 = @intCast(y_numerator % header.viewport_h);
-    const y_step = header.guest_h / header.viewport_h;
-    const y_remainder_step = header.guest_h % header.viewport_h;
-
-    var destination_y = top;
-    while (destination_y < bottom) : (destination_y += 1) {
-        var source_x = x_start;
-        var x_remainder = x_start_remainder;
-        var destination_x = left;
-        var run_x = left;
-        var run_color: ?u32 = null;
-        while (destination_x < right) : (destination_x += 1) {
-            if (source_x < header.source_x or source_y < header.source_y or
-                source_x >= header.source_x + header.source_w or source_y >= header.source_y + header.source_h) return;
-            const pixel_offset = @as(usize, header.pixels_offset) +
-                @as(usize, source_y - header.source_y) * header.pixel_stride +
-                (source_x - header.source_x);
-            if (pixel_offset >= source.len) return;
-            const palette_offset = @as(usize, header.palette_offset) + @as(usize, source[pixel_offset]) * @sizeOf(u32);
-            const color = readXrgb32(source, palette_offset) orelse return;
-            if (run_color == null) {
-                run_color = color;
-                run_x = destination_x;
-            } else if (run_color.? != color) {
-                fillRect(ctx, .{ .x = run_x, .y = destination_y, .w = destination_x - run_x, .h = 1 }, run_color.? & 0x00FF_FFFF);
-                run_color = color;
-                run_x = destination_x;
-            }
-            source_x += x_step;
-            x_remainder += x_remainder_step;
-            if (x_remainder >= header.viewport_w) {
-                x_remainder -= header.viewport_w;
-                source_x += 1;
-            }
-        }
-        if (run_color) |color| fillRect(ctx, .{ .x = run_x, .y = destination_y, .w = right - run_x, .h = 1 }, color & 0x00FF_FFFF);
-        source_y += y_step;
-        y_remainder += y_remainder_step;
-        if (y_remainder >= header.viewport_h) {
-            y_remainder -= header.viewport_h;
-            source_y += 1;
-        }
+    const clipped_item = rectIntersection(item, bounds) orelse return;
+    const viewport_x = std.math.add(i32, bounds.x, header.viewport_x) catch return;
+    const viewport_y = std.math.add(i32, bounds.y, header.viewport_y) catch return;
+    var palette: [r4os.abi.gui_indexed8_palette_entries]u32 = undefined;
+    for (&palette, 0..) |*color, index| {
+        const offset = @as(usize, header.palette_offset) + index * @sizeOf(u32);
+        color.* = readXrgb32(source, offset) orelse return;
     }
+    const pixels_offset: usize = @intCast(header.pixels_offset);
+    const scene = ctx.scene orelse return;
+    _ = scene.blitIndexed8Nearest(clipped_item, .{
+        .indices = source[pixels_offset..],
+        .palette = palette[0..],
+        .source_x = header.source_x,
+        .source_y = header.source_y,
+        .source_w = header.source_w,
+        .source_h = header.source_h,
+        .source_stride = header.pixel_stride,
+        .guest_w = header.guest_w,
+        .guest_h = header.guest_h,
+        .viewport = .{ .x = viewport_x, .y = viewport_y, .w = @intCast(header.viewport_w), .h = @intCast(header.viewport_h) },
+    });
 }
 
 fn readXrgb32(source: []const u8, offset: usize) ?u32 {
