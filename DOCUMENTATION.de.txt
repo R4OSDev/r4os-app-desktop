@@ -143,6 +143,18 @@ anzeigen. Erst nach den separaten Berichten in `C:\\TEMP` und fehlerfreiem
 Ressourcenabbau gilt dieser Teil als bestanden. Kommerzielle ROMs werden in
 diesem automatischen Lauf weder geoeffnet noch benoetigt.
 
+Danach erzeugt R4SNES im Testgast vier originale R4OS-Cartridges und der
+Desktop durchlaeuft denselben installierten Katalog-, ASSOC-, Open-With- und
+R4SUBSYS1-Pfad fuer `.SFC` und `.SMC`. Zwei produktive SNES-Fenster laufen
+gleichzeitig mindestens 60 Sekunden Gastzeit. Physische Pfeil-, Enter-,
+Rechts-Strg- und Numpad-Usages pruefen Port 1; Pause, Resume, Reset, Mute und
+Unmute bleiben Hostaktionen. Native XRGB32-Frames, SPC700/S-DSP-App-Audio,
+SRAM/Epson-RTC, Fokusisolation sowie getrennte Witness-/Close-Enden werden in
+maschinenlesbaren Berichten gebunden. Eine ungueltige Cartridge und eine
+DSP-1-Cartridge ohne Nutzerfirmware muessen jeweils ein sichtbares
+Diagnosefenster zeigen und kooperativ mit ihrem Produkt-Exitcode enden. Der
+automatische Ablauf kennt und startet keine private kommerzielle ROM.
+
 Nur wenn alle gestarteten Handles mit Exitcode 0 abgeschlossen sind, der
 Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
 und der Stride-/Damage-/Cursorblink-/Remote-Demand-Presenttest erfolgreich
