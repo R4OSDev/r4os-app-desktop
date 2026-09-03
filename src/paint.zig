@@ -10,6 +10,8 @@ const glyph_base_w: usize = 8;
 const glyph_base_h: usize = 8;
 const glyph_max_w: usize = 40;
 const glyph_max_h: usize = 40;
+const glyph_cache_slots: usize = 256;
+const font_layout_cache_slots: usize = 16;
 const text_max_bytes: usize = 4096;
 
 pub fn rect(draw: *const r4os.r4draw.Context, x: i32, y: i32, w: u32, h: u32, rgb: u32) void {
@@ -70,7 +72,8 @@ pub fn textScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Cont
 
 pub fn textFont(draw: *const r4os.r4draw.Context, font_id: u32, x: i32, y: i32, value: [*:0]const u8, fg: u32, bg: u32) void {
     if (@intFromPtr(value) == 0) return;
-    const layout = fontLayout(draw, font_id);
+    const revision = fontCacheRevision(draw, font_id);
+    const layout = fontLayout(draw, font_id, revision);
     const advance: i32 = @intCast(layout.cell_width);
     const line_h: i32 = @intCast(layout.cell_height);
     const start_x = x;
@@ -86,14 +89,15 @@ pub fn textFont(draw: *const r4os.r4draw.Context, font_id: u32, x: i32, y: i32, 
             py += line_h;
             continue;
         }
-        glyph(draw, font_id, layout, px, py, decoded.codepoint, fg, bg);
+        glyph(draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg);
         px += advance;
     }
 }
 
 pub fn textFontScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, x: i32, y: i32, value: [*:0]const u8, fg: u32, bg: u32) void {
     if (@intFromPtr(value) == 0) return;
-    const layout = fontLayout(draw, font_id);
+    const revision = fontCacheRevision(draw, font_id);
+    const layout = fontLayout(draw, font_id, revision);
     const advance: i32 = @intCast(layout.cell_width);
     const line_h: i32 = @intCast(layout.cell_height);
     const start_x = x;
@@ -109,7 +113,7 @@ pub fn textFontScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.
             py += line_h;
             continue;
         }
-        glyphScene(scene, draw, font_id, layout, px, py, decoded.codepoint, fg, bg);
+        glyphScene(scene, draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg);
         px += advance;
     }
 }
@@ -124,7 +128,8 @@ pub fn textFontSlice(
     bg: u32,
     bounds: surface.Rect,
 ) void {
-    const layout = fontLayout(draw, font_id);
+    const revision = fontCacheRevision(draw, font_id);
+    const layout = fontLayout(draw, font_id, revision);
     const advance: i32 = @intCast(layout.cell_width);
     const line_h: i32 = @intCast(layout.cell_height);
     const start_x = x;
@@ -140,7 +145,7 @@ pub fn textFontSlice(
             py = addCoordinate(py, line_h);
             continue;
         }
-        glyphClipped(draw, font_id, layout, px, py, decoded.codepoint, fg, bg, bounds);
+        glyphClipped(draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg, bounds);
         px = addCoordinate(px, advance);
     }
 }
@@ -156,7 +161,8 @@ pub fn textFontSliceScene(
     bg: u32,
     bounds: surface.Rect,
 ) void {
-    const layout = fontLayout(draw, font_id);
+    const revision = fontCacheRevision(draw, font_id);
+    const layout = fontLayout(draw, font_id, revision);
     const advance: i32 = @intCast(layout.cell_width);
     const line_h: i32 = @intCast(layout.cell_height);
     const start_x = x;
@@ -172,7 +178,7 @@ pub fn textFontSliceScene(
             py = addCoordinate(py, line_h);
             continue;
         }
-        glyphSceneClipped(scene, draw, font_id, layout, px, py, decoded.codepoint, fg, bg, bounds);
+        glyphSceneClipped(scene, draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg, bounds);
         px = addCoordinate(px, advance);
     }
 }
@@ -189,17 +195,134 @@ const FontLayout = struct {
     bitmap_height: usize = glyph_base_h,
 };
 
-fn fontLayout(draw: *const r4os.r4draw.Context, font_id: u32) FontLayout {
-    if (font_id == r4os.abi.gui_font_builtin_id or !draw.hasFn("font_glyph_row")) return .{};
-    var info: r4os.abi.GuiFontInfo = .{};
-    if (draw.fontInfo(font_id, &info) <= 0 or (info.flags & r4os.abi.gui_font_flag_renderable) == 0) return .{};
-    const cell_width = @min(@max(@as(usize, 1), @as(usize, info.max_advance)), glyph_max_w);
-    const bitmap_height = @min(@max(@as(usize, 1), @as(usize, info.height)), glyph_max_h);
-    const cell_height = @min(@max(bitmap_height, @as(usize, info.line_height)), glyph_max_h);
-    return .{ .imported = true, .cell_width = cell_width, .cell_height = cell_height, .bitmap_height = bitmap_height };
+pub const FontCacheStats = struct {
+    layout_hits: u64 = 0,
+    layout_misses: u64 = 0,
+    glyph_hits: u64 = 0,
+    glyph_misses: u64 = 0,
+    glyph_loads: u64 = 0,
+    invalidations: u64 = 0,
+};
+
+const FontLayoutCacheEntry = struct {
+    used: bool = false,
+    font_id: u32 = 0,
+    revision: u32 = 0,
+    layout: FontLayout = .{},
+};
+
+const GlyphCoverageCacheEntry = struct {
+    used: bool = false,
+    font_id: u32 = 0,
+    revision: u32 = 0,
+    codepoint: u32 = 0,
+    rows: [glyph_max_h]u64 = .{0} ** glyph_max_h,
+};
+
+var font_layout_cache: [font_layout_cache_slots]FontLayoutCacheEntry =
+    .{FontLayoutCacheEntry{}} ** font_layout_cache_slots;
+var glyph_coverage_cache: [glyph_cache_slots]GlyphCoverageCacheEntry =
+    .{GlyphCoverageCacheEntry{}} ** glyph_cache_slots;
+var observed_font_revision: u32 = 0;
+var font_cache_stats: FontCacheStats = .{};
+
+pub fn currentFontCacheStats() FontCacheStats {
+    return font_cache_stats;
 }
 
-fn glyph(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32) void {
+pub fn resetFontCache() void {
+    font_layout_cache = .{FontLayoutCacheEntry{}} ** font_layout_cache_slots;
+    glyph_coverage_cache = .{GlyphCoverageCacheEntry{}} ** glyph_cache_slots;
+    observed_font_revision = 0;
+    font_cache_stats = .{};
+}
+
+fn fontCacheRevision(draw: *const r4os.r4draw.Context, font_id: u32) u32 {
+    if (font_id == r4os.abi.gui_font_builtin_id) return if (observed_font_revision == 0) 1 else observed_font_revision;
+    const revision = draw.fontRevision();
+    observeFontRevision(revision);
+    return revision;
+}
+
+fn observeFontRevision(revision_raw: u32) void {
+    const revision = if (revision_raw == 0) 1 else revision_raw;
+    if (observed_font_revision == 0) {
+        observed_font_revision = revision;
+        return;
+    }
+    if (observed_font_revision == revision) return;
+    font_layout_cache = .{FontLayoutCacheEntry{}} ** font_layout_cache_slots;
+    glyph_coverage_cache = .{GlyphCoverageCacheEntry{}} ** glyph_cache_slots;
+    observed_font_revision = revision;
+    font_cache_stats.invalidations +%= 1;
+}
+
+fn fontLayout(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32) FontLayout {
+    const slot = fontLayoutSlot(font_id, revision);
+    const cached = &font_layout_cache[slot];
+    if (cached.used and cached.font_id == font_id and cached.revision == revision) {
+        font_cache_stats.layout_hits +%= 1;
+        return cached.layout;
+    }
+    font_cache_stats.layout_misses +%= 1;
+    var layout = FontLayout{};
+    if (font_id != r4os.abi.gui_font_builtin_id and draw.hasFn("font_glyph_row")) {
+        var info: r4os.abi.GuiFontInfo = .{};
+        if (draw.fontInfo(font_id, &info) > 0 and (info.flags & r4os.abi.gui_font_flag_renderable) != 0) {
+            const cell_width = @min(@max(@as(usize, 1), @as(usize, info.max_advance)), glyph_max_w);
+            const bitmap_height = @min(@max(@as(usize, 1), @as(usize, info.height)), glyph_max_h);
+            const cell_height = @min(@max(bitmap_height, @as(usize, info.line_height)), glyph_max_h);
+            layout = .{ .imported = true, .cell_width = cell_width, .cell_height = cell_height, .bitmap_height = bitmap_height };
+        }
+    }
+    cached.* = .{ .used = true, .font_id = font_id, .revision = revision, .layout = layout };
+    return layout;
+}
+
+fn fontLayoutSlot(font_id: u32, revision: u32) usize {
+    const mixed = (font_id *% 0x9E37_79B1) ^ (revision *% 0x85EB_CA6B);
+    return @as(usize, mixed) & (font_layout_cache_slots - 1);
+}
+
+fn glyphCoverageSlot(font_id: u32, revision: u32, codepoint: u32) usize {
+    const mixed = (font_id *% 0x9E37_79B1) ^ (revision *% 0x85EB_CA6B) ^ (codepoint *% 0xC2B2_AE35);
+    return @as(usize, mixed) & (glyph_cache_slots - 1);
+}
+
+fn glyphCoverage(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, codepoint: u32) *const GlyphCoverageCacheEntry {
+    const slot = glyphCoverageSlot(font_id, revision, codepoint);
+    const cached = &glyph_coverage_cache[slot];
+    if (cached.used and cached.font_id == font_id and cached.revision == revision and cached.codepoint == codepoint) {
+        font_cache_stats.glyph_hits +%= 1;
+        return cached;
+    }
+
+    font_cache_stats.glyph_misses +%= 1;
+    cached.* = .{ .used = true, .font_id = font_id, .revision = revision, .codepoint = codepoint };
+    if (layout.imported) {
+        var bitmap: r4os.abi.GuiGlyphBitmap = .{};
+        if (draw.fontGlyphBitmap(font_id, codepoint, &bitmap) == 0) {
+            const height = @min(@as(usize, bitmap.height), @min(layout.bitmap_height, cached.rows.len));
+            @memcpy(cached.rows[0..height], bitmap.rows[0..height]);
+        } else {
+            var row: usize = 0;
+            while (row < layout.bitmap_height) : (row += 1) cached.rows[row] = draw.fontGlyphRow(font_id, codepoint, @intCast(row));
+        }
+    } else {
+        const pattern = glyphPattern(codepoint);
+        var row: usize = 0;
+        while (row < glyph_base_h) : (row += 1) {
+            var col: usize = 0;
+            while (col < glyph_base_w) : (col += 1) {
+                if ((pattern[row] & (@as(u8, 0x80) >> @intCast(col))) != 0) cached.rows[row] |= @as(u64, 1) << @intCast(col);
+            }
+        }
+    }
+    font_cache_stats.glyph_loads +%= 1;
+    return cached;
+}
+
+fn glyph(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32) void {
     if (x < 0 or y < 0) return;
     const w = layout.cell_width;
     const h = layout.cell_height;
@@ -208,57 +331,50 @@ fn glyph(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: 
     const screen_h: i32 = @intCast(draw.screenHeight());
     if (x >= screen_w or y >= screen_h) return;
 
-    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0 .. w * h]);
+    rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0 .. w * h]);
 
     _ = draw.displayBlitXrgb32(x, y, @intCast(w), @intCast(h), pixels[0 .. w * h]);
 }
 
-fn glyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32) void {
+fn glyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32) void {
     if (x < 0 or y < 0) return;
     const w = layout.cell_width;
     const h = layout.cell_height;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     if (x >= scene.width or y >= scene.height) return;
 
-    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0 .. w * h]);
+    rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0 .. w * h]);
 
     scene.blitXrgb32(x, y, @intCast(w), @intCast(h), pixels[0 .. w * h]);
 }
 
-fn glyphClipped(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
+fn glyphClipped(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
     _ = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, std.math.maxInt(i32), std.math.maxInt(i32)) orelse return;
     const screen_w: i32 = @intCast(@min(draw.screenWidth(), @as(u32, @intCast(std.math.maxInt(i32)))));
     const screen_h: i32 = @intCast(@min(draw.screenHeight(), @as(u32, @intCast(std.math.maxInt(i32)))));
     const clipped = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, screen_w, screen_h) orelse return;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     const count = layout.cell_width * layout.cell_height;
-    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0..count]);
+    rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0..count]);
     blitClippedGlyph(draw, pixels[0..count], layout.cell_width, x, y, clipped);
 }
 
-fn glyphSceneClipped(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
+fn glyphSceneClipped(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
     const clipped = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, scene.width, scene.height) orelse return;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     const count = layout.cell_width * layout.cell_height;
-    rasterizeGlyph(draw, font_id, layout, codepoint, fg, bg, pixels[0..count]);
+    rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0..count]);
     blitClippedGlyphScene(scene, pixels[0..count], layout.cell_width, x, y, clipped);
 }
 
-fn rasterizeGlyph(draw: *const r4os.r4draw.Context, font_id: u32, layout: FontLayout, codepoint: u32, fg: u32, bg: u32, pixels: []u32) void {
+fn rasterizeGlyph(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, codepoint: u32, fg: u32, bg: u32, pixels: []u32) void {
+    const coverage = glyphCoverage(draw, font_id, revision, layout, codepoint);
     var row: usize = 0;
     while (row < layout.cell_height) : (row += 1) {
-        const source_row: u64 = if (layout.imported and row < layout.bitmap_height)
-            draw.fontGlyphRow(font_id, codepoint, @intCast(row))
-        else
-            0;
+        const source_row: u64 = coverage.rows[row];
         var col: usize = 0;
         while (col < layout.cell_width) : (col += 1) {
-            const bit = if (layout.imported)
-                (source_row & (@as(u64, 1) << @intCast(col))) != 0
-            else if (row < glyph_base_h and col < glyph_base_w)
-                (glyphPattern(codepoint)[row] & (@as(u8, 0x80) >> @intCast(col))) != 0
-            else
-                false;
+            const bit = (source_row & (@as(u64, 1) << @intCast(col))) != 0;
             pixels[row * layout.cell_width + col] = if (bit) fg else bg;
         }
     }
@@ -408,8 +524,47 @@ test "scene text writes into buffer" {
     var scene = scene_buffer.SceneBuffer{};
     try std.testing.expect(scene.attach(std.mem.sliceAsBytes(pixels[0..]), 8, 8));
     scene.fillRect(surface.Rect{ .x = 0, .y = 0, .w = 8, .h = 8 }, 0x000000);
-    glyphScene(&scene, undefined, r4os.abi.gui_font_builtin_id, .{}, 0, 0, 'A', 0xFFFFFF, 0x000000);
+    glyphScene(&scene, undefined, r4os.abi.gui_font_builtin_id, 1, .{}, 0, 0, 'A', 0xFFFFFF, 0x000000);
     try std.testing.expect(pixels[0] != 0 or pixels[1] != 0 or pixels[2] != 0 or pixels[3] != 0 or pixels[4] != 0 or pixels[5] != 0 or pixels[6] != 0 or pixels[7] != 0);
+}
+
+test "glyph coverage cache is generation keyed and color neutral" {
+    resetFontCache();
+    defer resetFontCache();
+    observeFontRevision(7);
+
+    var reference: [16 * 8]u32 = .{0} ** (16 * 8);
+    var cached_pixels: [16 * 8]u32 = .{0} ** (16 * 8);
+    var reference_scene = scene_buffer.SceneBuffer{};
+    var cached_scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(reference_scene.attach(std.mem.sliceAsBytes(reference[0..]), 16, 8));
+    try std.testing.expect(cached_scene.attach(std.mem.sliceAsBytes(cached_pixels[0..]), 16, 8));
+
+    textFontScene(&reference_scene, undefined, r4os.abi.gui_font_builtin_id, 0, 0, "AA", 0x00FF_FFFF, 0x0000_0000);
+    const after_first = currentFontCacheStats();
+    try std.testing.expectEqual(@as(u64, 1), after_first.glyph_misses);
+    try std.testing.expectEqual(@as(u64, 1), after_first.glyph_hits);
+    try std.testing.expectEqual(@as(u64, 1), after_first.glyph_loads);
+
+    textFontScene(&cached_scene, undefined, r4os.abi.gui_font_builtin_id, 0, 0, "AA", 0x00FF_FFFF, 0x0000_0000);
+    try std.testing.expectEqualSlices(u32, reference[0..], cached_pixels[0..]);
+    const after_second = currentFontCacheStats();
+    try std.testing.expectEqual(@as(u64, 3), after_second.glyph_hits);
+    try std.testing.expectEqual(after_first.glyph_loads, after_second.glyph_loads);
+
+    @memset(cached_pixels[0..], 0);
+    textFontScene(&cached_scene, undefined, r4os.abi.gui_font_builtin_id, 0, 0, "A", 0x0012_3456, 0x0065_4321);
+    const after_recolor = currentFontCacheStats();
+    try std.testing.expectEqual(after_second.glyph_loads, after_recolor.glyph_loads);
+    try std.testing.expect(std.mem.indexOfScalar(u32, cached_pixels[0..64], 0x0012_3456) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, cached_pixels[0..64], 0x0065_4321) != null);
+
+    observeFontRevision(8);
+    @memset(cached_pixels[0..], 0);
+    textFontScene(&cached_scene, undefined, r4os.abi.gui_font_builtin_id, 0, 0, "A", 0x00FF_FFFF, 0);
+    const after_generation = currentFontCacheStats();
+    try std.testing.expectEqual(@as(u64, 1), after_generation.invalidations);
+    try std.testing.expectEqual(after_recolor.glyph_loads + 1, after_generation.glyph_loads);
 }
 
 test "utf8 text renders one cell per scalar" {

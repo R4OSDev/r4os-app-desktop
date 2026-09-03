@@ -55,13 +55,31 @@ und Clientclip schneidende Glyphenzelle. Nur die sichtbaren Teilpixel werden
 uebernommen; dadurch liefern Vollkomposition und regionale Komposition an
 allen Glyphenkanten dasselbe Bild, ohne Pixel ausserhalb des Clips zu
 veraendern. Diese Regel gilt fuer den eingebauten und installierten Fontpfad.
+Ein fester Cache haelt 16 Fontlayouts und 256 monochrome Glyphabdeckungen,
+jeweils nach Font-ID, Codepoint und R4DRAW-Fontrevision getrennt. Farben
+werden erst beim Blit angewandt und vervielfachen den Cache nicht. Ein
+erfolgreicher Font-Reload aendert die Revision und verwirft damit alle alten
+Eintraege; direkte Cachekollisionen kosten nur einen erneuten Abruf. Aktuelle
+Kernels liefern eine installierte Glyphabdeckung ueber den Bulk-Slot in einem
+Aufruf, waehrend aeltere Tabellen pixelidentisch ueber die Zeilen-API
+zurueckfallen.
 
-Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Snapshot mit
-kompakten Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Konsolenstatus,
-Ausgabe und Parsing werden nur bei Revision, Geometrie, Font, Codepage oder
-Scrollposition erneuert. Der 500-ms-Cursorblink verwendet den gecachten
-Status, invalidiert nur den Cursorbalken und komponiert dank Paintclip weder
-unsichtbare Zeilen noch die restliche Terminalflaeche neu.
+Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Rohsnapshot und
+kompakte Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Bleiben Instanz,
+Geometrie, Font, Codepage, Scrollposition, Farben und Clear-Generation gleich
+und ist die neue Ausgabe eine exakte Erweiterung, wird nur das Suffix geparst.
+Der Desktop vergleicht die alten und neuen sichtbaren Zeilen, invalidiert nur
+geaenderte Zeilen sowie die alte und neue Cursorzelle und ueberspringt den
+unveraenderten Praefix. Ringverschiebung, Sprung im Scrollstand, Resize,
+Font-, Codepage-, Farb- oder Clear-Wechsel verwenden den begrenzten
+Vollaufbau. Der 500-ms-Cursorblink verwendet weiterhin den gecachten Status
+und invalidiert nur den Cursorbalken.
+
+Die Headless-Diagnose gibt Glyph-Hits und -Loads, den Pixelhash des gecachten
+Referenzglyphs sowie inkrementelle/vollstaendige Terminal-Refreshes,
+geparste/uebersprungene Bytes und geaenderte/uebersprungene Zeilen aus. Die
+Pixelpruefung vergleicht Cache- und Referenzbild exakt; sie ist kein
+manueller Sichttest.
 
 Der Desktop-Smoke startet zwei unabhaengige Terminalfenster und belegt seit
 0.69.67 ueber Task- und Konsolentelemetrie, dass beide nach dem Prompt ohne

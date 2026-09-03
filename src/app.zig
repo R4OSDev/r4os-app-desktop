@@ -387,6 +387,7 @@ pub const App = struct {
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_exit_codes: [4]i32 = .{0} ** 4,
     headless_acceptance_terminal: bool = false,
+    smoke_glyph_pixel_hash: u64 = 0,
     gui_frame_caches: [4]gui_frame_snapshot.Cache = .{gui_frame_snapshot.Cache{}} ** 4,
     window_launch_paths: [4][window_launch_path_max + 1]u8 = .{.{0} ** (window_launch_path_max + 1)} ** 4,
     last_display_revision: u32 = 0,
@@ -1528,7 +1529,7 @@ pub const App = struct {
         self.ctx.print("Terminal multi-window launch: ");
         const perf_start = self.ctx.performanceInput() orelse {
             self.ctx.println("FAILED-metrics");
-            return false;
+            return self.headlessSubsystemFailure("terminal-metrics");
         };
         const before = self.countWindowsByLaunchPath(terminal_path);
         self.launchConsolePath(terminal_path, "", "Terminal");
@@ -1540,7 +1541,7 @@ pub const App = struct {
         if (after_first != before + 1 or first >= self.windows.len or self.windows[first].kind != .terminal) {
             self.ctx.println("FAILED-first");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-first");
         }
 
         self.launchConsolePath(terminal_path, "", "Terminal");
@@ -1557,7 +1558,7 @@ pub const App = struct {
         if (!windows_ok) {
             self.ctx.println("FAILED-second");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-second");
         }
 
         const first_id = self.windows[first].instance_id;
@@ -1577,23 +1578,23 @@ pub const App = struct {
         const idle_before = settled_perf orelse {
             self.ctx.println("FAILED-input-wait");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-input-wait");
         };
         const runtime_before = self.smokeTaskRuntimeTicks(first_id, second_id) orelse {
             self.ctx.println("FAILED-runtime-before");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-runtime-before");
         };
         self.smokePumpFrames(12);
         const runtime_after = self.smokeTaskRuntimeTicks(first_id, second_id) orelse {
             self.ctx.println("FAILED-runtime-after");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-runtime-after");
         };
         const idle_after = self.ctx.performanceInput() orelse {
             self.ctx.println("FAILED-idle-metrics");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-idle-metrics");
         };
         if (runtime_after != runtime_before or
             idle_after.console_read_calls != idle_before.console_read_calls or
@@ -1604,13 +1605,38 @@ pub const App = struct {
         {
             self.ctx.println("FAILED-idle-work");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-idle-work");
         }
+
+        if (!self.pushConsoleInputBounded(first_id, "ECHO R4TERM-CACHE-BASELINE\n")) {
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return self.headlessSubsystemFailure("terminal-baseline-input");
+        }
+        var baseline_ready = false;
+        var baseline_attempt: u32 = 0;
+        while (baseline_attempt < 40) : (baseline_attempt += 1) {
+            self.smokePumpFrames(1);
+            var output: [4096]u8 = undefined;
+            const got = self.ctx.consoleOutput(first_id, output[0..]);
+            if (got > 0 and containsBytes(output[0..@intCast(got)], "R4TERM-CACHE-BASELINE")) {
+                baseline_ready = true;
+                break;
+            }
+        }
+        if (!baseline_ready) {
+            self.forceCloseWindowsByLaunchPath(terminal_path);
+            return self.headlessSubsystemFailure("terminal-baseline-output");
+        }
+
+        const terminal_incremental_before = self.render_stats.console_incremental_refreshes;
+        const terminal_parse_skipped_before = self.render_stats.console_parse_skipped_bytes;
+        const terminal_changed_lines_before = self.render_stats.console_changed_lines;
+        const terminal_skipped_lines_before = self.render_stats.console_skipped_lines;
 
         if (!self.pushConsoleInputBounded(first_id, "PAUSE\n")) {
             self.ctx.println("FAILED-pause-input");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-pause-input");
         }
         var pause_ready = false;
         var pause_attempt: u32 = 0;
@@ -1629,7 +1655,7 @@ pub const App = struct {
         if (!pause_ready or !self.pushConsoleInputBounded(first_id, "XEXIT\n")) {
             self.ctx.println("FAILED-pause");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-pause");
         }
         const close_window = &self.windows[second];
         const close_x = close_window.x + close_window.w - 4 - (theme.button + 2) + @divTrunc(theme.button, 2);
@@ -1638,7 +1664,7 @@ pub const App = struct {
         if (close_target != self.closeTargetForIndex(second)) {
             self.ctx.println("FAILED-close-target");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-close-target");
         }
         self.dispatchMouseCommand(close_target);
         self.dispatchMouseCommand(close_target);
@@ -1648,7 +1674,7 @@ pub const App = struct {
         {
             self.ctx.println("FAILED-close-request");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-close-request");
         }
 
         var closed = false;
@@ -1669,12 +1695,12 @@ pub const App = struct {
         {
             self.ctx.println("FAILED-close");
             self.forceCloseWindowsByLaunchPath(terminal_path);
-            return false;
+            return self.headlessSubsystemFailure("terminal-close");
         }
 
         const active_after = self.ctx.performanceInput() orelse {
             self.ctx.println("FAILED-active-metrics");
-            return false;
+            return self.headlessSubsystemFailure("terminal-active-metrics");
         };
         const active_write_calls = active_after.console_output_write_calls - idle_after.console_output_write_calls;
         const active_revisions = active_after.console_output_revision_batches - idle_after.console_output_revision_batches;
@@ -1684,8 +1710,16 @@ pub const App = struct {
             active_write_calls == 0 or active_revisions > active_write_calls * 2 or active_signals > active_write_calls)
         {
             self.ctx.println("FAILED-active-work");
-            return false;
+            return self.headlessSubsystemFailure("terminal-active-work");
         }
+        const incremental_refreshes = self.render_stats.console_incremental_refreshes - terminal_incremental_before;
+        const parse_skipped = self.render_stats.console_parse_skipped_bytes - terminal_parse_skipped_before;
+        const changed_lines = self.render_stats.console_changed_lines - terminal_changed_lines_before;
+        const skipped_lines = self.render_stats.console_skipped_lines - terminal_skipped_lines_before;
+        if (incremental_refreshes == 0) return self.headlessSubsystemFailure("terminal-incremental-refresh");
+        if (parse_skipped == 0) return self.headlessSubsystemFailure("terminal-incremental-prefix");
+        if (changed_lines == 0) return self.headlessSubsystemFailure("terminal-incremental-change");
+        if (skipped_lines == 0) return self.headlessSubsystemFailure("terminal-incremental-skip");
         if (self.hasDamage()) self.redraw();
         self.ctx.print("ok idle-cpu=");
         self.ctx.printU64(runtime_after - runtime_before);
@@ -1697,6 +1731,14 @@ pub const App = struct {
         self.ctx.printU64(active_revisions);
         self.ctx.print(" signals=");
         self.ctx.printU64(active_signals);
+        self.ctx.print(" terminal_incremental=");
+        self.ctx.printU64(incremental_refreshes);
+        self.ctx.print(" parse_skipped=");
+        self.ctx.printU64(parse_skipped);
+        self.ctx.print(" lines=");
+        self.ctx.printU64(changed_lines);
+        self.ctx.print("/");
+        self.ctx.printU64(skipped_lines);
         self.ctx.println("");
         return true;
     }
@@ -2335,6 +2377,7 @@ pub const App = struct {
 
     fn printSmokeRenderStats(self: *const App, comptime label: []const u8, before: RenderSnapshot) RenderSnapshot {
         const after = self.renderSnapshot();
+        const font_cache = paint.currentFontCacheStats();
         self.ctx.print("DESKTOP render ");
         self.ctx.write(label);
         self.ctx.print(": redraws=");
@@ -2401,6 +2444,22 @@ pub const App = struct {
         self.ctx.printU64(self.render_stats.layout_worker_last_ticks);
         self.ctx.print("/");
         self.ctx.printU64(self.render_stats.layout_worker_max_ticks);
+        self.ctx.print(" glyph_cache=");
+        self.ctx.printU64(font_cache.glyph_hits);
+        self.ctx.print("/");
+        self.ctx.printU64(font_cache.glyph_loads);
+        self.ctx.print(" terminal_refresh=");
+        self.ctx.printU64(self.render_stats.console_incremental_refreshes);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.console_full_refreshes);
+        self.ctx.print(" terminal_parse=");
+        self.ctx.printU64(self.render_stats.console_parse_bytes);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.console_parse_skipped_bytes);
+        self.ctx.print(" terminal_lines=");
+        self.ctx.printU64(self.render_stats.console_changed_lines);
+        self.ctx.print("/");
+        self.ctx.printU64(self.render_stats.console_skipped_lines);
         self.ctx.print(" last=");
         self.ctx.write(damageKindName(self.render_stats.last_damage_kind));
         self.ctx.print(" rect=");
@@ -2797,7 +2856,7 @@ pub const App = struct {
         if (self.window_completion_exit_codes[r4snes.index] != 0) return self.headlessSubsystemFailure("r4snes-completion-exit");
         if (!self.ctx.exists(r4snes_host_test_marker_path)) return self.headlessSubsystemFailure("r4snes-marker");
         if (!self.smokeR4SnesProductPath()) return false;
-        if (self.ctx.fileWrite(subsystem_host_test_marker_path, subsystem_host_test_marker) != @as(i32, @intCast(subsystem_host_test_marker.len))) return false;
+        if (!self.writeHeadlessSubsystemMarker()) return false;
 
         self.enterTerminalModeWithArgs("");
         if (!self.terminal_mode or self.windows[0].instance_id == 0) return self.headlessSubsystemFailure("terminal-mode");
@@ -2936,6 +2995,7 @@ pub const App = struct {
     }
 
     fn smokeTextDamageContract(self: *App) bool {
+        paint.resetFontCache();
         var font_id: u32 = r4os.abi.gui_font_builtin_id;
         var font_info: r4os.abi.GuiFontInfo = .{};
         var index: u32 = 1;
@@ -2968,6 +3028,14 @@ pub const App = struct {
         const bounds = surface.Rect{ .x = 0, .y = 0, .w = canvas_w, .h = canvas_h };
         paint.textFontSliceScene(&reference_scene, &self.ctx.draw, font_id, 8, 8, "A", 0x00FF_FFFF, 0, bounds);
 
+        @memset(actual, untouched);
+        var cached_scene = scene_buffer.SceneBuffer{};
+        if (!cached_scene.attach(std.mem.sliceAsBytes(actual), canvas_w, canvas_h)) return self.headlessSubsystemFailure("present-text-cache-scene");
+        paint.textFontSliceScene(&cached_scene, &self.ctx.draw, font_id, 8, 8, "A", 0x00FF_FFFF, 0, bounds);
+        const reference_hash = pixelHash(reference);
+        if (pixelHash(actual) != reference_hash or !std.mem.eql(u32, reference, actual)) return self.headlessSubsystemFailure("present-text-cache-pixels");
+        self.smoke_glyph_pixel_hash = reference_hash;
+
         const cell_w: i32 = @intCast(@min(@max(@as(u32, 1), font_info.max_advance), @as(u32, 40)));
         const cell_h: i32 = @intCast(@min(@max(@max(@as(u32, 1), font_info.height), font_info.line_height), @as(u32, 40)));
         const clips = [_]surface.Rect{
@@ -2993,6 +3061,17 @@ pub const App = struct {
                 }
             }
         }
+        const cache = paint.currentFontCacheStats();
+        if (cache.glyph_loads != 1 or cache.glyph_misses != 1 or cache.glyph_hits < 5 or cache.layout_hits < 5) {
+            return self.headlessSubsystemFailure("present-text-cache-accounting");
+        }
+        self.ctx.print("DESKTOP glyph-cache: hits=");
+        self.ctx.printU64(cache.glyph_hits);
+        self.ctx.print(" loads=");
+        self.ctx.printU64(cache.glyph_loads);
+        self.ctx.print(" pixel_hash=");
+        self.ctx.printU64(reference_hash);
+        self.ctx.println("");
         return true;
     }
 
@@ -3587,6 +3666,30 @@ pub const App = struct {
         const marker = "SUBSYSTEM runtime bootstrap FAILED: " ++ reason ++ "\r\n";
         _ = self.ctx.fileWrite(subsystem_host_test_marker_path, marker);
         return false;
+    }
+
+    fn writeHeadlessSubsystemMarker(self: *App) bool {
+        const cache = paint.currentFontCacheStats();
+        var storage: [4096]u8 = undefined;
+        const marker = std.fmt.bufPrint(
+            storage[0..],
+            "{s}DESKTOP render-cache selftest: OK glyph_hits={d} glyph_misses={d} glyph_loads={d} layout_hits={d} pixel_hash={d} terminal_incremental={d} terminal_full={d} terminal_parse={d}/{d} terminal_lines={d}/{d}\r\n",
+            .{
+                subsystem_host_test_marker,
+                cache.glyph_hits,
+                cache.glyph_misses,
+                cache.glyph_loads,
+                cache.layout_hits,
+                self.smoke_glyph_pixel_hash,
+                self.render_stats.console_incremental_refreshes,
+                self.render_stats.console_full_refreshes,
+                self.render_stats.console_parse_bytes,
+                self.render_stats.console_parse_skipped_bytes,
+                self.render_stats.console_changed_lines,
+                self.render_stats.console_skipped_lines,
+            },
+        ) catch return false;
+        return self.ctx.fileWrite(subsystem_host_test_marker_path, marker) == @as(i32, @intCast(marker.len));
     }
 
     fn headlessSubsystemLaunchFailure(self: *App, comptime reason: []const u8) ?HeadlessSubsystemLaunch {
@@ -6063,11 +6166,16 @@ pub const App = struct {
             self.windows[i].gui_revision = revision;
             var state: r4os.abi.ConsoleState = .{};
             if (self.ctx.consoleState(instance_id, &state) >= 0) self.syncConsoleScrollState(i, instance_id, state);
-            if (self.terminal_mode and i == 0) {
-                self.invalidateFull();
-            } else {
-                self.invalidateWindow(i);
-            }
+            const rect: surface.Rect = if (self.terminal_mode and i == 0)
+                .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h }
+            else
+                self.windows[i].clientSurface().rect;
+            const snapshot = &self.console_snapshots[i];
+            const previous_valid = snapshot.valid and snapshot.instance_id == instance_id;
+            const previous_state = snapshot.state;
+            const previous_offset = snapshot.effective_offset;
+            const stats = self.refreshConsoleSnapshot(i, rect);
+            self.invalidateTerminalRefresh(i, rect, previous_valid, previous_state, previous_offset, stats);
             changed = true;
         }
         return changed;
@@ -6994,21 +7102,73 @@ pub const App = struct {
                 self.render_stats.console_snapshot_hits +%= 1;
                 continue;
             }
-            const stats = draw.refreshTerminalSnapshot(
-                self.ctx,
-                snapshot,
-                win.instance_id,
-                win.gui_revision,
-                rect,
-                self.config.terminal_font_size,
-                self.config.terminal_codepage,
-                scroll_offset,
-            );
-            self.render_stats.console_snapshot_refreshes +%= 1;
-            self.render_stats.console_state_reads +%= stats.state_reads;
-            self.render_stats.console_output_bytes +%= stats.output_bytes;
-            self.render_stats.console_parse_bytes +%= stats.parsed_bytes;
-            self.render_stats.console_visible_lines +%= stats.visible_lines;
+            _ = self.refreshConsoleSnapshot(index, rect);
+        }
+    }
+
+    fn refreshConsoleSnapshot(self: *App, index: usize, rect: surface.Rect) draw.TerminalRefreshStats {
+        if (index >= self.windows.len or index >= self.console_snapshots.len) return .{};
+        const win = &self.windows[index];
+        const stats = draw.refreshTerminalSnapshot(
+            self.ctx,
+            &self.console_snapshots[index],
+            win.instance_id,
+            win.gui_revision,
+            rect,
+            self.config.terminal_font_size,
+            self.config.terminal_codepage,
+            self.console_scrolls[index].offset,
+        );
+        self.render_stats.console_snapshot_refreshes +%= 1;
+        self.render_stats.console_state_reads +%= stats.state_reads;
+        self.render_stats.console_output_bytes +%= stats.output_bytes;
+        self.render_stats.console_parse_bytes +%= stats.parsed_bytes;
+        self.render_stats.console_parse_skipped_bytes +%= stats.parse_skipped_bytes;
+        self.render_stats.console_visible_lines +%= stats.visible_lines;
+        self.render_stats.console_changed_lines +%= stats.changed_lines;
+        self.render_stats.console_skipped_lines +%= stats.skipped_lines;
+        if (stats.incremental) self.render_stats.console_incremental_refreshes +%= 1;
+        if (stats.full_rebuild) self.render_stats.console_full_refreshes +%= 1;
+        return stats;
+    }
+
+    fn invalidateTerminalRefresh(
+        self: *App,
+        index: usize,
+        rect: surface.Rect,
+        previous_valid: bool,
+        previous_state: r4os.abi.ConsoleState,
+        previous_offset: u32,
+        stats: draw.TerminalRefreshStats,
+    ) void {
+        if (stats.full_rebuild) {
+            self.invalidateConsoleClient(index);
+            return;
+        }
+
+        var row: usize = 0;
+        while (row < stats.changed_rows.len * 64) : (row += 1) {
+            if (!stats.rowChanged(row)) continue;
+            const line_rect = draw.terminalRowRect(rect, self.config.terminal_font_size, row);
+            if (!line_rect.isEmpty()) self.damage.invalidate(line_rect);
+        }
+
+        if (previous_valid and previous_offset == 0 and previous_state.cursor_visible != 0) {
+            const old_cursor = draw.terminalCursorRect(rect, previous_state, self.config.terminal_font_size);
+            if (!old_cursor.isEmpty()) self.damage.invalidate(old_cursor);
+        }
+        const snapshot = &self.console_snapshots[index];
+        if (snapshot.valid and snapshot.effective_offset == 0 and snapshot.state.cursor_visible != 0) {
+            const new_cursor = draw.terminalCursorRect(rect, snapshot.state, self.config.terminal_font_size);
+            if (!new_cursor.isEmpty()) self.damage.invalidate(new_cursor);
+        }
+    }
+
+    fn invalidateConsoleClient(self: *App, index: usize) void {
+        if (self.terminal_mode and index == 0) {
+            self.invalidateFull();
+        } else {
+            self.invalidateWindowClient(index);
         }
     }
 
@@ -8203,6 +8363,18 @@ fn absI32(value: i32) i32 {
 
 fn rectArea(rect: surface.Rect) u32 {
     return @intCast(@max(0, rect.w) * @max(0, rect.h));
+}
+
+fn pixelHash(pixels: []const u32) u64 {
+    var hash: u64 = 0xcbf29ce484222325;
+    for (pixels) |pixel| {
+        inline for (0..4) |byte_index| {
+            const shift: u5 = @intCast(byte_index * 8);
+            hash ^= @as(u8, @truncate(pixel >> shift));
+            hash *%= 0x100000001b3;
+        }
+    }
+    return hash;
 }
 
 fn rectEqual(a: surface.Rect, b: surface.Rect) bool {
