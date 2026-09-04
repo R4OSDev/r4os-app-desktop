@@ -256,6 +256,10 @@ pub const Context = struct {
         return self.draw.supportsGuiFrameStreamingContract();
     }
 
+    pub fn supportsGuiSharedRasterContract(self: *const Context) bool {
+        return self.draw.supportsGuiSharedRasterContract();
+    }
+
     pub fn guiFrameInfo(self: *const Context, handle: ?*const r4os.abi.ProgramProcessHandle, out: *r4os.abi.GuiFrameInfo) i32 {
         return self.draw.guiFrameInfo(handle, out);
     }
@@ -298,6 +302,21 @@ pub const Context = struct {
         out: *r4os.abi.GuiFrameStreamInfo,
     ) i32 {
         return self.draw.guiFrameStreamInfo(handle, out);
+    }
+
+    pub fn guiSharedRasterAcquire(
+        self: *const Context,
+        frame_owner: *const r4os.abi.ProgramProcessHandle,
+        frame_generation: u64,
+        raster_handle: *const r4os.abi.GuiSharedRasterHandle,
+        raster_generation: u64,
+        out_map: *r4os.abi.GuiSharedRasterMap,
+    ) i32 {
+        return self.draw.guiSharedRasterAcquire(frame_owner, frame_generation, raster_handle, raster_generation, out_map);
+    }
+
+    pub fn guiSharedRasterRelease(self: *const Context, lease: *const r4os.abi.GuiSharedRasterLease) i32 {
+        return self.draw.guiSharedRasterRelease(lease);
     }
 
     pub fn guiTitle(self: *const Context, instance_id: u32, out: []u8) i32 {

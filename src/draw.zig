@@ -11,6 +11,7 @@ const icon_source = @import("icon_source.zig");
 const message_box = @import("message_box.zig");
 const model = @import("model.zig");
 const quick_launch = @import("quick_launch.zig");
+const scene_buffer = @import("scene_buffer.zig");
 const theme = @import("theme.zig");
 const start_menu = @import("start_menu.zig");
 const surface = @import("surface.zig");
@@ -1847,6 +1848,7 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
             r4os.abi.gui_frame_command_kind_raster => hostedFrameRaster(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_indexed8 => hostedFrameIndexed8(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_xrgb32_nearest => hostedFrameXrgb32Nearest(ctx, bounds, command, frame.resources),
+            r4os.abi.gui_frame_command_kind_shared_raster => hostedFrameSharedRaster(ctx, bounds, command, frame),
             r4os.abi.gui_frame_command_kind_alpha8 => hostedFrameAlpha8(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_argb32 => hostedFrameArgb32(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_path_fill,
@@ -1865,6 +1867,7 @@ fn frameCommandHasBoundedOutput(kind: u32) bool {
         r4os.abi.gui_frame_command_kind_raster,
         r4os.abi.gui_frame_command_kind_indexed8,
         r4os.abi.gui_frame_command_kind_xrgb32_nearest,
+        r4os.abi.gui_frame_command_kind_shared_raster,
         r4os.abi.gui_frame_command_kind_alpha8,
         r4os.abi.gui_frame_command_kind_argb32,
         r4os.abi.gui_frame_command_kind_path_fill,
@@ -2056,6 +2059,135 @@ fn hostedFrameXrgb32Nearest(ctx: *const desk_api.Context, bounds: surface.Rect, 
         .guest_h = header.guest_h,
         .viewport = .{ .x = viewport_x, .y = viewport_y, .w = @intCast(header.viewport_w), .h = @intCast(header.viewport_h) },
     });
+}
+
+fn hostedFrameSharedRaster(
+    ctx: *const desk_api.Context,
+    bounds: surface.Rect,
+    command: r4os.abi.GuiFrameCommand,
+    frame: gui_frame_snapshot.View,
+) void {
+    if (!validFrameRasterGeometry(command) or command.fg != 0 or command.bg != 0 or command.font_id != 0 or
+        command.text_w != 0 or command.text_h != 0 or command.baseline != 0 or command.line_height != 0 or
+        command.parameter0 != 0 or command.parameter1 != 0) return;
+    const resource_bytes = frameResource(frame.resources, command) orelse return;
+    if (resource_bytes.len != @sizeOf(r4os.abi.GuiSharedRasterResource)) return;
+    var descriptor: r4os.abi.GuiSharedRasterResource = .{};
+    @memcpy(std.mem.asBytes(&descriptor), resource_bytes);
+    if (descriptor.version != r4os.abi.gui_shared_raster_resource_version or
+        descriptor.size != r4os.abi.gui_shared_raster_resource_size or descriptor.handle.id == 0 or
+        descriptor.handle.generation == 0 or descriptor.raster_generation == 0 or descriptor.flags != 0 or
+        descriptor.source_w == 0 or descriptor.source_h == 0 or descriptor.guest_w == 0 or descriptor.guest_h == 0 or
+        descriptor.viewport_w == 0 or descriptor.viewport_h == 0 or
+        @as(u64, descriptor.source_x) + descriptor.source_w > descriptor.guest_w or
+        @as(u64, descriptor.source_y) + descriptor.source_h > descriptor.guest_h)
+    {
+        return;
+    }
+    if (descriptor.format != r4os.abi.gui_shared_raster_format_alpha8 and command.rgb != 0) return;
+    const map = sharedRasterMap(frame.shared_rasters, descriptor) orelse return;
+    const scene = ctx.scene orelse return;
+    replaySharedRaster(scene, bounds, command, descriptor, map);
+}
+
+fn replaySharedRaster(
+    scene: *scene_buffer.SceneBuffer,
+    bounds: surface.Rect,
+    command: r4os.abi.GuiFrameCommand,
+    descriptor: r4os.abi.GuiSharedRasterResource,
+    map: r4os.abi.GuiSharedRasterMap,
+) void {
+    const byte_length = std.math.cast(usize, map.byte_length) orelse return;
+    const memory_pointer: [*]const u8 = @ptrFromInt(map.data_address);
+    const memory = memory_pointer[0..byte_length];
+    const screen_x = std.math.add(i32, bounds.x, command.x) catch return;
+    const screen_y = std.math.add(i32, bounds.y, command.y) catch return;
+    const item = surface.Rect{ .x = screen_x, .y = screen_y, .w = @intCast(command.w), .h = @intCast(command.h) };
+    const clipped_item = rectIntersection(item, bounds) orelse return;
+    const viewport_x = std.math.add(i32, bounds.x, descriptor.viewport_x) catch return;
+    const viewport_y = std.math.add(i32, bounds.y, descriptor.viewport_y) catch return;
+
+    switch (descriptor.format) {
+        r4os.abi.gui_shared_raster_format_xrgb32 => {
+            if (map.format != descriptor.format or map.data_offset != 0 or map.stride_bytes % @sizeOf(u32) != 0) return;
+            const pixels = std.mem.bytesAsSlice(u32, memory);
+            _ = scene.blitXrgb32Nearest(clipped_item, .{
+                .pixels = pixels,
+                .source_x = descriptor.source_x,
+                .source_y = descriptor.source_y,
+                .source_w = descriptor.source_w,
+                .source_h = descriptor.source_h,
+                .source_stride = map.stride_bytes / @sizeOf(u32),
+                .guest_w = descriptor.guest_w,
+                .guest_h = descriptor.guest_h,
+                .viewport = .{ .x = viewport_x, .y = viewport_y, .w = @intCast(descriptor.viewport_w), .h = @intCast(descriptor.viewport_h) },
+            });
+        },
+        r4os.abi.gui_shared_raster_format_indexed8 => {
+            if (map.format != descriptor.format or map.data_offset != r4os.abi.gui_indexed8_pixels_offset or
+                map.data_offset > memory.len) return;
+            const palette = std.mem.bytesAsSlice(u32, memory[0..r4os.abi.gui_indexed8_pixels_offset]);
+            const indices = memory[@intCast(map.data_offset)..];
+            _ = scene.blitIndexed8Nearest(clipped_item, .{
+                .indices = indices,
+                .palette = palette,
+                .source_x = descriptor.source_x,
+                .source_y = descriptor.source_y,
+                .source_w = descriptor.source_w,
+                .source_h = descriptor.source_h,
+                .source_stride = map.stride_bytes,
+                .guest_w = descriptor.guest_w,
+                .guest_h = descriptor.guest_h,
+                .viewport = .{ .x = viewport_x, .y = viewport_y, .w = @intCast(descriptor.viewport_w), .h = @intCast(descriptor.viewport_h) },
+            });
+        },
+        r4os.abi.gui_shared_raster_format_alpha8 => {
+            if (map.format != descriptor.format or map.data_offset != 0 or
+                descriptor.viewport_w != descriptor.guest_w or descriptor.viewport_h != descriptor.guest_h or
+                command.w != descriptor.source_w or command.h != descriptor.source_h) return;
+            var row: u32 = 0;
+            while (row < descriptor.source_h) : (row += 1) {
+                const offset = (@as(usize, descriptor.source_y + row) * map.stride_bytes) + descriptor.source_x;
+                const end = std.math.add(usize, offset, descriptor.source_w) catch return;
+                if (end > memory.len) return;
+                const row_y = std.math.add(i32, screen_y, @as(i32, @intCast(row))) catch return;
+                blendSharedAlpha8Row(scene, bounds, screen_x, row_y, command.rgb, memory[offset..end]);
+            }
+        },
+        else => {},
+    }
+}
+
+fn blendSharedAlpha8Row(
+    scene: *scene_buffer.SceneBuffer,
+    bounds: surface.Rect,
+    destination_x: i32,
+    destination_y: i32,
+    rgb: u32,
+    alpha: []const u8,
+) void {
+    if (alpha.len == 0 or destination_y < bounds.y or destination_y >= bounds.bottom()) return;
+    const source_right = @as(i64, destination_x) + @as(i64, @intCast(alpha.len));
+    const left = @max(@as(i64, bounds.x), @as(i64, destination_x));
+    const right = @min(@as(i64, bounds.right()), source_right);
+    if (right <= left) return;
+    const source_x: usize = @intCast(left - @as(i64, destination_x));
+    const width: usize = @intCast(right - left);
+    _ = scene.blendAlpha8(@intCast(left), destination_y, @intCast(width), 1, @intCast(width), rgb, alpha[source_x .. source_x + width]);
+}
+
+fn sharedRasterMap(
+    maps: []const r4os.abi.GuiSharedRasterMap,
+    descriptor: r4os.abi.GuiSharedRasterResource,
+) ?r4os.abi.GuiSharedRasterMap {
+    for (maps) |map| {
+        if (map.lease.handle.id == descriptor.handle.id and map.lease.handle.generation == descriptor.handle.generation and
+            map.lease.raster_generation == descriptor.raster_generation)
+        {
+            return map;
+        }
+    }
+    return null;
 }
 
 fn readXrgb32(source: []const u8, offset: usize) ?u32 {
@@ -2838,6 +2970,79 @@ test "frame raster commands retain per-command geometry limits" {
     try std.testing.expect(!validFrameAlpha8Geometry(.{ .w = r4os.abi.gui_alpha8_max_width + 1, .h = 1 }));
     try std.testing.expect(validFrameArgb32Geometry(.{ .w = r4os.abi.gui_argb32_max_width, .h = 1 }));
     try std.testing.expect(!validFrameArgb32Geometry(.{ .w = r4os.abi.gui_argb32_max_width + 1, .h = 1 }));
+}
+
+test "shared raster replay preserves XRGB32 Indexed8 and Alpha8 pixels" {
+    var scene_pixels: [16]u32 = .{0} ** 16;
+    var scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(scene.attach(std.mem.sliceAsBytes(scene_pixels[0..]), 4, 4));
+    const bounds = surface.Rect{ .x = 0, .y = 0, .w = 4, .h = 4 };
+    const handle = r4os.abi.GuiSharedRasterHandle{ .id = 1, .generation = 2 };
+    const command = r4os.abi.GuiFrameCommand{ .kind = r4os.abi.gui_frame_command_kind_shared_raster, .w = 4, .h = 4 };
+    var descriptor = r4os.abi.GuiSharedRasterResource{
+        .handle = handle,
+        .raster_generation = 3,
+        .format = r4os.abi.gui_shared_raster_format_xrgb32,
+        .source_w = 2,
+        .source_h = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport_w = 4,
+        .viewport_h = 4,
+    };
+    var xrgb = [_]u32{ 0xAA112233, 0xBB445566, 0xCC778899, 0xDDAABBCC };
+    var map = r4os.abi.GuiSharedRasterMap{
+        .lease = .{ .handle = handle, .raster_generation = 3, .lease_token = 4 },
+        .data_address = @intFromPtr(&xrgb),
+        .byte_length = @sizeOf(@TypeOf(xrgb)),
+        .format = r4os.abi.gui_shared_raster_format_xrgb32,
+        .width = 2,
+        .height = 2,
+        .stride_bytes = 2 * @sizeOf(u32),
+    };
+    replaySharedRaster(&scene, bounds, command, descriptor, map);
+    try std.testing.expectEqual(@as(u32, 0x112233), scene_pixels[0] & 0x00FF_FFFF);
+    try std.testing.expectEqual(@as(u32, 0x445566), scene_pixels[3] & 0x00FF_FFFF);
+    try std.testing.expectEqual(@as(u32, 0x778899), scene_pixels[12] & 0x00FF_FFFF);
+    try std.testing.expectEqual(@as(u32, 0xAABBCC), scene_pixels[15] & 0x00FF_FFFF);
+
+    var indexed_memory: [r4os.abi.gui_indexed8_pixels_offset + 4]u8 align(@alignOf(u32)) = .{0} ** (r4os.abi.gui_indexed8_pixels_offset + 4);
+    const indexed_palette = std.mem.bytesAsSlice(u32, indexed_memory[0..r4os.abi.gui_indexed8_pixels_offset]);
+    indexed_palette[1] = 0x00102030;
+    indexed_palette[2] = 0x00405060;
+    @memcpy(indexed_memory[r4os.abi.gui_indexed8_pixels_offset..], &[_]u8{ 1, 2, 2, 1 });
+    @memset(scene_pixels[0..], 0);
+    descriptor.format = r4os.abi.gui_shared_raster_format_indexed8;
+    map.data_address = @intFromPtr(&indexed_memory);
+    map.byte_length = indexed_memory.len;
+    map.format = descriptor.format;
+    map.stride_bytes = 2;
+    map.data_offset = r4os.abi.gui_indexed8_pixels_offset;
+    replaySharedRaster(&scene, bounds, command, descriptor, map);
+    try std.testing.expectEqual(@as(u32, 0x102030), scene_pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x405060), scene_pixels[3]);
+    try std.testing.expectEqual(@as(u32, 0x405060), scene_pixels[12]);
+    try std.testing.expectEqual(@as(u32, 0x102030), scene_pixels[15]);
+
+    var alpha = [_]u8{ 0, 128, 255, 64 };
+    @memset(scene_pixels[0..], 0);
+    var alpha_command = command;
+    alpha_command.w = 2;
+    alpha_command.h = 2;
+    alpha_command.rgb = 0xFFFFFF;
+    descriptor.format = r4os.abi.gui_shared_raster_format_alpha8;
+    descriptor.viewport_w = 2;
+    descriptor.viewport_h = 2;
+    map.data_address = @intFromPtr(&alpha);
+    map.byte_length = alpha.len;
+    map.format = descriptor.format;
+    map.stride_bytes = 2;
+    map.data_offset = 0;
+    replaySharedRaster(&scene, bounds, alpha_command, descriptor, map);
+    try std.testing.expectEqual(@as(u32, 0), scene_pixels[0]);
+    try std.testing.expectEqual(@as(u32, 0x808080), scene_pixels[1]);
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), scene_pixels[4]);
+    try std.testing.expectEqual(@as(u32, 0x404040), scene_pixels[5]);
 }
 
 test "terminal snapshot compacts only visible parsed lines" {

@@ -18,6 +18,7 @@ pub const View = struct {
     info: r4os.abi.GuiFrameInfo = .{},
     commands: []const r4os.abi.GuiFrameCommand = &.{},
     resources: []const u8 = &.{},
+    shared_rasters: []const r4os.abi.GuiSharedRasterMap = &.{},
     damage_regions: []const r4os.abi.DisplayDamageRect = &.{},
 };
 
@@ -27,6 +28,9 @@ const Buffer = struct {
     resource_memory: ?[]align(resource_alignment) u8 = null,
     command_len: usize = 0,
     resource_len: usize = 0,
+    shared_rasters: [r4os.abi.gui_shared_raster_max_frame_resources]r4os.abi.GuiSharedRasterMap =
+        .{r4os.abi.GuiSharedRasterMap{}} ** r4os.abi.gui_shared_raster_max_frame_resources,
+    shared_raster_count: usize = 0,
     damage_regions: [r4os.abi.gui_frame_max_damage_regions]r4os.abi.DisplayDamageRect = .{r4os.abi.DisplayDamageRect{}} ** r4os.abi.gui_frame_max_damage_regions,
     damage_count: usize = 0,
     full_damage: bool = true,
@@ -87,6 +91,7 @@ const Buffer = struct {
     }
 
     fn deinit(self: *Buffer, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.shared_raster_count == 0);
         if (self.command_memory) |memory| allocator.free(memory);
         if (self.resource_memory) |memory| allocator.free(memory);
         self.* = .{};
@@ -123,6 +128,11 @@ pub const Cache = struct {
         self.* = .{};
     }
 
+    pub fn releaseSharedRasters(self: *Cache, reader: anytype) void {
+        releaseBufferSharedRasters(&self.active, reader);
+        releaseBufferSharedRasters(&self.staging, reader);
+    }
+
     pub fn markPending(self: *Cache) void {
         self.pending = true;
     }
@@ -136,6 +146,7 @@ pub const Cache = struct {
             .info = self.active.info,
             .commands = self.active.constCommands(),
             .resources = self.active.constResources(),
+            .shared_rasters = self.active.shared_rasters[0..self.active.shared_raster_count],
             .damage_regions = self.active.damage_regions[0..self.active.damage_count],
         };
     }
@@ -224,11 +235,16 @@ pub const Cache = struct {
             return .retry;
         }
 
+        if (!acquireBufferSharedRasters(&self.staging, reader, self.owner, read_info.committed_generation)) {
+            self.pending = true;
+            return .retry;
+        }
         self.staging.info = read_info;
         self.staging.full_damage = true;
         self.staging.damage_count = 0;
         self.staging.valid = true;
         std.mem.swap(Buffer, &self.active, &self.staging);
+        releaseBufferSharedRasters(&self.staging, reader);
         self.staging.valid = false;
         self.staging.command_len = 0;
         self.staging.resource_len = 0;
@@ -276,6 +292,10 @@ pub const Cache = struct {
             return .retry;
         }
 
+        if (!acquireBufferSharedRasters(&self.staging, reader, self.owner, read_info.generation)) {
+            self.pending = true;
+            return .retry;
+        }
         self.staging.info = info;
         self.staging.full_damage = !self.active.valid;
         self.staging.damage_count = if (self.active.valid) read_info.damage_count else 0;
@@ -284,6 +304,7 @@ pub const Cache = struct {
         }
         self.staging.valid = true;
         std.mem.swap(Buffer, &self.active, &self.staging);
+        releaseBufferSharedRasters(&self.staging, reader);
         self.staging.valid = false;
         self.staging.command_len = 0;
         self.staging.resource_len = 0;
@@ -341,6 +362,11 @@ pub const Cache = struct {
             return .retry;
         }
 
+        if (commandsContainSharedRaster(command_memory[command_base..total_command_count])) {
+            self.pending = true;
+            return .retry;
+        }
+
         for (command_memory[command_base..total_command_count]) |*command| {
             if (command.resource_bytes == 0) continue;
             command.resource_offset = std.math.add(u64, command.resource_offset, resource_base) catch {
@@ -373,6 +399,125 @@ pub const Cache = struct {
         if (command_oversized or resource_oversized) self.staging.deinit(allocator);
     }
 };
+
+fn sameSharedRasterHandle(a: r4os.abi.GuiSharedRasterHandle, b: r4os.abi.GuiSharedRasterHandle) bool {
+    return a.id == b.id and a.generation == b.generation;
+}
+
+fn releaseBufferSharedRasters(buffer: *Buffer, reader: anytype) void {
+    for (buffer.shared_rasters[0..buffer.shared_raster_count]) |*map| _ = reader.guiSharedRasterRelease(&map.lease);
+    buffer.shared_raster_count = 0;
+}
+
+fn frameCommandResource(buffer: *const Buffer, command: r4os.abi.GuiFrameCommand) ?[]const u8 {
+    const offset = std.math.cast(usize, command.resource_offset) orelse return null;
+    const length = std.math.cast(usize, command.resource_bytes) orelse return null;
+    const end = std.math.add(usize, offset, length) catch return null;
+    const resources = buffer.constResources();
+    if (end > resources.len) return null;
+    return resources[offset..end];
+}
+
+fn sharedRasterDescriptor(buffer: *const Buffer, command: r4os.abi.GuiFrameCommand) ?r4os.abi.GuiSharedRasterResource {
+    if (command.kind != r4os.abi.gui_frame_command_kind_shared_raster or
+        command.resource_bytes != r4os.abi.gui_shared_raster_resource_size)
+    {
+        return null;
+    }
+    const bytes = frameCommandResource(buffer, command) orelse return null;
+    if (bytes.len != @sizeOf(r4os.abi.GuiSharedRasterResource)) return null;
+    var descriptor: r4os.abi.GuiSharedRasterResource = .{};
+    @memcpy(std.mem.asBytes(&descriptor), bytes);
+    if (descriptor.version != r4os.abi.gui_shared_raster_resource_version or
+        descriptor.size != r4os.abi.gui_shared_raster_resource_size or descriptor.handle.id == 0 or
+        descriptor.handle.generation == 0 or descriptor.raster_generation == 0 or descriptor.flags != 0)
+    {
+        return null;
+    }
+    return descriptor;
+}
+
+fn validSharedRasterMap(
+    map: r4os.abi.GuiSharedRasterMap,
+    owner: r4os.abi.ProgramProcessHandle,
+    frame_generation: u64,
+    descriptor: r4os.abi.GuiSharedRasterResource,
+) bool {
+    if (map.version < r4os.abi.gui_shared_raster_map_version or map.size < r4os.abi.gui_shared_raster_map_size or
+        !sameHandle(map.frame_owner, owner) or map.frame_generation != frame_generation or map.flags != 0 or
+        !sameSharedRasterHandle(map.lease.handle, descriptor.handle) or
+        map.lease.raster_generation != descriptor.raster_generation or map.lease.lease_token == 0 or
+        map.lease.reserved0 != 0 or map.data_address == 0 or map.byte_length == 0 or
+        map.byte_length > r4os.abi.gui_shared_raster_max_bytes or map.format != descriptor.format or
+        map.width != descriptor.guest_w or map.height != descriptor.guest_h or map.width == 0 or map.height == 0)
+    {
+        return false;
+    }
+    const minimum_stride: u64 = switch (map.format) {
+        r4os.abi.gui_shared_raster_format_xrgb32 => blk: {
+            if (map.data_offset != 0 or map.stride_bytes % @sizeOf(u32) != 0) return false;
+            break :blk std.math.mul(u64, map.width, @sizeOf(u32)) catch return false;
+        },
+        r4os.abi.gui_shared_raster_format_indexed8 => blk: {
+            if (map.data_offset != r4os.abi.gui_indexed8_pixels_offset) return false;
+            break :blk map.width;
+        },
+        r4os.abi.gui_shared_raster_format_alpha8 => blk: {
+            if (map.data_offset != 0) return false;
+            break :blk map.width;
+        },
+        else => return false,
+    };
+    if (map.stride_bytes < minimum_stride) return false;
+    const rows = std.math.mul(u64, map.stride_bytes, map.height) catch return false;
+    const required = std.math.add(u64, map.data_offset, rows) catch return false;
+    return required == map.byte_length;
+}
+
+fn acquireBufferSharedRasters(
+    buffer: *Buffer,
+    reader: anytype,
+    owner: r4os.abi.ProgramProcessHandle,
+    frame_generation: u64,
+) bool {
+    if (buffer.shared_raster_count != 0) releaseBufferSharedRasters(buffer, reader);
+    for (buffer.constCommands()) |command| {
+        if (command.kind != r4os.abi.gui_frame_command_kind_shared_raster) continue;
+        const descriptor = sharedRasterDescriptor(buffer, command) orelse {
+            releaseBufferSharedRasters(buffer, reader);
+            return false;
+        };
+        var duplicate = false;
+        for (buffer.shared_rasters[0..buffer.shared_raster_count]) |map| {
+            if (sameSharedRasterHandle(map.lease.handle, descriptor.handle) and
+                map.lease.raster_generation == descriptor.raster_generation)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (buffer.shared_raster_count >= buffer.shared_rasters.len) {
+            releaseBufferSharedRasters(buffer, reader);
+            return false;
+        }
+        var map: r4os.abi.GuiSharedRasterMap = .{};
+        const result = reader.guiSharedRasterAcquire(&owner, frame_generation, &descriptor.handle, descriptor.raster_generation, &map);
+        if (result != r4os.abi.gui_frame_result_ok or !validSharedRasterMap(map, owner, frame_generation, descriptor)) {
+            if (result == r4os.abi.gui_frame_result_ok) _ = reader.guiSharedRasterRelease(&map.lease);
+            releaseBufferSharedRasters(buffer, reader);
+            return false;
+        }
+        buffer.shared_rasters[buffer.shared_raster_count] = map;
+        buffer.shared_raster_count += 1;
+    }
+    return true;
+}
+
+fn commandsContainSharedRaster(commands: []const r4os.abi.GuiFrameCommand) bool {
+    for (commands) |command| if (command.kind == r4os.abi.gui_frame_command_kind_shared_raster) return true;
+    return false;
+}
 
 fn validHandle(handle: r4os.abi.ProgramProcessHandle) bool {
     return handle.instance_id != 0 and handle.reserved == 0 and handle.generation != 0;
@@ -413,6 +558,10 @@ const FakeReader = struct {
     generation_commands: []const r4os.abi.GuiFrameCommand = &.{},
     generation_resources: []const u8 = &.{},
     generation_regions: []const r4os.abi.DisplayDamageRect = &.{},
+    shared_map: r4os.abi.GuiSharedRasterMap = .{},
+    shared_acquire_result: i32 = r4os.abi.gui_frame_result_ok,
+    shared_acquires: u32 = 0,
+    shared_releases: u32 = 0,
 
     fn guiFrameInfo(self: *FakeReader, handle: *const r4os.abi.ProgramProcessHandle, out: *r4os.abi.GuiFrameInfo) i32 {
         if (!sameHandle(handle.*, self.info.owner)) return r4os.abi.gui_frame_error_invalid;
@@ -464,6 +613,32 @@ const FakeReader = struct {
         @memcpy(resources[0..self.generation_resources.len], self.generation_resources);
         @memcpy(regions[0..self.generation_regions.len], self.generation_regions);
         out.* = self.generation_info;
+        return r4os.abi.gui_frame_result_ok;
+    }
+
+    fn guiSharedRasterAcquire(
+        self: *FakeReader,
+        owner: *const r4os.abi.ProgramProcessHandle,
+        frame_generation: u64,
+        handle: *const r4os.abi.GuiSharedRasterHandle,
+        raster_generation: u64,
+        out: *r4os.abi.GuiSharedRasterMap,
+    ) i32 {
+        if (self.shared_acquire_result != r4os.abi.gui_frame_result_ok) return self.shared_acquire_result;
+        if (!sameHandle(owner.*, self.shared_map.frame_owner) or frame_generation != self.shared_map.frame_generation or
+            !sameSharedRasterHandle(handle.*, self.shared_map.lease.handle) or raster_generation != self.shared_map.lease.raster_generation)
+        {
+            return r4os.abi.gui_frame_error_stale;
+        }
+        self.shared_acquires += 1;
+        out.* = self.shared_map;
+        out.lease.lease_token +%= self.shared_acquires - 1;
+        return r4os.abi.gui_frame_result_ok;
+    }
+
+    fn guiSharedRasterRelease(self: *FakeReader, lease: *const r4os.abi.GuiSharedRasterLease) i32 {
+        if (lease.lease_token == 0) return r4os.abi.gui_frame_error_invalid;
+        self.shared_releases += 1;
         return r4os.abi.gui_frame_result_ok;
     }
 };
@@ -559,6 +734,75 @@ test "snapshot publishes one combined generation from buffered Canvas chunks" {
     try std.testing.expectEqual(RefreshResult.retry, cache.refresh(allocator, &reader));
     try std.testing.expectEqual(@as(u64, 9), cache.view().info.committed_generation);
     try std.testing.expectEqualSlices(u8, resources[0..], cache.view().resources);
+}
+
+test "snapshot acquires one shared lease per generation and retains the old frame on backpressure" {
+    const allocator = std.testing.allocator;
+    const owner = r4os.abi.ProgramProcessHandle{ .instance_id = 27, .generation = 31 };
+    const handle = r4os.abi.GuiSharedRasterHandle{ .id = 3, .generation = 5 };
+    var pixels = [_]u32{ 0xAA112233, 0xBB445566, 0xCC778899, 0xDDAABBCC };
+    var descriptor = r4os.abi.GuiSharedRasterResource{
+        .handle = handle,
+        .raster_generation = 41,
+        .format = r4os.abi.gui_shared_raster_format_xrgb32,
+        .source_w = 2,
+        .source_h = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport_w = 2,
+        .viewport_h = 2,
+    };
+    var resources: [2 * @sizeOf(r4os.abi.GuiSharedRasterResource)]u8 = undefined;
+    @memcpy(resources[0..@sizeOf(r4os.abi.GuiSharedRasterResource)], std.mem.asBytes(&descriptor));
+    @memcpy(resources[@sizeOf(r4os.abi.GuiSharedRasterResource)..], std.mem.asBytes(&descriptor));
+    const commands = [_]r4os.abi.GuiFrameCommand{
+        .{ .kind = r4os.abi.gui_frame_command_kind_shared_raster, .w = 1, .h = 2, .resource_bytes = @sizeOf(r4os.abi.GuiSharedRasterResource) },
+        .{ .kind = r4os.abi.gui_frame_command_kind_shared_raster, .x = 1, .w = 1, .h = 2, .resource_offset = @sizeOf(r4os.abi.GuiSharedRasterResource), .resource_bytes = @sizeOf(r4os.abi.GuiSharedRasterResource) },
+    };
+    var reader = FakeReader{
+        .info = fakeInfo(owner, 71, commands.len, resources.len),
+        .commands = commands[0..],
+        .resources = resources[0..],
+        .shared_map = .{
+            .frame_owner = owner,
+            .frame_generation = 71,
+            .lease = .{ .handle = handle, .raster_generation = descriptor.raster_generation, .lease_token = 91 },
+            .data_address = @intFromPtr(&pixels),
+            .byte_length = @sizeOf(@TypeOf(pixels)),
+            .format = r4os.abi.gui_shared_raster_format_xrgb32,
+            .width = 2,
+            .height = 2,
+            .stride_bytes = 2 * @sizeOf(u32),
+        },
+    };
+    var cache = Cache{};
+    defer cache.deinit(allocator);
+    defer cache.releaseSharedRasters(&reader);
+    cache.bind(allocator, owner);
+
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+    try std.testing.expectEqual(@as(usize, 1), cache.view().shared_rasters.len);
+    try std.testing.expectEqual(@as(u32, 1), reader.shared_acquires);
+    try std.testing.expectEqual(@as(u32, 0), reader.shared_releases);
+
+    descriptor.raster_generation = 42;
+    @memcpy(resources[0..@sizeOf(r4os.abi.GuiSharedRasterResource)], std.mem.asBytes(&descriptor));
+    @memcpy(resources[@sizeOf(r4os.abi.GuiSharedRasterResource)..], std.mem.asBytes(&descriptor));
+    reader.info = fakeInfo(owner, 72, commands.len, resources.len);
+    reader.shared_map.frame_generation = 72;
+    reader.shared_map.lease.raster_generation = descriptor.raster_generation;
+    reader.shared_acquire_result = r4os.abi.gui_frame_error_state;
+    try std.testing.expectEqual(RefreshResult.retry, cache.refresh(allocator, &reader));
+    try std.testing.expectEqual(@as(u64, 71), cache.view().info.committed_generation);
+    try std.testing.expectEqual(@as(u32, 0), reader.shared_releases);
+
+    reader.shared_acquire_result = r4os.abi.gui_frame_result_ok;
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+    try std.testing.expectEqual(@as(u64, 72), cache.view().info.committed_generation);
+    try std.testing.expectEqual(@as(u32, 2), reader.shared_acquires);
+    try std.testing.expectEqual(@as(u32, 1), reader.shared_releases);
+    cache.releaseSharedRasters(&reader);
+    try std.testing.expectEqual(@as(u32, 2), reader.shared_releases);
 }
 
 test "snapshot cache accepts a committed empty frame and rejects handle reuse" {

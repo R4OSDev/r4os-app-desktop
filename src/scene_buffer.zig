@@ -123,7 +123,7 @@ pub const SceneBuffer = struct {
 
     pub const Indexed8Nearest = struct {
         indices: []const u8,
-        palette: []const u32,
+        palette: []align(1) const u32,
         source_x: u32,
         source_y: u32,
         source_w: u32,

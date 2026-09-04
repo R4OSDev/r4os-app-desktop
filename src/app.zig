@@ -5443,6 +5443,7 @@ pub const App = struct {
         self.dialog = .none;
         self.dialog_focus = .none;
         self.window_process_handles[window_index] = handle;
+        self.gui_frame_caches[window_index].releaseSharedRasters(self.ctx);
         self.gui_frame_caches[window_index].bind(self.ctx.allocator(), handle);
         self.windows[window_index].bindApp(instance_id, title);
         self.recordWindowLaunch(window_index, path);
@@ -6095,7 +6096,10 @@ pub const App = struct {
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle) or self.windows[index].instance_id != handle.instance_id) return false;
         const cache = &self.gui_frame_caches[index];
-        if (!sameProcessHandle(cache.owner, handle)) cache.bind(self.ctx.allocator(), handle);
+        if (!sameProcessHandle(cache.owner, handle)) {
+            cache.releaseSharedRasters(self.ctx);
+            cache.bind(self.ctx.allocator(), handle);
+        }
         if (!cache.pending) return false;
         return switch (cache.refresh(self.ctx.allocator(), self.ctx)) {
             .updated => blk: {
@@ -6339,6 +6343,7 @@ pub const App = struct {
     fn clearWindowInstanceBinding(self: *App, index: usize) void {
         self.mirrorWindowRemove(index);
         self.window_service_mirrored[index] = false;
+        self.gui_frame_caches[index].releaseSharedRasters(self.ctx);
         self.gui_frame_caches[index].deinit(self.ctx.allocator());
         self.window_process_handles[index] = .{};
         self.windows[index].unbindInstance();
