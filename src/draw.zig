@@ -1846,6 +1846,7 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
             },
             r4os.abi.gui_frame_command_kind_raster => hostedFrameRaster(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_indexed8 => hostedFrameIndexed8(ctx, bounds, command, frame.resources),
+            r4os.abi.gui_frame_command_kind_xrgb32_nearest => hostedFrameXrgb32Nearest(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_alpha8 => hostedFrameAlpha8(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_argb32 => hostedFrameArgb32(ctx, bounds, command, frame.resources),
             r4os.abi.gui_frame_command_kind_path_fill,
@@ -1863,6 +1864,7 @@ fn frameCommandHasBoundedOutput(kind: u32) bool {
         r4os.abi.gui_frame_command_kind_rect,
         r4os.abi.gui_frame_command_kind_raster,
         r4os.abi.gui_frame_command_kind_indexed8,
+        r4os.abi.gui_frame_command_kind_xrgb32_nearest,
         r4os.abi.gui_frame_command_kind_alpha8,
         r4os.abi.gui_frame_command_kind_argb32,
         r4os.abi.gui_frame_command_kind_path_fill,
@@ -2002,6 +2004,49 @@ fn hostedFrameIndexed8(ctx: *const desk_api.Context, bounds: surface.Rect, comma
     _ = scene.blitIndexed8Nearest(clipped_item, .{
         .indices = source[pixels_offset..],
         .palette = palette[0..],
+        .source_x = header.source_x,
+        .source_y = header.source_y,
+        .source_w = header.source_w,
+        .source_h = header.source_h,
+        .source_stride = header.pixel_stride,
+        .guest_w = header.guest_w,
+        .guest_h = header.guest_h,
+        .viewport = .{ .x = viewport_x, .y = viewport_y, .w = @intCast(header.viewport_w), .h = @intCast(header.viewport_h) },
+    });
+}
+
+fn hostedFrameXrgb32Nearest(ctx: *const desk_api.Context, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, resources: []const u8) void {
+    if (!validFrameIndexed8Geometry(command)) return;
+    const source = frameResource(resources, command) orelse return;
+    if (source.len < r4os.abi.gui_xrgb32_pixels_offset or source.len != command.resource_bytes) return;
+    var header: r4os.abi.GuiXrgb32Resource = .{};
+    @memcpy(std.mem.asBytes(&header), source[0..@sizeOf(r4os.abi.GuiXrgb32Resource)]);
+    if (header.version != r4os.abi.gui_xrgb32_resource_version or header.size != r4os.abi.gui_xrgb32_resource_size or
+        header.source_w == 0 or header.source_h == 0 or header.source_w > r4os.abi.gui_raster_max_width or header.source_h > r4os.abi.gui_raster_max_height or
+        header.guest_w == 0 or header.guest_h == 0 or header.viewport_w == 0 or header.viewport_h == 0 or
+        header.pixels_offset != r4os.abi.gui_xrgb32_pixels_offset or header.pixel_stride < header.source_w or
+        header.pixel_stride > r4os.abi.gui_raster_max_width or header.flags != 0 or header.reserved0 != 0)
+    {
+        return;
+    }
+    const preceding_rows = std.math.mul(u64, header.source_h - 1, header.pixel_stride) catch return;
+    const stored_pixels = std.math.add(u64, preceding_rows, header.source_w) catch return;
+    const pixel_bytes = std.math.mul(u64, stored_pixels, @sizeOf(u32)) catch return;
+    const required = std.math.add(u64, header.pixels_offset, pixel_bytes) catch return;
+    if (required != source.len or @as(u64, header.source_x) + header.source_w > header.guest_w or @as(u64, header.source_y) + header.source_h > header.guest_h) return;
+
+    const screen_x = std.math.add(i32, bounds.x, command.x) catch return;
+    const screen_y = std.math.add(i32, bounds.y, command.y) catch return;
+    const item = surface.Rect{ .x = screen_x, .y = screen_y, .w = @intCast(command.w), .h = @intCast(command.h) };
+    const clipped_item = rectIntersection(item, bounds) orelse return;
+    const viewport_x = std.math.add(i32, bounds.x, header.viewport_x) catch return;
+    const viewport_y = std.math.add(i32, bounds.y, header.viewport_y) catch return;
+    const pixel_offset: usize = @intCast(header.pixels_offset);
+    const pixel_data = source[pixel_offset..];
+    const pixels = std.mem.bytesAsSlice(u32, pixel_data);
+    const scene = ctx.scene orelse return;
+    _ = scene.blitXrgb32Nearest(clipped_item, .{
+        .pixels = pixels,
         .source_x = header.source_x,
         .source_y = header.source_y,
         .source_w = header.source_w,

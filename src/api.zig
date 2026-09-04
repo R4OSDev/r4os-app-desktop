@@ -252,6 +252,10 @@ pub const Context = struct {
         return self.draw.supportsGuiFrameContract();
     }
 
+    pub fn supportsGuiFrameStreamingContract(self: *const Context) bool {
+        return self.draw.supportsGuiFrameStreamingContract();
+    }
+
     pub fn guiFrameInfo(self: *const Context, handle: ?*const r4os.abi.ProgramProcessHandle, out: *r4os.abi.GuiFrameInfo) i32 {
         return self.draw.guiFrameInfo(handle, out);
     }
@@ -286,6 +290,14 @@ pub const Context = struct {
         out: *r4os.abi.GuiFrameGenerationInfo,
     ) i32 {
         return self.draw.guiFrameGenerationRead(handle, generation, commands, resources, regions, out);
+    }
+
+    pub fn guiFrameStreamInfo(
+        self: *const Context,
+        handle: *const r4os.abi.ProgramProcessHandle,
+        out: *r4os.abi.GuiFrameStreamInfo,
+    ) i32 {
+        return self.draw.guiFrameStreamInfo(handle, out);
     }
 
     pub fn guiTitle(self: *const Context, instance_id: u32, out: []u8) i32 {

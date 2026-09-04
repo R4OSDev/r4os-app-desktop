@@ -100,8 +100,10 @@ pub const Cache = struct {
     pending: bool = false,
     out_of_memory: bool = false,
     delta_refreshes: u64 = 0,
+    replacement_refreshes: u64 = 0,
     full_refreshes: u64 = 0,
     delta_fallbacks: u64 = 0,
+    replacement_fallbacks: u64 = 0,
     appended_commands: u64 = 0,
     appended_resource_bytes: u64 = 0,
 
@@ -168,7 +170,14 @@ pub const Cache = struct {
         const generation_rc = reader.guiFrameGenerationInfo(&self.owner, info.committed_generation, &generation_info);
         const generation_valid = generation_rc == r4os.abi.gui_frame_result_ok and
             validGenerationInfo(generation_info, self.owner, info);
-        if (generation_valid and self.active.valid and
+        if (generation_valid and
+            (generation_info.flags & r4os.abi.gui_frame_generation_flag_replacement) != 0 and
+            generation_info.base_generation == 0)
+        {
+            const replacement_result = self.replaceGeneration(allocator, reader, info, generation_info);
+            if (replacement_result != .retry) return replacement_result;
+            self.replacement_fallbacks +%= 1;
+        } else if (generation_valid and self.active.valid and
             (generation_info.flags & r4os.abi.gui_frame_generation_flag_delta) != 0 and
             generation_info.base_generation == self.active.info.committed_generation)
         {
@@ -227,6 +236,61 @@ pub const Cache = struct {
         self.pending = false;
         self.out_of_memory = false;
         self.full_refreshes +%= 1;
+        return .updated;
+    }
+
+    fn replaceGeneration(self: *Cache, allocator: std.mem.Allocator, reader: anytype, info: r4os.abi.GuiFrameInfo, generation_info: r4os.abi.GuiFrameGenerationInfo) RefreshResult {
+        const command_count = std.math.cast(usize, generation_info.command_count) orelse return .retry;
+        const resource_bytes = std.math.cast(usize, generation_info.resource_bytes) orelse return .retry;
+        if (generation_info.total_command_count != generation_info.command_count or
+            generation_info.total_resource_bytes != generation_info.resource_bytes or
+            info.committed_command_count != generation_info.command_count or
+            info.committed_resource_bytes != generation_info.resource_bytes or
+            generation_info.chain_depth != 1 or
+            generation_info.damage_count == 0 or generation_info.damage_count > r4os.abi.gui_frame_max_damage_regions)
+        {
+            return .retry;
+        }
+        if (!self.staging.ensure(allocator, command_count, resource_bytes)) {
+            self.pending = true;
+            self.out_of_memory = true;
+            return .retry;
+        }
+
+        var read_info: r4os.abi.GuiFrameGenerationInfo = .{};
+        var damage_regions: [r4os.abi.gui_frame_max_damage_regions]r4os.abi.DisplayDamageRect = undefined;
+        const rc = reader.guiFrameGenerationRead(
+            &self.owner,
+            generation_info.generation,
+            self.staging.commands(),
+            self.staging.resources(),
+            damage_regions[0..],
+            &read_info,
+        );
+        if (rc != r4os.abi.gui_frame_result_ok or !validGenerationInfo(read_info, self.owner, info) or
+            read_info.flags != generation_info.flags or read_info.base_generation != 0 or
+            read_info.command_count != generation_info.command_count or read_info.resource_bytes != generation_info.resource_bytes or
+            read_info.damage_count != generation_info.damage_count or read_info.chain_depth != 1)
+        {
+            self.pending = true;
+            return .retry;
+        }
+
+        self.staging.info = info;
+        self.staging.full_damage = !self.active.valid;
+        self.staging.damage_count = if (self.active.valid) read_info.damage_count else 0;
+        if (self.staging.damage_count != 0) {
+            @memcpy(self.staging.damage_regions[0..self.staging.damage_count], damage_regions[0..self.staging.damage_count]);
+        }
+        self.staging.valid = true;
+        std.mem.swap(Buffer, &self.active, &self.staging);
+        self.staging.valid = false;
+        self.staging.command_len = 0;
+        self.staging.resource_len = 0;
+        self.releaseOversizedStaging(allocator);
+        self.pending = false;
+        self.out_of_memory = false;
+        self.replacement_refreshes +%= 1;
         return .updated;
     }
 
@@ -617,6 +681,50 @@ test "snapshot cache appends one delta generation and preserves regional damage"
     try std.testing.expectEqual(@as(u64, 1), cache.delta_refreshes);
     try std.testing.expectEqual(@as(u64, 1), cache.appended_commands);
     try std.testing.expectEqual(@as(u64, 2), cache.appended_resource_bytes);
+}
+
+test "snapshot cache swaps a standalone replacement without replaying history" {
+    const allocator = std.testing.allocator;
+    const owner = r4os.abi.ProgramProcessHandle{ .instance_id = 22, .generation = 6 };
+    const old_commands = [_]r4os.abi.GuiFrameCommand{
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x101010 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_text, .resource_bytes = 3 },
+    };
+    const replacement_commands = [_]r4os.abi.GuiFrameCommand{.{
+        .kind = r4os.abi.gui_frame_command_kind_text,
+        .resource_bytes = 2,
+    }};
+    const damage = [_]r4os.abi.DisplayDamageRect{.{ .x = 4, .y = 5, .w = 6, .h = 7 }};
+    var reader = FakeReader{
+        .info = fakeInfo(owner, 1, old_commands.len, 3),
+        .commands = old_commands[0..],
+        .resources = "old",
+    };
+    var cache = Cache{};
+    defer cache.deinit(allocator);
+    cache.bind(allocator, owner);
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+
+    reader.info = fakeInfo(owner, 64, replacement_commands.len, 2);
+    reader.commands = replacement_commands[0..];
+    reader.resources = "ok";
+    reader.generation_supported = true;
+    reader.generation_info = fakeGenerationInfo(owner, 64, 0, 1, 2, 1, 2, damage.len);
+    reader.generation_info.flags |= r4os.abi.gui_frame_generation_flag_replacement;
+    reader.generation_info.chain_depth = 1;
+    reader.generation_commands = replacement_commands[0..];
+    reader.generation_resources = "ok";
+    reader.generation_regions = damage[0..];
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+
+    const view = cache.view();
+    try std.testing.expect(!view.full_damage);
+    try std.testing.expectEqual(@as(u64, 64), view.info.committed_generation);
+    try std.testing.expectEqual(@as(usize, 1), view.commands.len);
+    try std.testing.expectEqualStrings("ok", view.resources);
+    try std.testing.expectEqualSlices(r4os.abi.DisplayDamageRect, damage[0..], view.damage_regions);
+    try std.testing.expectEqual(@as(u64, 1), cache.replacement_refreshes);
+    try std.testing.expectEqual(@as(u64, 0), cache.delta_refreshes);
 }
 
 comptime {

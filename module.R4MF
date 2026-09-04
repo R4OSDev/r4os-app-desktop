@@ -1,7 +1,7 @@
 R4OS_MODULE_MANIFEST=2
 KIND=R4X
 NAME=R4DESK
-VERSION=0.1.33
+VERSION=0.1.34
 LANGUAGE=Zig
 SOURCE=src/main.zig
 ENTRY_MODE=app
@@ -16,6 +16,7 @@ META=app.role=desktop_host
 META=memory.profile=desktop
 META=memory.tag=desktop
 META=feature=direct-indexed8-scaling
+META=feature=direct-xrgb32-scaling
 IMPORT=R4STD:SETTINGS_V1:1
 IMPORT=R4STD:TIME_V1:1
 IMPORT=R4STD:CONFIG_V1:1

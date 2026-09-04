@@ -134,6 +134,123 @@ pub const SceneBuffer = struct {
         viewport: surface.Rect,
     };
 
+    pub const Xrgb32Nearest = struct {
+        pixels: []align(1) const u32,
+        source_x: u32,
+        source_y: u32,
+        source_w: u32,
+        source_h: u32,
+        source_stride: u32,
+        guest_w: u32,
+        guest_h: u32,
+        viewport: surface.Rect,
+    };
+
+    /// Replays one native XRGB32 source block without converting it into
+    /// color runs. Exact-size viewports use row copies, integer viewports
+    /// expand one row and repeat it, and all other sizes use global nearest
+    /// mapping so independently transported blocks meet without seams.
+    pub fn blitXrgb32Nearest(self: *SceneBuffer, clip: surface.Rect, image: Xrgb32Nearest) bool {
+        if (image.source_w == 0 or image.source_h == 0 or image.source_stride < image.source_w or
+            image.guest_w == 0 or image.guest_h == 0 or image.viewport.w <= 0 or image.viewport.h <= 0 or
+            @as(u64, image.source_x) + image.source_w > image.guest_w or
+            @as(u64, image.source_y) + image.source_h > image.guest_h)
+        {
+            return false;
+        }
+        const preceding_rows = std.math.mul(usize, @as(usize, image.source_h - 1), @as(usize, image.source_stride)) catch return false;
+        const required = std.math.add(usize, preceding_rows, @as(usize, image.source_w)) catch return false;
+        if (image.pixels.len < required) return false;
+
+        const scene_clip = self.paintClipRect(clip) orelse return true;
+        const left = @max(scene_clip.x, image.viewport.x);
+        const top = @max(scene_clip.y, image.viewport.y);
+        const right = @min(scene_clip.right(), image.viewport.right());
+        const bottom = @min(scene_clip.bottom(), image.viewport.bottom());
+        if (right <= left or bottom <= top) return true;
+
+        if (image.viewport.w == @as(i32, @intCast(image.guest_w)) and image.viewport.h == @as(i32, @intCast(image.guest_h))) {
+            return self.blitXrgb32Identity(left, top, right, bottom, image);
+        }
+        if (@rem(image.viewport.w, @as(i32, @intCast(image.guest_w))) == 0 and
+            @rem(image.viewport.h, @as(i32, @intCast(image.guest_h))) == 0)
+        {
+            const scale_x = @divTrunc(image.viewport.w, @as(i32, @intCast(image.guest_w)));
+            const scale_y = @divTrunc(image.viewport.h, @as(i32, @intCast(image.guest_h)));
+            if (scale_x > 0 and scale_x == scale_y) return self.blitXrgb32Integer(left, top, right, bottom, image, scale_x);
+        }
+        return self.blitXrgb32Fractional(left, top, right, bottom, image);
+    }
+
+    fn blitXrgb32Identity(self: *SceneBuffer, left: i32, top: i32, right: i32, bottom: i32, image: Xrgb32Nearest) bool {
+        const destination = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const copy_count: usize = @intCast(right - left);
+        const guest_x: u32 = @intCast(left - image.viewport.x);
+        if (guest_x < image.source_x or @as(u64, guest_x) + copy_count > @as(u64, image.source_x) + image.source_w) return false;
+        var destination_y = top;
+        while (destination_y < bottom) : (destination_y += 1) {
+            const guest_y: u32 = @intCast(destination_y - image.viewport.y);
+            if (guest_y < image.source_y or guest_y >= image.source_y + image.source_h) return false;
+            const source_offset = @as(usize, guest_y - image.source_y) * image.source_stride + (guest_x - image.source_x);
+            const destination_offset = @as(usize, @intCast(destination_y)) * destination_stride + @as(usize, @intCast(left));
+            @memcpy(destination[destination_offset .. destination_offset + copy_count], image.pixels[source_offset .. source_offset + copy_count]);
+        }
+        return true;
+    }
+
+    fn blitXrgb32Integer(self: *SceneBuffer, left: i32, top: i32, right: i32, bottom: i32, image: Xrgb32Nearest, scale: i32) bool {
+        const destination = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const first_guest_y: u32 = @intCast(@divTrunc(top - image.viewport.y, scale));
+        const last_guest_y: u32 = @intCast(@divTrunc(bottom - 1 - image.viewport.y, scale));
+        var guest_y = first_guest_y;
+        while (guest_y <= last_guest_y) : (guest_y += 1) {
+            if (guest_y < image.source_y or guest_y >= image.source_y + image.source_h) return false;
+            const row_top = @max(top, image.viewport.y + @as(i32, @intCast(guest_y)) * scale);
+            const row_bottom = @min(bottom, image.viewport.y + (@as(i32, @intCast(guest_y)) + 1) * scale);
+            const destination_row = @as(usize, @intCast(row_top)) * destination_stride;
+            var guest_x: u32 = @intCast(@divTrunc(left - image.viewport.x, scale));
+            const last_guest_x: u32 = @intCast(@divTrunc(right - 1 - image.viewport.x, scale));
+            while (guest_x <= last_guest_x) : (guest_x += 1) {
+                if (guest_x < image.source_x or guest_x >= image.source_x + image.source_w) return false;
+                const run_left = @max(left, image.viewport.x + @as(i32, @intCast(guest_x)) * scale);
+                const run_right = @min(right, image.viewport.x + (@as(i32, @intCast(guest_x)) + 1) * scale);
+                const source_index = @as(usize, guest_y - image.source_y) * image.source_stride + (guest_x - image.source_x);
+                @memset(destination[destination_row + @as(usize, @intCast(run_left)) .. destination_row + @as(usize, @intCast(run_right))], image.pixels[source_index]);
+            }
+            var destination_y = row_top + 1;
+            while (destination_y < row_bottom) : (destination_y += 1) {
+                const repeat_row = @as(usize, @intCast(destination_y)) * destination_stride;
+                @memcpy(destination[repeat_row + @as(usize, @intCast(left)) .. repeat_row + @as(usize, @intCast(right))], destination[destination_row + @as(usize, @intCast(left)) .. destination_row + @as(usize, @intCast(right))]);
+            }
+        }
+        return true;
+    }
+
+    fn blitXrgb32Fractional(self: *SceneBuffer, left: i32, top: i32, right: i32, bottom: i32, image: Xrgb32Nearest) bool {
+        const destination = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const viewport_w: u64 = @intCast(image.viewport.w);
+        const viewport_h: u64 = @intCast(image.viewport.h);
+        var destination_y = top;
+        while (destination_y < bottom) : (destination_y += 1) {
+            const viewport_y: u64 = @intCast(destination_y - image.viewport.y);
+            const guest_y: u32 = @intCast((viewport_y * image.guest_h) / viewport_h);
+            if (guest_y < image.source_y or guest_y >= image.source_y + image.source_h) return false;
+            const source_row = @as(usize, guest_y - image.source_y) * image.source_stride;
+            const destination_row = @as(usize, @intCast(destination_y)) * destination_stride;
+            var destination_x = left;
+            while (destination_x < right) : (destination_x += 1) {
+                const viewport_x: u64 = @intCast(destination_x - image.viewport.x);
+                const guest_x: u32 = @intCast((viewport_x * image.guest_w) / viewport_w);
+                if (guest_x < image.source_x or guest_x >= image.source_x + image.source_w) return false;
+                destination[destination_row + @as(usize, @intCast(destination_x))] = image.pixels[source_row + @as(usize, guest_x - image.source_x)];
+            }
+        }
+        return true;
+    }
+
     /// Replays one bounded Indexed8 source block directly into the XRGB scene.
     /// The full guest/viewport mapping keeps adjacent blocks pixel-identical;
     /// palette expansion happens once per source block instead of once per
@@ -288,6 +405,103 @@ test "scene buffer fills clipped rectangles" {
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[5]);
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[7]);
     try std.testing.expectEqual(@as(u32, 0), pixels[8]);
+}
+
+test "scene buffer replays native xrgb32 identity integer fractional and tile seams" {
+    var memory: [7 * 4 * @sizeOf(u32)]u8 align(@alignOf(u32)) = undefined;
+    var buffer = SceneBuffer{};
+    try std.testing.expect(buffer.attach(memory[0..], 7, 4));
+    @memset(buffer.pixels.?, 0x00EEEEEE);
+
+    const identity = [_]u32{ 1, 2, 3, 4 };
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 1, .y = 1, .w = 2, .h = 2 }, .{
+        .pixels = identity[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 2,
+        .source_stride = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport = .{ .x = 1, .y = 1, .w = 2, .h = 2 },
+    }));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4 }, &.{ buffer.pixels.?[8], buffer.pixels.?[9], buffer.pixels.?[15], buffer.pixels.?[16] });
+
+    var unaligned_bytes: [1 + identity.len * @sizeOf(u32)]u8 = undefined;
+    @memcpy(unaligned_bytes[1..], std.mem.sliceAsBytes(identity[0..]));
+    @memset(buffer.pixels.?, 0);
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 1, .y = 1, .w = 2, .h = 2 }, .{
+        .pixels = std.mem.bytesAsSlice(u32, unaligned_bytes[1..]),
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 2,
+        .source_stride = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport = .{ .x = 1, .y = 1, .w = 2, .h = 2 },
+    }));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3, 4 }, &.{ buffer.pixels.?[8], buffer.pixels.?[9], buffer.pixels.?[15], buffer.pixels.?[16] });
+
+    @memset(buffer.pixels.?, 0);
+    const integer = [_]u32{ 0x11, 0x22, 0x33, 0x44 };
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 0, .y = 0, .w = 4, .h = 4 }, .{
+        .pixels = integer[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 2,
+        .source_stride = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport = .{ .x = 0, .y = 0, .w = 4, .h = 4 },
+    }));
+    try std.testing.expectEqualSlices(u32, &.{ 0x11, 0x11, 0x22, 0x22 }, buffer.pixels.?[0..4]);
+    try std.testing.expectEqualSlices(u32, &.{ 0x33, 0x33, 0x44, 0x44 }, buffer.pixels.?[14..18]);
+
+    @memset(buffer.pixels.?, 0);
+    const fractional = [_]u32{ 10, 20, 30, 40 };
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 0, .y = 0, .w = 5, .h = 3 }, .{
+        .pixels = fractional[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 2,
+        .source_stride = 2,
+        .guest_w = 2,
+        .guest_h = 2,
+        .viewport = .{ .x = 0, .y = 0, .w = 5, .h = 3 },
+    }));
+    try std.testing.expectEqualSlices(u32, &.{ 10, 10, 10, 20, 20 }, buffer.pixels.?[0..5]);
+    try std.testing.expectEqualSlices(u32, &.{ 30, 30, 30, 40, 40 }, buffer.pixels.?[14..19]);
+
+    @memset(buffer.pixels.?, 0x00EEEEEE);
+    buffer.setPaintClip(.{ .x = 1, .y = 0, .w = 5, .h = 1 });
+    const left = [_]u32{ 100, 200 };
+    const right = [_]u32{ 300, 400 };
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 0, .y = 0, .w = 4, .h = 1 }, .{
+        .pixels = left[0..],
+        .source_x = 0,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 1,
+        .source_stride = 2,
+        .guest_w = 4,
+        .guest_h = 1,
+        .viewport = .{ .x = 0, .y = 0, .w = 7, .h = 1 },
+    }));
+    try std.testing.expect(buffer.blitXrgb32Nearest(.{ .x = 4, .y = 0, .w = 3, .h = 1 }, .{
+        .pixels = right[0..],
+        .source_x = 2,
+        .source_y = 0,
+        .source_w = 2,
+        .source_h = 1,
+        .source_stride = 2,
+        .guest_w = 4,
+        .guest_h = 1,
+        .viewport = .{ .x = 0, .y = 0, .w = 7, .h = 1 },
+    }));
+    try std.testing.expectEqualSlices(u32, &.{ 0x00EEEEEE, 100, 200, 200, 300, 300, 0x00EEEEEE }, buffer.pixels.?[0..7]);
 }
 
 test "scene buffer expands scaled Indexed8 blocks directly with paint clipping" {

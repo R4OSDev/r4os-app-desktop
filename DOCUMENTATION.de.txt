@@ -50,6 +50,17 @@ direkt aus Palette und indiziertem Quelltile integer oder fraktional in den
 aktuellen Paintclip gerendert; nicht schneidende Tiles werden vor dem
 Pixelzugriff verworfen.
 
+Eine als vollstaendiger Ersatz markierte Rastergeneration wird dagegen als
+einzelner generationstreuer Snapshot eingelesen und atomar gegen den alten
+Stand getauscht. Ihre exakten Damage-Regionen begrenzen weiterhin Komposition
+und Present; eine historische Vollbildkette wird nicht erneut abgespielt.
+Native XRGB32-Kacheln gehen ohne Farblaufzerlegung direkt in den SceneBuffer:
+1:1 per Zeilenkopie, bei ganzzahliger Vergroesserung per expandierter und
+wiederholter Zeile und sonst mit global abgeleitetem Nearest-Neighbour-
+Mapping. Dadurch bleiben unabhaengige Kachelgrenzen auch bei gebrochener
+Skalierung nahtlos. OOM oder ein veralteter Read laesst den bisherigen
+vollstaendigen Snapshot unveraendert aktiv.
+
 Textbefehle gehosteter GUI-Frames rasterisieren jede den aktuellen Damage-
 und Clientclip schneidende Glyphenzelle. Nur die sichtbaren Teilpixel werden
 uebernommen; dadurch liefern Vollkomposition und regionale Komposition an
