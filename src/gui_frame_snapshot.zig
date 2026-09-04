@@ -462,6 +462,41 @@ test "snapshot refresh publishes only a complete generation" {
     try std.testing.expectEqualStrings("new", view.resources);
 }
 
+test "snapshot publishes one combined generation from buffered Canvas chunks" {
+    const allocator = std.testing.allocator;
+    const owner = r4os.abi.ProgramProcessHandle{ .instance_id = 8, .generation = 12 };
+    const commands = [_]r4os.abi.GuiFrameCommand{
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x010203 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_rect, .x = 1, .y = 2, .w = 3, .h = 4, .rgb = 0xA0B0C0 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_text, .resource_bytes = 2 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_raster, .w = 1, .h = 1, .resource_offset = 2, .resource_bytes = 4, .parameter0 = 1 },
+    };
+    const resources = [_]u8{ 'O', 'K', 0x33, 0x22, 0x11, 0 };
+    var reader = FakeReader{
+        .info = fakeInfo(owner, 9, commands.len, resources.len),
+        .commands = commands[0..],
+        .resources = resources[0..],
+    };
+    var cache = Cache{};
+    defer cache.deinit(allocator);
+    cache.bind(allocator, owner);
+
+    try std.testing.expectEqual(RefreshResult.updated, cache.refresh(allocator, &reader));
+    const view = cache.view();
+    try std.testing.expect(view.valid and view.full_damage);
+    try std.testing.expectEqual(@as(u64, 9), view.info.committed_generation);
+    try std.testing.expectEqual(@as(usize, commands.len), view.commands.len);
+    try std.testing.expectEqual(@as(u64, 0), view.commands[2].resource_offset);
+    try std.testing.expectEqual(@as(u64, 2), view.commands[3].resource_offset);
+    try std.testing.expectEqualSlices(u8, resources[0..], view.resources);
+
+    reader.stale_once = true;
+    reader.info.committed_generation = 10;
+    try std.testing.expectEqual(RefreshResult.retry, cache.refresh(allocator, &reader));
+    try std.testing.expectEqual(@as(u64, 9), cache.view().info.committed_generation);
+    try std.testing.expectEqualSlices(u8, resources[0..], cache.view().resources);
+}
+
 test "snapshot cache accepts a committed empty frame and rejects handle reuse" {
     const allocator = std.testing.allocator;
     const owner = r4os.abi.ProgramProcessHandle{ .instance_id = 9, .generation = 31 };
