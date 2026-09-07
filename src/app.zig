@@ -326,6 +326,7 @@ pub const App = struct {
     desktop_layout_recovery_reported: bool = false,
     desktop_layout_recovery_failed_reported: bool = false,
     next_time_config_check_tick: u64 = 0,
+    next_clock_check_tick: u64 = 0,
     keyboard_focus: model.UiTarget = .none,
     dialog_focus: model.UiTarget = .none,
     hover_target: model.UiTarget = .none,
@@ -358,6 +359,7 @@ pub const App = struct {
     win_service_status: r4os.abi.WindowServiceStatus = .{},
     win_service_snapshot: r4os.abi.WindowServiceSnapshot = .{},
     win_service_gate: window_service_gate.Gate = .{},
+    window_geometry_updates: window_service_gate.GeometryUpdates = .{},
     window_service_retry_ticks: u64 = 200,
     tray_service_retry_ticks: u64 = 200,
     tray_sync_ticks: u64 = 5,
@@ -499,6 +501,7 @@ pub const App = struct {
             if (!self.terminal_mode or self.windows[0].instance_id == 0) self.ctx.systemPoweroff();
             self.headless_acceptance_terminal = true;
         }
+        if (argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE")) self.runWindowIdleSmokeAndPoweroff();
         if (hasKlickifaxSmokeArg(self.ctx.argsRaw())) self.runKlickifaxSmokeAndPoweroff();
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
         if (hasSmokeArg(self.ctx.argsRaw())) self.runSmokeAndPoweroff();
@@ -520,6 +523,7 @@ pub const App = struct {
             if (self.pollKeyboardEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
+            self.flushWindowGeometry(false);
             if (needs_redraw) self.redraw();
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
         }
@@ -540,14 +544,15 @@ pub const App = struct {
             return;
         }
         _ = self.retryWindowServiceIfDue();
-        // WINSVC registry changes do not participate in Desktop activity.
-        // A bounded sleep keeps the visual mirror current without busy-looping.
-        if (self.tray_broker_revision != 0 or self.tray_next_sync_tick <= self.ctx.ticks()) {
-            self.ctx.sleepTicks(self.loop_sleep_ticks);
-            return;
-        }
+        const now = self.ctx.ticks();
+        // WINSVC changes still need their bounded poll deadline. A valid
+        // revision itself is not activity and does not shorten the wait.
+        const tray_deadline = if (self.win_service_gate.available) self.tray_next_sync_tick else self.win_service_gate.retry_at_tick;
+        const blink_delay = self.blink_half_ticks - (now % self.blink_half_ticks);
+        var delay = window_service_gate.deadlineDelay(now, blink_delay, &.{ tray_deadline, self.next_clock_check_tick });
+        delay = @max(1, self.window_geometry_updates.delay(now, delay));
         if (self.activity_wait_supported) {
-            const rc = self.ctx.desktopActivityWait(self.activity_seq, self.blink_half_ticks, &self.activity_seq);
+            const rc = self.ctx.desktopActivityWait(self.activity_seq, delay, &self.activity_seq);
             if (rc >= 0) {
                 if (rc > 0) {
                     self.activity_wait_wakes +%= 1;
@@ -562,6 +567,7 @@ pub const App = struct {
     }
 
     fn syncTrayBroker(self: *App) bool {
+        if (!self.win_service_gate.available) return false;
         const now = self.ctx.ticks();
         if (self.tray_sync_cursor == r4os.abi.tray_desktop_cursor_poll and now < self.tray_next_sync_tick) return false;
 
@@ -645,6 +651,10 @@ pub const App = struct {
     }
 
     fn loseTrayBroker(self: *App) bool {
+        self.ctx.closeWindowService();
+        self.window_service_mirrored = .{false} ** 4;
+        self.window_geometry_updates = .{};
+        self.win_service_gate.markUnavailable(self.ctx.ticks(), self.window_service_retry_ticks);
         const changed = self.tray_registry.registered_count != 0;
         const old_tooltip = self.currentTrayTooltipRect();
         self.tray_registry = tray.Registry.init(self.ctx.self_handle.generation);
@@ -1217,6 +1227,92 @@ pub const App = struct {
             if (self.pollTimerEvent() and self.dispatchEvent()) self.redraw();
         }
         return false;
+    }
+
+    fn runWindowIdleSmokeAndPoweroff(self: *App) noreturn {
+        const editor_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X";
+        const timer_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X";
+        self.ctx.println("DESKTOP window-idle smoke");
+        self.launchGuiPath(editor_path, "", "Default Apps", .gui);
+        self.smokePumpFrames(20);
+        const index = self.findWindowByLaunchPath(editor_path) orelse self.windowIdleSmokeFailed("launch");
+        const start_x = self.windows[index].x + 20;
+        const start_y = self.windows[index].y + 10;
+        self.beginDrag(index, start_x, start_y);
+        for (0..100) |offset| _ = self.updateDrag(start_x + @as(i32, @intCast(offset)), start_y);
+        self.setInputPreviousButtons(1);
+        self.event.button = model.MouseButton.left;
+        var release_mouse = std.mem.zeroes(r4os.abi.Mouse);
+        release_mouse.x = start_x + 105;
+        release_mouse.y = start_y + 8;
+        _ = self.handleMouseEvent(release_mouse);
+        if (self.drag.active or self.window_geometry_updates.pending[index] or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("drag-end");
+        const rx = self.windows[index].x + self.windows[index].w;
+        const ry = self.windows[index].y + self.windows[index].h;
+        self.beginResize(index, .bottom_right, rx, ry);
+        _ = self.updateResize(rx + 20, ry + 10);
+        self.setInputPreviousButtons(1);
+        release_mouse.x = rx + 32;
+        release_mouse.y = ry + 24;
+        _ = self.handleMouseEvent(release_mouse);
+        if (self.resize.active or self.window_geometry_updates.pending[index] or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("resize-end");
+        self.ctx.println("DESKTOP window-idle geometry: OK");
+        self.launchGuiPath(timer_path, "", "MemView", .gui);
+        self.smokePumpFrames(20);
+        const timer_index = self.findWindowByLaunchPath(timer_path) orelse self.windowIdleSmokeFailed("timer-launch");
+        const timer_revision = self.ctx.guiRevision(self.windows[timer_index].instance_id);
+        const idle_revision = self.ctx.guiRevision(self.windows[index].instance_id);
+        const before_timeouts = self.activity_wait_timeouts;
+        const until = self.ctx.ticks() + @as(u64, self.monotonic_hz) * 2;
+        while (self.ctx.ticks() < until) {
+            _ = self.syncTrayBroker();
+            _ = self.pollTimerEvent();
+            if (self.hasDamage()) self.redraw();
+            self.idleWait(false);
+        }
+        if (self.ctx.guiRevision(self.windows[timer_index].instance_id) == timer_revision or
+            self.ctx.guiRevision(self.windows[index].instance_id) != idle_revision or
+            self.activity_wait_timeouts <= before_timeouts) self.windowIdleSmokeFailed("idle-timer");
+        self.ctx.print("DESKTOP window-idle timeouts/2s: ");
+        self.ctx.printU64(self.activity_wait_timeouts - before_timeouts);
+        self.ctx.println("");
+        const old_handle = self.ctx.window_session.handle;
+        var service_info: r4os.abi.ServiceInfo = .{};
+        if (self.ctx.sys.serviceRestart(r4os.abi.window_service_name, &service_info) != 0) self.windowIdleSmokeFailed("restart");
+        // Exercise the old handle first, then the real idle retry boundary.
+        var snapshot: r4os.abi.WindowServiceSnapshot = .{};
+        if (self.ctx.windowServiceSnapshot(&snapshot) == 0) self.windowIdleSmokeFailed("stale-handle");
+        self.markWindowServiceUnavailable();
+        const retry_until = self.ctx.ticks() + @as(u64, self.monotonic_hz) * 4;
+        while (!self.win_service_gate.available and self.ctx.ticks() < retry_until) {
+            _ = self.pollTimerEvent();
+            self.idleWait(false);
+        }
+        if (!self.win_service_gate.available or self.ctx.window_session.handle == old_handle or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("reregister");
+        self.ctx.println("DESKTOP window-idle restart: OK");
+        _ = self.requestWindowProcessClose(index);
+        _ = self.requestWindowProcessClose(timer_index);
+        self.smokePumpFrames(30);
+        if (self.windows[index].instance_id != 0 or self.windows[timer_index].instance_id != 0) self.windowIdleSmokeFailed("close");
+        self.ctx.println("DESKTOP window-idle result: OK");
+        self.ctx.systemPoweroff();
+    }
+
+    fn smokeGeometryMatches(self: *App, index: usize) bool {
+        var snapshot: r4os.abi.WindowServiceSnapshot = .{};
+        if (self.ctx.windowServiceSnapshot(&snapshot) != 0) return false;
+        for (snapshot.records[0..@min(snapshot.status.window_count, snapshot.records.len)]) |record| {
+            if (record.window_id != index or record.instance_id != self.windows[index].instance_id) continue;
+            const expected = self.windowServiceRecordForIndex(index);
+            return record.x == expected.x and record.y == expected.y and record.w == expected.w and record.h == expected.h;
+        }
+        return false;
+    }
+
+    fn windowIdleSmokeFailed(self: *App, reason: []const u8) noreturn {
+        self.ctx.print("DESKTOP window-idle FAILED: ");
+        self.ctx.println(reason);
+        self.ctx.systemPoweroff();
     }
 
     fn runSmokeAndPoweroff(self: *App) noreturn {
@@ -4035,6 +4131,11 @@ pub const App = struct {
             const desktop_drag_index = self.desktop_drag.index;
             const was_resize = self.resize.active;
             const resize_index = self.resize.window_index;
+            // The release packet can carry the final coordinate even when
+            // no separate motion packet was delivered for it.
+            if (was_drag) _ = self.updateDrag(mouse.x, mouse.y);
+            if (was_resize) _ = self.updateResize(mouse.x, mouse.y);
+            self.flushWindowGeometry(true);
             if (was_down and pressed_target == .volume_popup_slider and self.volume_dragging) {
                 _ = self.updateVolumeFromPointer(mouse.x, true);
                 self.volume_dragging = false;
@@ -5831,6 +5932,11 @@ pub const App = struct {
 
     fn resetWindowServiceState(self: *App) void {
         self.window_service_mirrored = .{false} ** 4;
+        self.window_geometry_updates = .{};
+        if (!self.ctx.openWindowService()) {
+            self.markWindowServiceUnavailable();
+            return;
+        }
         var record = r4os.abi.WindowServiceRecord{};
         var result: r4os.abi.WindowServiceResult = .{};
         const rc = self.ctx.windowServiceRecord(r4os.abi.window_service_op_restart_cleanup, &record, &result);
@@ -5847,6 +5953,7 @@ pub const App = struct {
     }
 
     fn refreshWindowServiceSnapshot(self: *App) bool {
+        self.flushWindowGeometry(true);
         var snapshot: r4os.abi.WindowServiceSnapshot = .{};
         const rc = self.ctx.windowServiceSnapshot(&snapshot);
         if (rc == 0) {
@@ -5864,7 +5971,17 @@ pub const App = struct {
     }
 
     fn mirrorWindowUpdate(self: *App, index: usize) void {
-        self.sendWindowServiceOp(index, r4os.abi.window_service_op_update);
+        if (!self.win_service_gate.available or index >= self.windows.len or !self.window_service_mirrored[index]) return;
+        if ((self.drag.active and self.drag.window_index == index) or (self.resize.active and self.resize.window_index == index)) {
+            self.window_geometry_updates.queue(index, self.ctx.ticks(), self.tray_sync_ticks);
+        } else self.sendWindowServiceOp(index, r4os.abi.window_service_op_update);
+    }
+
+    fn flushWindowGeometry(self: *App, force: bool) void {
+        const now = self.ctx.ticks();
+        for (0..self.windows.len) |index| {
+            if (self.window_geometry_updates.take(index, now, force)) self.sendWindowServiceOp(index, r4os.abi.window_service_op_update);
+        }
     }
 
     fn mirrorWindowFocus(self: *App, index: usize) void {
@@ -5894,6 +6011,9 @@ pub const App = struct {
     fn sendWindowServiceOp(self: *App, index: usize, op: u16) void {
         if (!self.win_service_gate.available) return;
         if (index >= self.windows.len) return;
+        // Every lifecycle operation contains the latest full record. It
+        // supersedes queued geometry before a close/remove can reuse a slot.
+        self.window_geometry_updates.pending[index] = false;
         if (op != r4os.abi.window_service_op_remove and self.windows[index].instance_id == 0) return;
         if (op != r4os.abi.window_service_op_register and !self.window_service_mirrored[index]) return;
         var record = self.windowServiceRecordForIndex(index);
@@ -5920,8 +6040,7 @@ pub const App = struct {
     }
 
     fn markWindowServiceUnavailable(self: *App) void {
-        self.window_service_mirrored = .{false} ** 4;
-        self.win_service_gate.markUnavailable(self.ctx.ticks(), self.window_service_retry_ticks);
+        _ = self.loseTrayBroker();
     }
 
     fn retryWindowServiceIfDue(self: *App) bool {
@@ -7746,6 +7865,7 @@ pub const App = struct {
         if (len <= 0 or !next.loadFromBytes(buffer[0..@intCast(len)])) return false;
         if (next.selectedIndex() == self.time_config.selectedIndex() and next.selectedClockFormat() == self.time_config.selectedClockFormat()) return false;
         self.time_config = next;
+        self.next_clock_check_tick = 0;
         self.invalidateTaskbar();
         return true;
     }
@@ -8251,8 +8371,11 @@ pub const App = struct {
     }
 
     fn updateClock(self: *App) bool {
+        const now = self.ctx.ticks();
+        if (now < self.next_clock_check_tick) return false;
+        self.next_clock_check_tick = now +| @max(self.monotonic_hz, 1);
         const state = self.ctx.timeState();
-        // The timer path runs every 10 ms.  TIMESVC calls are backed by a
+        // The active timer path can run every 10 ms. TIMESVC calls are backed by a
         // short-lived async-I/O task, so querying the service here used to
         // create and retire up to 100 kernel tasks per second while the
         // desktop was otherwise idle.  syncTimeConfig() already refreshes

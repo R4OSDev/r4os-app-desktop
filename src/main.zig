@@ -8,6 +8,7 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
     if (!r4std.init(r4_app.startContext())) return r4os.abi.err_no_group;
     var images = r4img.Context.init(r4_app.startContext()) orelse return r4os.abi.err_no_group;
     var ctx = desktop_api.Context.init(r4_app) orelse return r4os.abi.err_no_group;
+    defer ctx.closeWindowService();
     var desktop = app.App{ .ctx = &ctx, .images = &images };
     return desktop.run();
 }

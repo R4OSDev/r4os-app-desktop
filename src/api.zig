@@ -3,6 +3,7 @@ const std = @import("std");
 const paint = @import("paint.zig");
 const scene_buffer = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
+const window_service = @import("window_service_gate.zig");
 
 pub const Context = struct {
     sys: r4os.r4sys.Context,
@@ -11,6 +12,7 @@ pub const Context = struct {
     draw: r4os.r4draw.Context,
     self_handle: r4os.abi.ProgramProcessHandle,
     scene: ?*scene_buffer.SceneBuffer = null,
+    window_session: window_service.Session = .{},
 
     pub fn init(app: *r4os.App) ?Context {
         const sys = app.system();
@@ -80,15 +82,18 @@ pub const Context = struct {
         return self.sys.timeServiceStatus(out);
     }
 
-    pub fn systemHalt(self: *const Context) noreturn {
+    pub fn systemHalt(self: *Context) noreturn {
+        self.closeWindowService();
         self.sys.systemHalt();
     }
 
-    pub fn systemReboot(self: *const Context) noreturn {
+    pub fn systemReboot(self: *Context) noreturn {
+        self.closeWindowService();
         self.sys.systemReboot();
     }
 
-    pub fn systemPoweroff(self: *const Context) noreturn {
+    pub fn systemPoweroff(self: *Context) noreturn {
+        self.closeWindowService();
         self.sys.systemPoweroff();
     }
 
@@ -352,28 +357,40 @@ pub const Context = struct {
     }
 
     pub fn trayDesktopExchange(
-        self: *const Context,
+        self: *Context,
         op: u16,
         request: *const r4os.abi.TrayDesktopExchange,
         out: *r4os.abi.TrayDesktopExchange,
     ) i32 {
-        var info: r4os.abi.ServiceInfo = .{};
-        const opened = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
-        if (opened != r4os.abi.service_api_result_ok or info.handle == 0) return opened;
-        defer _ = self.sys.serviceClose(info.handle);
-
-        var header: r4os.abi.ServiceMessageHeader = .{};
-        const got = self.sys.serviceCall(
-            info.handle,
-            op,
-            std.mem.asBytes(request),
-            &header,
-            std.mem.asBytes(out),
-            self.sys.ticksFromMilliseconds(250),
-        );
+        const got = self.window_session.call(self, op, std.mem.asBytes(request), std.mem.asBytes(out));
         if (got != @as(i32, @intCast(@sizeOf(r4os.abi.TrayDesktopExchange)))) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
-        if (header.status != r4os.abi.service_api_result_ok) return header.status;
         return r4os.abi.service_api_result_ok;
+    }
+
+    pub fn openWindowService(self: *Context) bool {
+        return self.window_session.open(self);
+    }
+
+    pub fn closeWindowService(self: *Context) void {
+        self.window_session.close(self);
+    }
+
+    pub fn openWindowEndpoint(self: *const Context) u32 {
+        var info: r4os.abi.ServiceInfo = .{};
+        if (self.sys.serviceOpen(r4os.abi.window_service_name, &info) != 0) return 0;
+        return info.handle;
+    }
+
+    pub fn closeWindowEndpoint(self: *const Context, handle: u32) void {
+        _ = self.sys.serviceClose(handle);
+    }
+
+    pub fn callWindowEndpoint(self: *const Context, handle: u32, op: u16, request: []const u8, response: []u8) i32 {
+        var header: r4os.abi.ServiceMessageHeader = .{};
+        const got = self.sys.serviceCall(handle, op, request, &header, response, self.sys.ticksFromMilliseconds(250));
+        if (got < 0) return got;
+        if (header.status != r4os.abi.service_api_result_ok) return header.status;
+        return got;
     }
 
     pub fn audioMasterState(self: *const Context, out: *r4os.abi.AudioServiceMasterState) i32 {
@@ -406,49 +423,31 @@ pub const Context = struct {
         return r4os.abi.service_api_result_ok;
     }
 
-    pub fn windowServiceStatus(self: *const Context, out: *r4os.abi.WindowServiceStatus) i32 {
-        var info: r4os.abi.ServiceInfo = .{};
-        const rc = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
-        if (rc != r4os.abi.service_api_result_ok or info.handle == 0) return rc;
-        defer _ = self.sys.serviceClose(info.handle);
-
-        var header: r4os.abi.ServiceMessageHeader = .{};
+    pub fn windowServiceStatus(self: *Context, out: *r4os.abi.WindowServiceStatus) i32 {
         var response: [@sizeOf(r4os.abi.WindowServiceStatus)]u8 = .{0} ** @sizeOf(r4os.abi.WindowServiceStatus);
-        const got = self.sys.serviceCall(info.handle, r4os.abi.window_service_op_status, "", &header, response[0..], self.sys.ticksFromMilliseconds(250));
-        if (got < @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceStatus))) or header.status != r4os.abi.service_api_result_ok) return -1;
+        const got = self.window_session.call(self, r4os.abi.window_service_op_status, "", &response);
+        if (got != @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceStatus)))) return -1;
         const out_bytes: [*]u8 = @ptrCast(out);
         @memcpy(out_bytes[0..@sizeOf(r4os.abi.WindowServiceStatus)], response[0..@sizeOf(r4os.abi.WindowServiceStatus)]);
         if (out.magic != r4os.abi.window_service_status_magic or out.version != r4os.abi.window_service_status_version) return -1;
         return 0;
     }
 
-    pub fn windowServiceSnapshot(self: *const Context, out: *r4os.abi.WindowServiceSnapshot) i32 {
-        var info: r4os.abi.ServiceInfo = .{};
-        const rc = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
-        if (rc != r4os.abi.service_api_result_ok or info.handle == 0) return rc;
-        defer _ = self.sys.serviceClose(info.handle);
-
-        var header: r4os.abi.ServiceMessageHeader = .{};
+    pub fn windowServiceSnapshot(self: *Context, out: *r4os.abi.WindowServiceSnapshot) i32 {
         var response: [@sizeOf(r4os.abi.WindowServiceSnapshot)]u8 = .{0} ** @sizeOf(r4os.abi.WindowServiceSnapshot);
-        const got = self.sys.serviceCall(info.handle, r4os.abi.window_service_op_snapshot, "", &header, response[0..], self.sys.ticksFromMilliseconds(250));
-        if (got < @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceSnapshot))) or header.status != r4os.abi.service_api_result_ok) return -1;
+        const got = self.window_session.call(self, r4os.abi.window_service_op_snapshot, "", &response);
+        if (got != @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceSnapshot)))) return -1;
         const out_bytes: [*]u8 = @ptrCast(out);
         @memcpy(out_bytes[0..@sizeOf(r4os.abi.WindowServiceSnapshot)], response[0..@sizeOf(r4os.abi.WindowServiceSnapshot)]);
         if (out.magic != r4os.abi.window_service_snapshot_magic or out.version != r4os.abi.window_service_snapshot_version) return -1;
         return 0;
     }
 
-    pub fn windowServiceRecord(self: *const Context, op: u16, record: *const r4os.abi.WindowServiceRecord, out: *r4os.abi.WindowServiceResult) i32 {
-        var info: r4os.abi.ServiceInfo = .{};
-        const rc = self.sys.serviceOpen(r4os.abi.window_service_name, &info);
-        if (rc != r4os.abi.service_api_result_ok or info.handle == 0) return rc;
-        defer _ = self.sys.serviceClose(info.handle);
-
-        var header: r4os.abi.ServiceMessageHeader = .{};
+    pub fn windowServiceRecord(self: *Context, op: u16, record: *const r4os.abi.WindowServiceRecord, out: *r4os.abi.WindowServiceResult) i32 {
         var response: [@sizeOf(r4os.abi.WindowServiceResult)]u8 = .{0} ** @sizeOf(r4os.abi.WindowServiceResult);
         const request: [*]const u8 = @ptrCast(record);
-        const got = self.sys.serviceCall(info.handle, op, request[0..@sizeOf(r4os.abi.WindowServiceRecord)], &header, response[0..], self.sys.ticksFromMilliseconds(250));
-        if (got < @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceResult))) or header.status != r4os.abi.service_api_result_ok) return -1;
+        const got = self.window_session.call(self, op, request[0..@sizeOf(r4os.abi.WindowServiceRecord)], &response);
+        if (got != @as(i32, @intCast(@sizeOf(r4os.abi.WindowServiceResult)))) return -1;
         const out_bytes: [*]u8 = @ptrCast(out);
         @memcpy(out_bytes[0..@sizeOf(r4os.abi.WindowServiceResult)], response[0..@sizeOf(r4os.abi.WindowServiceResult)]);
         if (out.magic != r4os.abi.window_service_result_magic or out.version != r4os.abi.window_service_result_version) return -1;
