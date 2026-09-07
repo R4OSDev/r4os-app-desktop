@@ -39,7 +39,7 @@ pub const SceneBuffer = struct {
     }
 
     pub fn setPaintClip(self: *SceneBuffer, rect: surface.Rect) void {
-        self.paint_clip = self.clipRect(rect);
+        self.paint_clip = self.clipRect(rect) orelse .{ .x = 0, .y = 0, .w = 0, .h = 0 };
     }
 
     pub fn clearPaintClip(self: *SceneBuffer) void {
@@ -392,6 +392,18 @@ fn blendXrgb(destination: u32, source: u32, alpha: u8) u32 {
 
 fn blendChannel(source: u32, destination: u32, alpha: u32, inverse: u32) u32 {
     return (((source & 0xFF) * alpha + (destination & 0xFF) * inverse + 127) / 255) & 0xFF;
+}
+
+test "offscreen paint clip stays empty instead of reverting to the full scene" {
+    var pixels: [16]u32 = .{0x123456} ** 16;
+    var scene = SceneBuffer{};
+    try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&pixels), 4, 4));
+    scene.setPaintClip(.{ .x = 8, .y = 8, .w = 1, .h = 1 });
+    scene.fillRect(scene.fullRect(), 0xFFFFFF);
+    for (pixels) |pixel| try std.testing.expectEqual(@as(u32, 0x123456), pixel);
+    scene.clearPaintClip();
+    scene.fillRect(scene.fullRect(), 0xFFFFFF);
+    for (pixels) |pixel| try std.testing.expectEqual(@as(u32, 0xFFFFFF), pixel);
 }
 
 test "scene buffer fills clipped rectangles" {

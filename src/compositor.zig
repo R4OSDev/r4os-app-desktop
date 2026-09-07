@@ -1,3 +1,4 @@
+const std = @import("std");
 const r4os = @import("r4os");
 const desk_api = @import("api.zig");
 const desktop_config = @import("desktop_config.zig");
@@ -269,10 +270,127 @@ fn drawWindows(
 ) void {
     for (windows, 0..) |*win, index| {
         if (index == active_window) continue;
+        if (coveredByHigherWindow(windows, index, active_window, damage)) {
+            stats.windows_visited +%= 1;
+            stats.windows_culled +%= 1;
+            continue;
+        }
         drawWindow(ctx, win, gui_frames, index, false, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
     }
     if (active_window < windows.len) {
         drawWindow(ctx, &windows[active_window], gui_frames, active_window, true, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, stats);
+    }
+}
+
+fn coveredByHigherWindow(windows: []const window.Window, index: usize, active: usize, damage: surface.Rect) bool {
+    const win = &windows[index];
+    if (!win.visible or win.minimized or index == active) return false;
+    const frame = win.frameSurface().rect;
+    const left = @max(frame.x, damage.x);
+    const top = @max(frame.y, damage.y);
+    const right = @min(frame.right(), damage.right());
+    const bottom = @min(frame.bottom(), damage.bottom());
+    if (right <= left or bottom <= top) return false;
+    for (windows, 0..) |*above, above_index| {
+        if (above_index == index or (above_index != active and above_index < index)) continue;
+        if (!above.visible or above.minimized) continue;
+        // appWindow paints its entire rectangular frame and client opaquely.
+        const cover = above.frameSurface().rect;
+        if (cover.x <= left and cover.y <= top and cover.right() >= right and cover.bottom() >= bottom) return true;
+    }
+    return false;
+}
+
+test "opaque higher windows cull only covered damage and respect visibility and order" {
+    var windows = [_]window.Window{.{
+        .kind = .app,
+        .x = 10,
+        .y = 10,
+        .w = 100,
+        .h = 100,
+        .normal_x = 10,
+        .normal_y = 10,
+        .normal_w = 100,
+        .normal_h = 100,
+    }} ** 4;
+    const damage = surface.Rect{ .x = 20, .y = 20, .w = 5, .h = 5 };
+    for (0..3) |index| try std.testing.expect(coveredByHigherWindow(&windows, index, 3, damage));
+    try std.testing.expect(!coveredByHigherWindow(&windows, 3, 3, damage));
+    windows[1].visible = false;
+    windows[2].minimized = true;
+    windows[3].x = 22;
+    try std.testing.expect(!coveredByHigherWindow(&windows, 0, 3, damage));
+    try std.testing.expect(coveredByHigherWindow(&windows, 0, 3, .{ .x = 23, .y = 20, .w = 2, .h = 2 }));
+    windows[3].visible = false;
+    try std.testing.expect(!coveredByHigherWindow(&windows, 0, 3, damage));
+    windows[1].visible = true;
+    windows[2].minimized = false;
+    try std.testing.expect(coveredByHigherWindow(&windows, 0, 2, damage));
+    try std.testing.expect(coveredByHigherWindow(&windows, 1, 2, damage));
+    try std.testing.expect(!coveredByHigherWindow(&windows, 2, 2, damage));
+}
+
+test "occlusion composition matches complete painter order after move hide minimize and focus" {
+    const scene_buffer = @import("scene_buffer.zig");
+    var windows = [_]window.Window{.{
+        .kind = .app,
+        .x = 10,
+        .y = 10,
+        .w = 200,
+        .h = 140,
+        .normal_x = 10,
+        .normal_y = 10,
+        .normal_w = 200,
+        .normal_h = 140,
+    }} ** 4;
+    const commands = [_]r4os.abi.GuiFrameCommand{
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x112233 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x225533 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x334477 },
+        .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x886644 },
+    };
+    var frames: [4]gui_frame_snapshot.View = undefined;
+    for (&frames, 0..) |*frame, i| frame.* = .{ .valid = true, .commands = commands[i .. i + 1] };
+    var reference: [320 * 200]u32 = undefined;
+    var actual: [320 * 200]u32 = undefined;
+    var scene = scene_buffer.SceneBuffer{};
+    var ctx: desk_api.Context = undefined;
+    ctx.scene = &scene;
+    for (0..6) |scenario| {
+        var active: usize = 3;
+        switch (scenario) {
+            1 => windows[3].x = 80,
+            2 => windows[3].visible = false,
+            3 => windows[2].minimized = true,
+            4 => {
+                windows[0].x = 40;
+                active = 0;
+            },
+            5 => {
+                windows[2].minimized = false;
+                active = 2;
+            },
+            else => {},
+        }
+        @memset(&reference, 0xABCDEF);
+        @memset(&actual, 0xABCDEF);
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&reference), 320, 200));
+        const damage = scene.fullRect();
+        var baseline_stats = CullStats{};
+        for (&windows, 0..) |*win, i| {
+            if (i == active) continue;
+            drawWindow(&ctx, win, &frames, i, false, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, damage, &baseline_stats);
+        }
+        drawWindow(&ctx, &windows[active], &frames, active, true, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, damage, &baseline_stats);
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&actual), 320, 200));
+        var stats = CullStats{};
+        drawWindows(&ctx, &windows, &frames, active, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, damage, &stats);
+        try std.testing.expectEqualSlices(u32, &reference, &actual);
+        if (scenario == 0) {
+            try std.testing.expectEqual(@as(u32, 3), stats.windows_culled);
+            try std.testing.expectEqual(@as(u64, 4), baseline_stats.gui_frame_commands);
+            try std.testing.expectEqual(@as(u64, 1), stats.gui_frame_commands);
+        }
     }
 }
 
@@ -304,11 +422,9 @@ fn drawWindow(
     const scroll_offset = if (index < console_scroll_offsets.len) console_scroll_offsets[index] else 0;
     const console_snapshot = if (index < console_snapshots.len) &console_snapshots[index] else null;
     const gui_frame = if (index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
-    if (gui_frame.valid) {
-        stats.gui_frame_commands +%= @intCast(gui_frame.commands.len);
-        stats.gui_resource_bytes +%= @intCast(gui_frame.resources.len);
-    }
-    draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    const replay = draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    stats.gui_frame_commands +%= replay.commands;
+    stats.gui_resource_bytes +%= replay.resource_bytes;
 }
 
 fn countCulledWindows(windows: []const window.Window, stats: *CullStats) void {

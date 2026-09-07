@@ -1170,10 +1170,10 @@ pub fn appWindow(
     cursor_blink_on: bool,
     hover_target: model.UiTarget,
     pressed_target: model.UiTarget,
-) void {
+) ReplayStats {
     _ = terminal_codepage;
     _ = terminal_scroll_offset;
-    if (!win.visible or win.minimized) return;
+    if (!win.visible or win.minimized) return .{};
     const frame = win.frameSurface();
     const title_surface = win.titleSurface();
     const client = win.clientSurface();
@@ -1225,7 +1225,7 @@ pub fn appWindow(
             if (win.close_requested) {
                 textLit(ctx, client.rect.x + 10, client.rect.y + 46, "Close requested...", theme.text, theme.client_bg);
             } else if (useCommittedFrameCommands(gui_frame)) {
-                hostedFrameCommands(ctx, client.rect, gui_frame);
+                return hostedFrameCommands(ctx, client.rect, gui_frame);
             } else {
                 var id_buf: [12]u8 = .{0} ** 12;
                 writeU32Z(id_buf[0..], win.instance_id);
@@ -1240,6 +1240,7 @@ pub fn appWindow(
             }
         },
     }
+    return .{};
 }
 
 fn useCommittedFrameCommands(frame: gui_frame_snapshot.View) bool {
@@ -1812,17 +1813,25 @@ fn maxTarget(win: *const window.Window, index: usize) model.UiTarget {
     return if (win.maximized) .wm_max_full else .wm_max_normal;
 }
 
-fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame: gui_frame_snapshot.View) void {
+pub const ReplayStats = struct { commands: u64 = 0, resource_bytes: u64 = 0 };
+
+fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame: gui_frame_snapshot.View) ReplayStats {
     // A cursor-only present replays the desktop into a small dirty rectangle.
     // Reject whole frame commands before they allocate or walk their payload;
     // the SceneBuffer still clips the remaining partial command precisely.
     const paint_bounds = ctx.scenePaintBounds() orelse bounds;
-    for (frame.commands) |command| {
+    const local_clip = @import("gui_command_index.zig").Bounds.localClip(bounds, paint_bounds);
+    var selection = frame.command_index.select(frame.commands.len, local_clip);
+    var stats = ReplayStats{};
+    while (selection.next()) |command_index| {
+        const command = frame.commands[command_index];
+        stats.commands +%= 1;
         if (command.version != r4os.abi.gui_frame_command_version or command.size != r4os.abi.gui_frame_command_size) continue;
         if (frameCommandHasBoundedOutput(command.kind)) {
             const item = frameCommandPaintRect(bounds, command) orelse continue;
             if (!rectsIntersect(item, paint_bounds)) continue;
         }
+        stats.resource_bytes +|= command.resource_bytes;
         switch (command.kind) {
             r4os.abi.gui_frame_command_kind_clear => {
                 if (command.resource_bytes != 0 or command.parameter0 != 0 or command.parameter1 != 0) continue;
@@ -1838,11 +1847,8 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
                 const text = frameResource(frame.resources, command) orelse continue;
                 const x = std.math.add(i32, bounds.x, command.x) catch continue;
                 const y = std.math.add(i32, bounds.y, command.y) catch continue;
-                const raw_text_h = if (command.text_h != 0) command.text_h else command.line_height;
-                const text_h: i32 = @intCast(@min(raw_text_h, @as(u32, @intCast(std.math.maxInt(i32)))));
-                const text_bottom = std.math.add(i32, y, @max(1, text_h)) catch continue;
-                if (x >= bounds.right() or y >= bounds.bottom() or text_bottom <= bounds.y) continue;
                 const text_clip = rectIntersection(bounds, paint_bounds) orelse continue;
+                if (x >= text_clip.right() or y >= text_clip.bottom()) continue;
                 ctx.paintTextFontSlice(command.font_id, x, y, text, command.fg, command.bg, text_clip);
             },
             r4os.abi.gui_frame_command_kind_raster => hostedFrameRaster(ctx, bounds, command, frame.resources),
@@ -1859,6 +1865,7 @@ fn hostedFrameCommands(ctx: *const desk_api.Context, bounds: surface.Rect, frame
             else => {},
         }
     }
+    return stats;
 }
 
 fn frameCommandHasBoundedOutput(kind: u32) bool {
@@ -2932,6 +2939,47 @@ fn utf8SequenceLengthAt(value: []const u8, start: usize) usize {
     if (first == 0xF0 and value[start + 1] < 0x90) return 1;
     if (first == 0xF4 and value[start + 1] >= 0x90) return 1;
     return expected;
+}
+
+test "indexed dirty replay matches the full painter including text alpha and clear order" {
+    const index_module = @import("gui_command_index.zig");
+    var commands: [1027]r4os.abi.GuiFrameCommand = undefined;
+    commands[0] = .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x203040 };
+    for (commands[1..1025], 0..) |*command, i| command.* = .{
+        .kind = r4os.abi.gui_frame_command_kind_rect,
+        .x = @intCast((i % 32) * 2),
+        .y = @intCast((i / 32) * 2),
+        .w = 2,
+        .h = 2,
+        .rgb = @intCast(i * 12345 & 0xFFFFFF),
+    };
+    const resources = "\x80" ** 64 ++ "é\n中";
+    commands[1025] = .{ .kind = r4os.abi.gui_frame_command_kind_alpha8, .x = 4, .y = 4, .w = 8, .h = 8, .rgb = 0xFFFFFF, .resource_bytes = 64 };
+    // Missing producer metrics must not discard the second visible line.
+    commands[1026] = .{ .kind = r4os.abi.gui_frame_command_kind_text, .x = 10, .y = -8, .fg = 0xFFFFFF, .bg = 0x111111, .resource_offset = 64, .resource_bytes = 6 };
+    var index = index_module.Index{};
+    defer index.deinit(std.testing.allocator);
+    index.update(std.testing.allocator, &commands, resources, 0);
+    var frame = gui_frame_snapshot.View{ .valid = true, .commands = &commands, .resources = resources };
+    var expected: [64 * 64]u32 = .{0} ** (64 * 64);
+    var actual: [64 * 64]u32 = .{0} ** (64 * 64);
+    var scene = scene_buffer.SceneBuffer{};
+    var ctx: desk_api.Context = undefined;
+    ctx.scene = &scene;
+    try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&expected), 64, 64));
+    const bounds = scene.fullRect();
+    _ = hostedFrameCommands(&ctx, bounds, frame);
+    frame.command_index = index.view();
+    try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&actual), 64, 64));
+    var y: i32 = 0;
+    while (y < 64) : (y += 5) {
+        var x: i32 = 0;
+        while (x < 64) : (x += 3) {
+            scene.setPaintClip(.{ .x = x, .y = y, .w = 3, .h = 5 });
+            _ = hostedFrameCommands(&ctx, bounds, frame);
+        }
+    }
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
 }
 
 test "hosted command text clipping keeps visible prefix" {

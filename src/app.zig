@@ -8393,28 +8393,7 @@ fn rectsOverlap(a: surface.Rect, b: surface.Rect) bool {
 }
 
 fn appendDamageRegion(regions: *[surface.max_damage_regions]surface.Rect, count: *usize, rect: surface.Rect) void {
-    if (rect.isEmpty()) return;
-    var merged = rect;
-    var index: usize = 0;
-    while (index < count.*) {
-        if (!rectsOverlap(regions[index], merged)) {
-            index += 1;
-            continue;
-        }
-        merged = merged.merged(regions[index]);
-        count.* -= 1;
-        regions[index] = regions[count.*];
-        index = 0;
-    }
-    if (count.* < regions.len) {
-        regions[count.*] = merged;
-        count.* += 1;
-        return;
-    }
-    var bounds = merged;
-    for (regions[0..count.*]) |existing| bounds = bounds.merged(existing);
-    regions[0] = bounds;
-    count.* = 1;
+    surface.appendDamageRegion(regions, count, rect);
 }
 
 fn clipDamageRect(rect: surface.Rect, screen_w: i32, screen_h: i32) ?surface.Rect {

@@ -617,11 +617,37 @@ fn coverageFor(parsed: Parsed, x: usize, y: usize, predicate: anytype) u8 {
     return @intCast((covered * 255 + 2) / sample_offsets.len);
 }
 
-fn fillMask(mask: []u8, width: usize, height: usize, parsed: Parsed, predicate: anytype) void {
+const MaskRect = struct {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+};
+
+fn maskRect(scene: *const scene_buffer.SceneBuffer, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, radius: usize) ?MaskRect {
+    const clip = scene.paintBounds();
+    const origin_x = @as(i64, bounds.x) + command.x;
+    const origin_y = @as(i64, bounds.y) + command.y;
+    const left = @max(@max(@as(i64, bounds.x), clip.x), origin_x);
+    const top = @max(@max(@as(i64, bounds.y), clip.y), origin_y);
+    const right = @min(@min(@as(i64, bounds.right()), clip.right()), origin_x + command.w);
+    const bottom = @min(@min(@as(i64, bounds.bottom()), clip.bottom()), origin_y + command.h);
+    if (clip.isEmpty() or right <= left or bottom <= top) return null;
+    // A separable box blur needs the original mask within one radius on each
+    // axis. Keeping that halo makes clipped replay identical to a full mask.
+    const halo: i64 = @intCast(radius);
+    const x: usize = @intCast(@max(0, left - origin_x - halo));
+    const y: usize = @intCast(@max(0, top - origin_y - halo));
+    const end_x: usize = @intCast(@min(@as(i64, command.w), right - origin_x + halo));
+    const end_y: usize = @intCast(@min(@as(i64, command.h), bottom - origin_y + halo));
+    return .{ .x = x, .y = y, .w = end_x - x, .h = end_y - y };
+}
+
+fn fillMask(mask: []u8, area: MaskRect, parsed: Parsed, predicate: anytype) void {
     var y: usize = 0;
-    while (y < height) : (y += 1) {
+    while (y < area.h) : (y += 1) {
         var x: usize = 0;
-        while (x < width) : (x += 1) mask[y * width + x] = coverageFor(parsed, x, y, predicate);
+        while (x < area.w) : (x += 1) mask[y * area.w + x] = coverageFor(parsed, x + area.x, y + area.y, predicate);
     }
 }
 
@@ -634,26 +660,26 @@ fn applyColorAlpha(mask: []u8, argb: u32) bool {
     return true;
 }
 
-fn blendMask(scene: *scene_buffer.SceneBuffer, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, mask: []u8, argb: u32) bool {
+fn blendMask(scene: *scene_buffer.SceneBuffer, bounds: surface.Rect, command: r4os.abi.GuiFrameCommand, area: MaskRect, mask: []u8, argb: u32) bool {
     if (!applyColorAlpha(mask, argb)) return false;
-    const destination_x = @as(i64, bounds.x) + @as(i64, command.x);
-    const destination_y = @as(i64, bounds.y) + @as(i64, command.y);
+    const destination_x = @as(i64, bounds.x) + @as(i64, command.x) + @as(i64, @intCast(area.x));
+    const destination_y = @as(i64, bounds.y) + @as(i64, command.y) + @as(i64, @intCast(area.y));
     const left = @max(destination_x, @as(i64, bounds.x));
     const top = @max(destination_y, @as(i64, bounds.y));
-    const right = @min(destination_x + command.w, @as(i64, bounds.right()));
-    const bottom = @min(destination_y + command.h, @as(i64, bounds.bottom()));
+    const right = @min(destination_x + @as(i64, @intCast(area.w)), @as(i64, bounds.right()));
+    const bottom = @min(destination_y + @as(i64, @intCast(area.h)), @as(i64, bounds.bottom()));
     if (right <= left or bottom <= top) return false;
     if (left < std.math.minInt(i32) or top < std.math.minInt(i32) or right > std.math.maxInt(i32) or bottom > std.math.maxInt(i32)) return false;
     const source_x: usize = @intCast(left - destination_x);
     const source_y: usize = @intCast(top - destination_y);
-    const stride: usize = command.w;
+    const stride: usize = area.w;
     const offset = source_y * stride + source_x;
     return scene.blendAlpha8(
         @intCast(left),
         @intCast(top),
         @intCast(right - left),
         @intCast(bottom - top),
-        command.w,
+        @intCast(area.w),
         argb & 0x00FF_FFFF,
         mask[offset..],
     );
@@ -709,6 +735,8 @@ pub fn replay(
     resource: []const u8,
 ) Result {
     const parsed = parse(command, resource) orelse return .invalid;
+    const blur_radius: usize = if (command.kind == r4os.abi.gui_frame_command_kind_shadow) @intFromFloat(@ceil(parsed.shadow_blur)) else 0;
+    const area = maskRect(scene, bounds, command, blur_radius) orelse return .empty;
     var geometry_storage = Geometry{};
     var geometry: ?*const Geometry = null;
     if (parsed.geometry_kind == r4os.abi.gui_shape_geometry_kind_path) {
@@ -717,8 +745,8 @@ pub fn replay(
     }
     defer geometry_storage.deinit(allocator);
 
-    const width: usize = command.w;
-    const height: usize = command.h;
+    const width = area.w;
+    const height = area.h;
     const pixel_count = std.math.mul(usize, width, height) catch return .invalid;
     const mask = allocator.alloc(u8, pixel_count) catch return .out_of_memory;
     defer allocator.free(mask);
@@ -726,17 +754,17 @@ pub fn replay(
 
     switch (command.kind) {
         r4os.abi.gui_frame_command_kind_path_fill => {
-            fillMask(mask, width, height, parsed, struct {
+            fillMask(mask, area, parsed, struct {
                 parsed: Parsed,
                 geometry: *const Geometry,
                 fn contains(self: @This(), point: Point) bool {
                     return insidePath(self.geometry, point, self.parsed.fill_rule);
                 }
             }{ .parsed = parsed, .geometry = geometry.? });
-            drew = blendMask(scene, bounds, command, mask, parsed.fill_argb);
+            drew = blendMask(scene, bounds, command, area, mask, parsed.fill_argb);
         },
         r4os.abi.gui_frame_command_kind_path_stroke => {
-            fillMask(mask, width, height, parsed, struct {
+            fillMask(mask, area, parsed, struct {
                 geometry: *const Geometry,
                 width: f32,
                 join: LineJoin,
@@ -746,36 +774,36 @@ pub fn replay(
                     return insideStroke(self.geometry, point, self.width, self.join, self.cap, self.miter);
                 }
             }{ .geometry = geometry.?, .width = parsed.stroke_width, .join = parsed.line_join.?, .cap = parsed.line_cap.?, .miter = parsed.miter_limit });
-            drew = blendMask(scene, bounds, command, mask, parsed.stroke_argb);
+            drew = blendMask(scene, bounds, command, area, mask, parsed.stroke_argb);
         },
         r4os.abi.gui_frame_command_kind_rounded_rect => {
             const outer = normalizeRoundedRect(parsed.rounded);
-            fillMask(mask, width, height, parsed, struct {
+            fillMask(mask, area, parsed, struct {
                 rect: RoundedRect,
                 fn contains(self: @This(), point: Point) bool {
                     return insideRoundedRect(self.rect, point);
                 }
             }{ .rect = outer });
-            drew = blendMask(scene, bounds, command, mask, parsed.fill_argb) or drew;
+            drew = blendMask(scene, bounds, command, area, mask, parsed.fill_argb) or drew;
             const inner = innerRoundedRect(parsed);
-            fillMask(mask, width, height, parsed, struct {
+            fillMask(mask, area, parsed, struct {
                 outer: RoundedRect,
                 inner: ?RoundedRect,
                 fn contains(self: @This(), point: Point) bool {
                     return insideRoundedRect(self.outer, point) and (self.inner == null or !insideRoundedRect(self.inner.?, point));
                 }
             }{ .outer = outer, .inner = inner });
-            drew = blendMask(scene, bounds, command, mask, parsed.stroke_argb) or drew;
+            drew = blendMask(scene, bounds, command, area, mask, parsed.stroke_argb) or drew;
         },
         r4os.abi.gui_frame_command_kind_shadow => {
-            fillMask(mask, width, height, parsed, struct {
+            fillMask(mask, area, parsed, struct {
                 parsed: Parsed,
                 geometry: ?*const Geometry,
                 fn contains(self: @This(), point: Point) bool {
                     return shadowShapeContains(self.parsed, self.geometry, point);
                 }
             }{ .parsed = parsed, .geometry = geometry });
-            const radius: usize = @intFromFloat(@ceil(parsed.shadow_blur));
+            const radius = blur_radius;
             if (radius != 0) {
                 const scratch = allocator.alloc(u8, pixel_count) catch return .out_of_memory;
                 defer allocator.free(scratch);
@@ -787,7 +815,7 @@ pub fn replay(
                 while (y < height) : (y += 1) {
                     var x: usize = 0;
                     while (x < width) : (x += 1) {
-                        const original = coverageFor(parsed, x, y, struct {
+                        const original = coverageFor(parsed, x + area.x, y + area.y, struct {
                             parsed: Parsed,
                             geometry: ?*const Geometry,
                             fn contains(self: @This(), point: Point) bool {
@@ -798,7 +826,7 @@ pub fn replay(
                     }
                 }
             }
-            drew = blendMask(scene, bounds, command, mask, parsed.shadow_argb);
+            drew = blendMask(scene, bounds, command, area, mask, parsed.shadow_argb);
         },
         else => return .invalid,
     }
@@ -823,6 +851,52 @@ fn writeU32(bytes: []u8, offset: usize, value: u32) void {
     bytes[offset + 1] = @truncate(value >> 8);
     bytes[offset + 2] = @truncate(value >> 16);
     bytes[offset + 3] = @truncate(value >> 24);
+}
+
+fn expectDirtyReplay(command_value: r4os.abi.GuiFrameCommand, resource: []const u8) !void {
+    var reference: [48 * 40]u32 = .{0x203040} ** (48 * 40);
+    var actual: [48 * 40]u32 = undefined;
+    var full_scene = scene_buffer.SceneBuffer{};
+    var dirty_scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(full_scene.attach(std.mem.sliceAsBytes(&reference), 48, 40));
+    try std.testing.expect(dirty_scene.attach(std.mem.sliceAsBytes(&actual), 48, 40));
+    const client = surface.Rect{ .x = 3, .y = 2, .w = 40, .h = 35 };
+    var command = command_value;
+    command.x = -5;
+    command.y = -4;
+    try std.testing.expectEqual(Result.drawn, replay(std.testing.allocator, &full_scene, client, command, resource));
+    var y: i32 = 0;
+    while (y < 40) : (y += 5) {
+        var x: i32 = 0;
+        while (x < 48) : (x += 6) {
+            const clip = surface.Rect{ .x = x, .y = y, .w = 6, .h = 5 };
+            @memset(&actual, 0x203040);
+            dirty_scene.setPaintClip(clip);
+            const result = replay(std.testing.allocator, &dirty_scene, client, command, resource);
+            try std.testing.expect(result == .drawn or result == .empty);
+            for (actual, 0..) |pixel, i| {
+                const expected = if (clip.contains(@intCast(i % 48), @intCast(i / 48))) reference[i] else 0x203040;
+                try std.testing.expectEqual(expected, pixel);
+            }
+        }
+    }
+}
+
+test "tiny damage bounds shape scratch independently of the command dimensions" {
+    var pixels: [16 * 16]u32 = .{0} ** (16 * 16);
+    var scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&pixels), 16, 16));
+    scene.setPaintClip(.{ .x = 8, .y = 8, .w = 1, .h = 1 });
+    var bytes: [@sizeOf(r4os.abi.GuiShapeResource)]u8 = undefined;
+    const resource = try r4os.gui_shapes.roundedRect(&bytes, .{ .x = 0, .y = 0, .w = 2048, .h = 2048, .fill_argb = 0xFFFFFFFF });
+    const command = try r4os.gui_shapes.command(r4os.abi.gui_frame_command_kind_rounded_rect, 0, 0, 2048, 2048, 0, resource.len);
+    var scratch: [2]u8 = undefined;
+    var allocator = std.heap.FixedBufferAllocator.init(&scratch);
+    try std.testing.expectEqual(Result.drawn, replay(allocator.allocator(), &scene, scene.fullRect(), command, resource));
+    try std.testing.expectEqual(@as(u32, 0xFFFFFF), pixels[8 * 16 + 8]);
+    const crop = maskRect(&scene, scene.fullRect(), command, 0).?;
+    try std.testing.expectEqual(@as(usize, 1), crop.w * crop.h);
+    std.debug.print("[desktop-work] shape 2048x2048, one pixel dirty: mask pixels 4194304 -> 1, scratch budget 2 bytes\n", .{});
 }
 
 test "rounded rectangle golden covers elliptical corners unequal borders clipping and alpha" {
@@ -853,6 +927,7 @@ test "rounded rectangle golden covers elliptical corners unequal borders clippin
     const command = try r4os.gui_shapes.command(r4os.abi.gui_frame_command_kind_rounded_rect, 0, 0, 48, 36, 0, resource.len);
     try std.testing.expectEqual(Result.drawn, replay(std.testing.allocator, &scene, scene.fullRect(), command, resource));
     try std.testing.expectEqual(@as(u64, 0x42E1A133AE5B1F7E), pixelHash(pixels[0..]));
+    try expectDirtyReplay(command, resource);
 }
 
 test "path golden covers cubic circle fill and anti-aliased stroke" {
@@ -880,6 +955,8 @@ test "path golden covers cubic circle fill and anti-aliased stroke" {
     try std.testing.expectEqual(Result.drawn, replay(std.testing.allocator, &scene, scene.fullRect(), fill, resource));
     try std.testing.expectEqual(Result.drawn, replay(std.testing.allocator, &scene, scene.fullRect(), stroke, resource));
     try std.testing.expectEqual(@as(u64, 0x60DE7ABF2DCF1CFB), pixelHash(pixels[0..]));
+    try expectDirtyReplay(fill, resource);
+    try expectDirtyReplay(stroke, resource);
 }
 
 test "shadow golden covers separate outer and inset layers" {
@@ -915,6 +992,8 @@ test "shadow golden covers separate outer and inset layers" {
     const inset_command = try r4os.gui_shapes.command(r4os.abi.gui_frame_command_kind_shadow, 0, 0, 52, 40, 0, inset.len);
     try std.testing.expectEqual(Result.drawn, replay(std.testing.allocator, &scene, scene.fullRect(), inset_command, inset));
     try std.testing.expectEqual(@as(u64, 0xC80D01C04D523D7D), pixelHash(pixels[0..]));
+    try expectDirtyReplay(shadow_command, outer);
+    try expectDirtyReplay(inset_command, inset);
 }
 
 test "one logical command covers tiny and larger rounded shapes" {

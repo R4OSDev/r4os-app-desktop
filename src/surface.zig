@@ -106,12 +106,61 @@ pub const cursor_w: i32 = 12;
 pub const cursor_h: i32 = 18;
 pub const max_damage_regions: usize = 8;
 
+/// Keep the cheapest pair when the presenter capacity is reached. Both the
+/// persistent tracker and the final cursor/taskbar collector use this policy.
+pub fn appendDamageRegion(regions: *[max_damage_regions]Rect, count: *usize, rect: Rect) void {
+    if (rect.isEmpty()) return;
+    var merged = rect;
+    var index: usize = 0;
+    while (index < count.*) {
+        if (!regions[index].intersects(merged)) {
+            index += 1;
+            continue;
+        }
+        merged = merged.merged(regions[index]);
+        count.* -= 1;
+        regions[index] = regions[count.*];
+        index = 0;
+    }
+    if (count.* < regions.len) {
+        regions[count.*] = merged;
+        count.* += 1;
+        return;
+    }
+    var candidates: [max_damage_regions + 1]Rect = undefined;
+    @memcpy(candidates[0..count.*], regions[0..count.*]);
+    candidates[count.*] = merged;
+    var best_a: usize = 0;
+    var best_b: usize = 1;
+    var best_cost: u64 = std.math.maxInt(u64);
+    for (candidates, 0..) |a, ai| {
+        for (candidates[ai + 1 ..], ai + 1..) |b, bi| {
+            const cost = area(a.merged(b)) -| (area(a) + area(b));
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_a = ai;
+                best_b = bi;
+            }
+        }
+    }
+    candidates[best_a] = candidates[best_a].merged(candidates[best_b]);
+    count.* = 0;
+    for (candidates, 0..) |candidate, candidate_index| {
+        if (candidate_index == best_b) continue;
+        regions[count.*] = candidate;
+        count.* += 1;
+    }
+}
+
+fn area(rect: Rect) u64 {
+    return @as(u64, @intCast(@max(0, rect.w))) * @as(u64, @intCast(@max(0, rect.h)));
+}
+
 pub const Dirty = struct {
     active: bool = false,
     bounds: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     regions: [max_damage_regions]Rect = .{Rect{ .x = 0, .y = 0, .w = 0, .h = 0 }} ** max_damage_regions,
     count: usize = 0,
-    collapsed: bool = false,
 
     pub fn invalidate(self: *Dirty, rect: Rect) void {
         if (rect.isEmpty()) return;
@@ -121,31 +170,7 @@ pub const Dirty = struct {
         } else {
             self.bounds = self.bounds.merged(rect);
         }
-        if (self.collapsed) {
-            self.regions[0] = self.bounds;
-            return;
-        }
-
-        var merged_rect = rect;
-        var index: usize = 0;
-        while (index < self.count) {
-            if (!self.regions[index].intersects(merged_rect)) {
-                index += 1;
-                continue;
-            }
-            merged_rect = merged_rect.merged(self.regions[index]);
-            self.count -= 1;
-            self.regions[index] = self.regions[self.count];
-            index = 0;
-        }
-        if (self.count < max_damage_regions) {
-            self.regions[self.count] = merged_rect;
-            self.count += 1;
-            return;
-        }
-        self.regions[0] = self.bounds;
-        self.count = 1;
-        self.collapsed = true;
+        appendDamageRegion(&self.regions, &self.count, rect);
     }
 
     pub fn invalidateSurface(self: *Dirty, item: Surface) void {
@@ -272,7 +297,38 @@ test "dirty tracker preserves separated regions and bounds capacity fallback" {
     while (index <= max_damage_regions) : (index += 1) {
         overflow.invalidate(.{ .x = @intCast(index * 10), .y = 0, .w = 2, .h = 2 });
     }
-    try std.testing.expect(overflow.collapsed);
-    try std.testing.expectEqual(@as(usize, 1), overflow.count);
-    try std.testing.expectEqual(overflow.bounds, overflow.regions[0]);
+    try std.testing.expectEqual(max_damage_regions, overflow.count);
+    var painted_area: u64 = 0;
+    for (overflow.regions[0..overflow.count]) |rect| painted_area += area(rect);
+    try std.testing.expectEqual(@as(u64, 52), painted_area);
+    for (0..max_damage_regions + 1) |point| {
+        var covered = false;
+        for (overflow.regions[0..overflow.count]) |rect| covered = covered or rect.contains(@intCast(point * 10), 0);
+        try std.testing.expect(covered);
+    }
+}
+
+test "ninth scattered pixel preserves bounded damage instead of a full screen" {
+    var dirty = Dirty{};
+    const points = [_]Rect{
+        .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .{ .x = 2, .y = 0, .w = 1, .h = 1 },
+        .{ .x = 300, .y = 200, .w = 1, .h = 1 },
+        .{ .x = 600, .y = 200, .w = 1, .h = 1 },
+        .{ .x = 900, .y = 200, .w = 1, .h = 1 },
+        .{ .x = 1200, .y = 600, .w = 1, .h = 1 },
+        .{ .x = 1500, .y = 600, .w = 1, .h = 1 },
+        .{ .x = 1700, .y = 800, .w = 1, .h = 1 },
+        .{ .x = 1919, .y = 1079, .w = 1, .h = 1 },
+    };
+    for (points) |point| dirty.invalidate(point);
+    try std.testing.expectEqual(max_damage_regions, dirty.count);
+    var painted_area: u64 = 0;
+    for (dirty.regions[0..dirty.count]) |rect| painted_area += area(rect);
+    try std.testing.expectEqual(@as(u64, 10), painted_area);
+    for (points) |point| {
+        var covered = false;
+        for (dirty.regions[0..dirty.count]) |rect| covered = covered or rect.contains(point.x, point.y);
+        try std.testing.expect(covered);
+    }
 }

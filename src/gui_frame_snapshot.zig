@@ -1,5 +1,6 @@
 const std = @import("std");
 const r4os = @import("r4os");
+const gui_command_index = @import("gui_command_index.zig");
 
 const command_alignment = @alignOf(r4os.abi.GuiFrameCommand);
 const resource_alignment = @alignOf(u32);
@@ -20,6 +21,7 @@ pub const View = struct {
     resources: []const u8 = &.{},
     shared_rasters: []const r4os.abi.GuiSharedRasterMap = &.{},
     damage_regions: []const r4os.abi.DisplayDamageRect = &.{},
+    command_index: gui_command_index.View = .{},
 };
 
 const Buffer = struct {
@@ -35,6 +37,7 @@ const Buffer = struct {
     damage_count: usize = 0,
     full_damage: bool = true,
     valid: bool = false,
+    command_index: gui_command_index.Index = .{},
 
     fn commands(self: *Buffer) []r4os.abi.GuiFrameCommand {
         const memory = self.command_memory orelse return &.{};
@@ -94,6 +97,7 @@ const Buffer = struct {
         std.debug.assert(self.shared_raster_count == 0);
         if (self.command_memory) |memory| allocator.free(memory);
         if (self.resource_memory) |memory| allocator.free(memory);
+        self.command_index.deinit(allocator);
         self.* = .{};
     }
 };
@@ -148,6 +152,7 @@ pub const Cache = struct {
             .resources = self.active.constResources(),
             .shared_rasters = self.active.shared_rasters[0..self.active.shared_raster_count],
             .damage_regions = self.active.damage_regions[0..self.active.damage_count],
+            .command_index = self.active.command_index.view(),
         };
     }
 
@@ -242,6 +247,7 @@ pub const Cache = struct {
         self.staging.info = read_info;
         self.staging.full_damage = true;
         self.staging.damage_count = 0;
+        self.staging.command_index.update(allocator, self.staging.constCommands(), self.staging.constResources(), 0);
         self.staging.valid = true;
         std.mem.swap(Buffer, &self.active, &self.staging);
         releaseBufferSharedRasters(&self.staging, reader);
@@ -302,6 +308,7 @@ pub const Cache = struct {
         if (self.staging.damage_count != 0) {
             @memcpy(self.staging.damage_regions[0..self.staging.damage_count], damage_regions[0..self.staging.damage_count]);
         }
+        self.staging.command_index.update(allocator, self.staging.constCommands(), self.staging.constResources(), 0);
         self.staging.valid = true;
         std.mem.swap(Buffer, &self.active, &self.staging);
         releaseBufferSharedRasters(&self.staging, reader);
@@ -376,6 +383,7 @@ pub const Cache = struct {
         }
         self.active.command_len = total_command_count;
         self.active.resource_len = total_resource_bytes;
+        self.active.command_index.update(allocator, self.active.constCommands(), self.active.constResources(), command_base);
         self.active.info = info;
         self.active.full_damage = false;
         self.active.damage_count = read_info.damage_count;

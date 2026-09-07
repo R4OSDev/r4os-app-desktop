@@ -101,6 +101,16 @@ pub fn build(b: *std.Build) void {
     });
     draw_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
     const draw_tests = b.addTest(.{ .root_module = draw_module });
+    const compositor_module = b.createModule(.{
+        .root_source_file = b.path("src/compositor.zig"),
+        .target = test_target,
+        .optimize = test_optimize,
+    });
+    compositor_module.addImport("r4os", host_r4os);
+    compositor_module.addImport("r4std", r4std);
+    compositor_module.addImport("r4std_test", r4std_test);
+    compositor_module.addImport("r4img", r4img);
+    const compositor_tests = b.addTest(.{ .root_module = compositor_module });
     const gui_shape_renderer_module = b.createModule(.{
         .root_source_file = b.path("src/gui_shape_renderer.zig"),
         .target = test_target,
@@ -257,6 +267,7 @@ pub fn build(b: *std.Build) void {
     const physical_input_tests = b.addTest(.{ .root_module = physical_input_module });
 
     const run_model_tests = b.addRunArtifact(model_tests);
+    const run_compositor_tests = b.addRunArtifact(compositor_tests);
     const run_window_tests = b.addRunArtifact(window_tests);
     const run_surface_tests = b.addRunArtifact(surface_tests);
     const run_paint_tests = b.addRunArtifact(paint_tests);
@@ -288,6 +299,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_draw_tests.step);
     test_step.dependOn(&run_gui_shape_renderer_tests.step);
     test_step.dependOn(&run_scene_buffer_tests.step);
+    test_step.dependOn(&run_compositor_tests.step);
     test_step.dependOn(&run_start_menu_tests.step);
     test_step.dependOn(&run_desktop_config_tests.step);
     test_step.dependOn(&run_desktop_folder_tests.step);

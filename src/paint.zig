@@ -130,24 +130,43 @@ pub fn textFontSlice(
 ) void {
     const revision = fontCacheRevision(draw, font_id);
     const layout = fontLayout(draw, font_id, revision);
-    const advance: i32 = @intCast(layout.cell_width);
-    const line_h: i32 = @intCast(layout.cell_height);
-    const start_x = x;
-    var px = x;
-    var py = y;
+    var cursor = VisibleText{
+        .value = value,
+        .bounds = bounds,
+        .start_x = x,
+        .x = x,
+        .y = y,
+        .advance = @intCast(layout.cell_width),
+        .line_h = @intCast(layout.cell_height),
+    };
+    while (cursor.next()) |cell| {
+        glyphClipped(draw, font_id, revision, layout, cell.x, cell.y, cell.codepoint, fg, bg, bounds);
+    }
+}
+
+/// Snapshot bounds use the actual UTF-8 resource, not optional producer
+/// metrics. Imported fonts use the renderer's maximum cell size, so a font
+/// replacement or fallback cannot invalidate the generation's spatial index.
+pub fn conservativeTextExtent(font_id: u32, value: []const u8) struct { width: i64, height: i64 } {
+    const cell_w: i64 = if (font_id == r4os.abi.gui_font_builtin_id) glyph_base_w else glyph_max_w;
+    const cell_h: i64 = if (font_id == r4os.abi.gui_font_builtin_id) glyph_base_h else glyph_max_h;
+    var width: i64 = 0;
+    var line: i64 = 0;
+    var height: i64 = cell_h;
     var i: usize = 0;
     while (i < value.len) {
         const decoded = decodeUtf8Slice(value, i);
         i += decoded.consumed;
         if (decoded.codepoint == '\r') continue;
         if (decoded.codepoint == '\n') {
-            px = start_x;
-            py = addCoordinate(py, line_h);
-            continue;
+            line = 0;
+            height +|= cell_h;
+        } else {
+            line +|= cell_w;
+            width = @max(width, line);
         }
-        glyphClipped(draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg, bounds);
-        px = addCoordinate(px, advance);
     }
+    return .{ .width = width, .height = height };
 }
 
 pub fn textFontSliceScene(
@@ -163,24 +182,86 @@ pub fn textFontSliceScene(
 ) void {
     const revision = fontCacheRevision(draw, font_id);
     const layout = fontLayout(draw, font_id, revision);
-    const advance: i32 = @intCast(layout.cell_width);
-    const line_h: i32 = @intCast(layout.cell_height);
-    const start_x = x;
-    var px = x;
-    var py = y;
-    var i: usize = 0;
-    while (i < value.len) {
-        const decoded = decodeUtf8Slice(value, i);
-        i += decoded.consumed;
-        if (decoded.codepoint == '\r') continue;
-        if (decoded.codepoint == '\n') {
-            px = start_x;
-            py = addCoordinate(py, line_h);
-            continue;
-        }
-        glyphSceneClipped(scene, draw, font_id, revision, layout, px, py, decoded.codepoint, fg, bg, bounds);
-        px = addCoordinate(px, advance);
+    var cursor = VisibleText{
+        .value = value,
+        .bounds = bounds,
+        .start_x = x,
+        .x = x,
+        .y = y,
+        .advance = @intCast(layout.cell_width),
+        .line_h = @intCast(layout.cell_height),
+    };
+    while (cursor.next()) |cell| {
+        glyphSceneClipped(scene, draw, font_id, revision, layout, cell.x, cell.y, cell.codepoint, fg, bg, bounds);
     }
+}
+
+const VisibleText = struct {
+    value: []const u8,
+    bounds: surface.Rect,
+    start_x: i32,
+    x: i32,
+    y: i32,
+    advance: i32,
+    line_h: i32,
+    index: usize = 0,
+
+    const Cell = struct { x: i32, y: i32, codepoint: u32 };
+
+    fn next(self: *VisibleText) ?Cell {
+        if (self.bounds.isEmpty() or self.start_x >= self.bounds.right()) return null;
+        while (self.index < self.value.len) {
+            if (self.y >= self.bounds.bottom()) return null;
+            if (addCoordinate(self.y, self.line_h) <= self.bounds.y or self.x >= self.bounds.right()) {
+                // LF cannot occur inside a UTF-8 multibyte scalar. Whole hidden
+                // lines and right-hand suffixes need no decoding or glyph calls.
+                const newline = std.mem.indexOfScalar(u8, self.value[self.index..], '\n') orelse return null;
+                self.index += newline + 1;
+                self.x = self.start_x;
+                self.y = addCoordinate(self.y, self.line_h);
+                continue;
+            }
+            const decoded = decodeUtf8Slice(self.value, self.index);
+            self.index += decoded.consumed;
+            if (decoded.codepoint == '\r') continue;
+            if (decoded.codepoint == '\n') {
+                self.x = self.start_x;
+                self.y = addCoordinate(self.y, self.line_h);
+                continue;
+            }
+            const cell = Cell{ .x = self.x, .y = self.y, .codepoint = decoded.codepoint };
+            self.x = addCoordinate(self.x, self.advance);
+            if (addCoordinate(cell.x, self.advance) <= self.bounds.x) continue;
+            return cell;
+        }
+        return null;
+    }
+};
+
+test "frame text skips offscreen resources and preserves UTF8 edges after hidden lines" {
+    const content = "invisible ÄÖÜ\né中x\nsuffix";
+    var cursor = VisibleText{
+        .value = content,
+        .bounds = .{ .x = 9, .y = 8, .w = 1, .h = 8 },
+        .start_x = 0,
+        .x = 0,
+        .y = 0,
+        .advance = 8,
+        .line_h = 8,
+    };
+    try std.testing.expectEqual(VisibleText.Cell{ .x = 8, .y = 8, .codepoint = '中' }, cursor.next().?);
+    try std.testing.expect(cursor.next() == null);
+    var hidden = VisibleText{
+        .value = "A" ** 4096,
+        .bounds = .{ .x = 0, .y = 0, .w = 1, .h = 1 },
+        .start_x = 20,
+        .x = 20,
+        .y = 20,
+        .advance = 8,
+        .line_h = 8,
+    };
+    try std.testing.expect(hidden.next() == null);
+    try std.testing.expectEqual(@as(usize, 0), hidden.index);
 }
 
 fn addCoordinate(value: i32, delta: i32) i32 {
