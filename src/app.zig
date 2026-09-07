@@ -389,6 +389,7 @@ pub const App = struct {
     headless_acceptance_terminal: bool = false,
     smoke_glyph_pixel_hash: u64 = 0,
     gui_frame_caches: [4]gui_frame_snapshot.Cache = .{gui_frame_snapshot.Cache{}} ** 4,
+    performance_present: ?*PresentationTrace = null,
     window_launch_paths: [4][window_launch_path_max + 1]u8 = .{.{0} ** (window_launch_path_max + 1)} ** 4,
     last_display_revision: u32 = 0,
     clock: [9]u8 = .{ '0', '0', ':', '0', '0', 0, 0, 0, 0 },
@@ -486,6 +487,7 @@ pub const App = struct {
         self.invalidateFull();
         self.redraw();
         _ = self.ctx.bootReady();
+        if (argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) self.runR4SnesPerformanceAndPoweroff();
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
             self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);
@@ -4846,6 +4848,62 @@ pub const App = struct {
         self.presentDamageRegionsTimed((&damage_rect)[0..1], kind, 0);
     }
 
+    const PresentationTrace = struct {
+        window_index: usize,
+        generations: [4096]u64 = undefined,
+        count: usize = 0,
+        overflow: bool = false,
+
+        fn record(self: *PresentationTrace, generation: u64) void {
+            if (generation == 0 or (self.count != 0 and self.generations[self.count - 1] == generation)) return;
+            if (self.count == self.generations.len) {
+                self.overflow = true;
+                return;
+            }
+            self.generations[self.count] = generation;
+            self.count += 1;
+        }
+    };
+
+    fn runR4SnesPerformanceAndPoweroff(self: *App) noreturn {
+        const ok = self.runR4SnesPerformance();
+        self.ctx.println(if (ok) "R4SNES presentation profile: OK" else "R4SNES presentation profile: FAILED");
+        self.ctx.systemPoweroff();
+        while (true) self.ctx.sleepTicks(1);
+    }
+
+    fn runR4SnesPerformance(self: *App) bool {
+        const index = self.findFreeAppWindow() orelse return false;
+        const args = if (argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) "/PERFCHECK" else "/PERFTEST";
+        self.launchGuiPath(r4snes_host_path, args, "R4SNES performance", .gui);
+        const handle = self.window_process_handles[index];
+        if (!processHandleValid(handle)) return false;
+        var trace = PresentationTrace{ .window_index = index };
+        self.performance_present = &trace;
+        defer self.performance_present = null;
+        const started = self.ctx.ticks();
+        const timeout = @as(u64, @max(1, self.monotonic_hz)) * 300;
+        while (sameProcessHandle(self.window_process_handles[index], handle)) {
+            self.smokePumpCooperativeFrames(1);
+            self.ctx.sleepTicks(1);
+            if (self.ctx.ticks() -| started >= timeout) {
+                self.forceCloseWindowsByLaunchPath(r4snes_host_path);
+                return false;
+            }
+        }
+        if (!sameProcessHandle(self.window_completion_handles[index], handle) or
+            self.window_completion_exit_codes[index] != 0 or trace.overflow or trace.count == 0) return false;
+        // The immutable frame generation is recorded only after the actual
+        // display copy/present succeeds. Submission alone cannot reach here.
+        var output: [65536]u8 = undefined;
+        var length: usize = 0;
+        for (trace.generations[0..trace.count]) |generation| {
+            const line = std.fmt.bufPrint(output[length..], "{d}\n", .{generation}) catch return false;
+            length += line.len;
+        }
+        return self.ctx.fileWrite("C:\\TEMP\\SNES-PRESENT.TXT", output[0..length]) == @as(i32, @intCast(length));
+    }
+
     fn presentDamageRegionsTimed(self: *App, damage_regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) void {
         if (damage_regions.len == 0) return;
         var clipped_storage: [surface.max_damage_regions]surface.Rect = undefined;
@@ -4922,6 +4980,11 @@ pub const App = struct {
             }
         }
         self.last_display_revision = self.ctx.displayRevision();
+        if (self.performance_present) |trace| {
+            if (display_copy_succeeded and display_present_succeeded and
+                (cull_stats.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index))) != 0)
+                trace.record(gui_frame_views[trace.window_index].info.committed_generation);
+        }
         const now = self.ctx.ticks();
         const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const frame_ticks = elapsedTicks(frame_start, now);
@@ -8414,6 +8477,7 @@ fn accumulateCullStats(total: *compositor.CullStats, value: compositor.CullStats
     total.items_culled +%= value.items_culled;
     total.gui_frame_commands +%= value.gui_frame_commands;
     total.gui_resource_bytes +%= value.gui_resource_bytes;
+    total.rendered_gui_windows |= value.rendered_gui_windows;
 }
 
 fn writeR4BasicTraceId(out: *[16]u8, value: u64) void {

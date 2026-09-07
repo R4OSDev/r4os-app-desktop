@@ -42,6 +42,7 @@ pub const CullStats = struct {
     items_culled: u32 = 0,
     gui_frame_commands: u64 = 0,
     gui_resource_bytes: u64 = 0,
+    rendered_gui_windows: u8 = 0,
 };
 
 pub const SettingsOverlay = struct {
@@ -425,6 +426,7 @@ fn drawWindow(
     const replay = draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
     stats.gui_frame_commands +%= replay.commands;
     stats.gui_resource_bytes +%= replay.resource_bytes;
+    if (gui_frame.valid and replay.commands != 0 and index < 8) stats.rendered_gui_windows |= @as(u8, 1) << @intCast(index);
 }
 
 fn countCulledWindows(windows: []const window.Window, stats: *CullStats) void {
