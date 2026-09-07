@@ -397,6 +397,22 @@ pub const Context = struct {
         return self.audioMasterCall(r4os.abi.audio_service_op_master_status, "", out);
     }
 
+    pub fn audioOutputs(self: *const Context, request: *const r4os.abi.AudioServiceOutputRequest, selection: bool, out: *r4os.abi.AudioServiceOutputState) i32 {
+        var info: r4os.abi.ServiceInfo = .{};
+        const opened = self.sys.serviceOpen("AUDSVC", &info);
+        if (opened != r4os.abi.service_api_result_ok or info.handle == 0) return opened;
+        defer _ = self.sys.serviceClose(info.handle);
+        var header: r4os.abi.ServiceMessageHeader = .{};
+        const got = self.sys.serviceCall(info.handle, if (selection) r4os.abi.audio_service_op_select_output else r4os.abi.audio_service_op_outputs, std.mem.asBytes(request), &header, std.mem.asBytes(out), self.sys.ticksFromMilliseconds(1500));
+        if (got < 0) return got;
+        if (header.status != r4os.abi.service_api_result_ok) return header.status;
+        if (got != @sizeOf(r4os.abi.AudioServiceOutputState) or out.magic != r4os.abi.audio_output_control_magic or
+            out.version != 1 or out.size != @sizeOf(r4os.abi.AudioServiceOutputState) or out.count > 8 or
+            out.total > 256 or out.index > 256 or out.count > out.total -| out.index)
+            return r4os.abi.service_api_result_invalid;
+        return r4os.abi.service_api_result_ok;
+    }
+
     pub fn audioSetMasterState(self: *const Context, request: *const r4os.abi.AudioServiceMasterRequest, out: *r4os.abi.AudioServiceMasterState) i32 {
         return self.audioMasterCall(r4os.abi.audio_service_op_set_master_state, std.mem.asBytes(request), out);
     }

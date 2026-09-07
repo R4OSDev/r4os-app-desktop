@@ -3,8 +3,8 @@ const surface = @import("surface.zig");
 
 pub const icon_w: i32 = 30;
 pub const icon_gap: i32 = 4;
-pub const popup_w: i32 = 224;
-pub const popup_h: i32 = 116;
+pub const popup_w: i32 = 396;
+pub const popup_h: i32 = 354;
 pub const popup_gap: i32 = 6;
 pub const track_inset_x: i32 = 20;
 pub const track_y: i32 = 45;
@@ -14,6 +14,30 @@ pub const mute_y: i32 = 78;
 pub const mute_w: i32 = 92;
 pub const mute_h: i32 = 24;
 pub const percent_step: u8 = 5;
+pub const output_rows: usize = 4;
+
+pub const OutputRow = struct {
+    id: [64]u8 = .{0} ** 64,
+    name: [64]u8 = .{0} ** 64,
+    detail: []const u8 = "",
+    available: bool = false,
+    active: bool = false,
+    preferred: bool = false,
+};
+
+pub const OutputPage = struct {
+    supported: bool = false,
+    automatic: bool = true,
+    pending: bool = false,
+    save_error: bool = false,
+    failed: bool = false,
+    index: u32 = 0,
+    total: u32 = 0,
+    count: u32 = 0,
+    active_name: [64]u8 = .{0} ** 64,
+    reason: []const u8 = "Output selection unavailable",
+    rows: [output_rows]OutputRow = .{OutputRow{}} ** output_rows,
+};
 
 pub const View = struct {
     installed: bool = false,
@@ -21,6 +45,8 @@ pub const View = struct {
     muted: bool = false,
     percent: u8 = 100,
     popup_open: bool = false,
+    outputs: ?*const OutputPage = null,
+    output_serial: u64 = 0,
 };
 
 pub const IconState = enum {
@@ -61,6 +87,18 @@ pub fn trackRect(popup: surface.Rect) surface.Rect {
 
 pub fn muteRect(popup: surface.Rect) surface.Rect {
     return .{ .x = popup.x + mute_x, .y = popup.y + mute_y, .w = mute_w, .h = mute_h };
+}
+
+pub fn outputRect(popup: surface.Rect, index: usize) surface.Rect {
+    return .{ .x = popup.x + 12, .y = popup.y + 150 + @as(i32, @intCast(index)) * 34, .w = popup.w - 24, .h = 32 };
+}
+
+pub fn outputAutoRect(popup: surface.Rect) surface.Rect {
+    return .{ .x = popup.x + 12, .y = popup.y + 300, .w = 116, .h = 26 };
+}
+
+pub fn outputPageRect(popup: surface.Rect, next: bool) surface.Rect {
+    return .{ .x = popup.right() - (if (next) @as(i32, 40) else 74), .y = popup.y + 300, .w = 28, .h = 26 };
 }
 
 pub fn percentAtX(track: surface.Rect, x: i32) u8 {
@@ -123,6 +161,9 @@ test "popup remains in the work area and keeps stable controls" {
     try std.testing.expect(muteRect(popup).contains(muteRect(popup).x, muteRect(popup).y));
     try std.testing.expectEqual(@as(u8, 0), percentAtX(trackRect(popup), trackRect(popup).x));
     try std.testing.expectEqual(@as(u8, 100), percentAtX(trackRect(popup), trackRect(popup).right() - 1));
+    try std.testing.expect(outputRect(popup, output_rows - 1).bottom() < outputAutoRect(popup).y);
+    try std.testing.expect(outputPageRect(popup, true).right() < popup.right());
+    try std.testing.expect(outputAutoRect(popup).bottom() < popup.bottom());
 }
 
 test "icon states cover unavailable mute and audible ranges" {

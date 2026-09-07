@@ -376,6 +376,8 @@ pub const App = struct {
     last_mouse_down_tray_identity: tray.Identity = .{},
     volume_ui: volume.View = .{},
     volume_master: r4os.abi.AudioServiceMasterState = .{},
+    volume_outputs: r4os.abi.AudioServiceOutputState = .{},
+    volume_output_page: volume.OutputPage = .{},
     volume_next_poll_tick: u64 = 0,
     volume_next_send_tick: u64 = 0,
     volume_poll_ticks: u64 = 50,
@@ -501,6 +503,7 @@ pub const App = struct {
             if (!self.terminal_mode or self.windows[0].instance_id == 0) self.ctx.systemPoweroff();
             self.headless_acceptance_terminal = true;
         }
+        if (argsContain(self.ctx.argsRaw(), "/SMOKE-AUDIO-OUTPUT")) self.runAudioOutputSmokeAndPoweroff();
         if (argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE")) self.runWindowIdleSmokeAndPoweroff();
         if (hasKlickifaxSmokeArg(self.ctx.argsRaw())) self.runKlickifaxSmokeAndPoweroff();
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
@@ -773,6 +776,7 @@ pub const App = struct {
             const result = self.ctx.audioMasterState(&state);
             if (result == r4os.abi.service_api_result_ok) {
                 self.acceptVolumeState(state);
+                if (self.volume_ui.popup_open and self.syncAudioOutputs()) changed = true;
             } else {
                 self.volume_ui.reachable = false;
             }
@@ -783,6 +787,98 @@ pub const App = struct {
             changed = true;
         }
         return changed;
+    }
+
+    fn syncAudioOutputs(self: *App) bool {
+        const request: r4os.abi.AudioServiceOutputRequest = .{ .index = self.volume_output_page.index };
+        var state: r4os.abi.AudioServiceOutputState = .{};
+        if (self.ctx.audioOutputs(&request, false, &state) != r4os.abi.service_api_result_ok) {
+            if (!self.volume_output_page.supported and self.volume_ui.outputs != null) return false;
+            self.volume_output_page.supported = false;
+            self.volume_output_page.reason = "Output selection unavailable";
+            self.volume_ui.outputs = &self.volume_output_page;
+            self.volume_ui.output_serial +%= 1;
+            self.invalidateVolumePopup();
+            return true;
+        }
+        const changed = !std.mem.eql(u8, std.mem.asBytes(&state), std.mem.asBytes(&self.volume_outputs)) or !self.volume_output_page.supported;
+        self.acceptAudioOutputs(state);
+        if (changed) {
+            self.volume_ui.output_serial +%= 1;
+            self.invalidateVolumePopup();
+        }
+        return changed;
+    }
+
+    fn acceptAudioOutputs(self: *App, state: r4os.abi.AudioServiceOutputState) void {
+        self.volume_outputs = state;
+        const failed = self.volume_output_page.failed;
+        self.volume_output_page = .{
+            .supported = state.reason != r4os.abi.audio_output_reason_api_unavailable,
+            .automatic = state.desired_id[0] == 0,
+            .pending = state.flags & r4os.abi.audio_output_state_flag_persist_pending != 0,
+            .save_error = state.flags & r4os.abi.audio_output_state_flag_config_error != 0,
+            .failed = failed,
+            .index = state.index,
+            .total = state.total,
+            .count = @min(volume.output_rows, state.count),
+            .active_name = state.active_name,
+            .reason = switch (state.reason) {
+                r4os.abi.audio_output_reason_preferred => "Saved output selected",
+                r4os.abi.audio_output_reason_auto_hdmi => "Automatic: connected HDMI",
+                r4os.abi.audio_output_reason_auto_analog => "Automatic: analog output",
+                r4os.abi.audio_output_reason_preferred_unavailable => "Saved output unavailable; using fallback",
+                r4os.abi.audio_output_reason_none_available => "No available audio output",
+                r4os.abi.audio_output_reason_activation_failed => "Activation failed; previous output retained",
+                r4os.abi.audio_output_reason_catalog_busy => "Devices busy; showing previous list",
+                else => "Output selection unavailable",
+            },
+        };
+        for (state.outputs[0..self.volume_output_page.count], 0..) |item, i| self.volume_output_page.rows[i] = .{
+            .id = item.id,
+            .name = item.name,
+            .available = item.availability == r4os.abi.audio_output_available,
+            .active = item.flags & r4os.abi.audio_output_flag_active != 0,
+            .preferred = std.mem.eql(u8, &state.desired_id, &item.id),
+            .detail = switch (item.availability) {
+                r4os.abi.audio_output_available => switch (item.kind) {
+                    r4os.abi.audio_output_kind_hdmi => "HDMI | connected",
+                    r4os.abi.audio_output_kind_headphone => "Headphones | available",
+                    r4os.abi.audio_output_kind_speaker => "Speakers | available",
+                    else => "Line out | available",
+                },
+                r4os.abi.audio_output_waiting_for_eld => "Receiver detected; waiting for capabilities",
+                r4os.abi.audio_output_invalid_eld => "Receiver capabilities unavailable",
+                r4os.abi.audio_output_unsupported => "Receiver format not supported",
+                r4os.abi.audio_output_failed => "Device could not be activated",
+                else => "No receiver detected",
+            },
+        };
+        self.volume_ui.outputs = &self.volume_output_page;
+    }
+
+    fn selectAudioOutput(self: *App, id: [64]u8) void {
+        if (!self.volume_ui.reachable or !self.volume_output_page.supported) return;
+        const request: r4os.abi.AudioServiceOutputRequest = .{
+            .id = id,
+            .service_epoch = self.volume_outputs.service_epoch,
+            .revision = self.volume_outputs.revision,
+        };
+        var state: r4os.abi.AudioServiceOutputState = .{};
+        const result = self.ctx.audioOutputs(&request, true, &state);
+        self.volume_output_page.failed = result != r4os.abi.service_api_result_ok;
+        if (result == r4os.abi.service_api_result_ok) self.acceptAudioOutputs(state) else _ = self.syncAudioOutputs();
+        self.volume_ui.output_serial +%= 1;
+        self.invalidateVolumePopup();
+    }
+
+    fn changeAudioOutputPage(self: *App, next: bool) void {
+        if (next) {
+            if (self.volume_output_page.index + self.volume_output_page.count >= self.volume_output_page.total) return;
+            self.volume_output_page.index += volume.output_rows;
+        } else self.volume_output_page.index -|= volume.output_rows;
+        self.volume_output_page.failed = false;
+        _ = self.syncAudioOutputs();
     }
 
     fn acceptVolumeState(self: *App, state: r4os.abi.AudioServiceMasterState) void {
@@ -1227,6 +1323,39 @@ pub const App = struct {
             if (self.pollTimerEvent() and self.dispatchEvent()) self.redraw();
         }
         return false;
+    }
+
+    fn runAudioOutputSmokeAndPoweroff(self: *App) noreturn {
+        const ok = self.smokeAudioOutputControls();
+        self.ctx.println(if (ok) "DESKTOP audio-output result: OK" else "DESKTOP audio-output result: FAILED");
+        self.ctx.systemPoweroff();
+    }
+
+    fn smokeAudioOutputControls(self: *App) bool {
+        if (!self.smokeVolumeContract()) return false;
+        self.toggleVolumePopup();
+        defer self.volume_ui.popup_open = false;
+        if (!self.volume_output_page.supported or self.volume_output_page.count < 2) return false;
+        var master_before: r4os.abi.AudioServiceMasterState = .{};
+        if (self.ctx.audioMasterState(&master_before) != 0) return false;
+        for (0..2) |i| {
+            const id = self.volume_output_page.rows[i].id;
+            if (!self.volume_output_page.rows[i].available) return false;
+            const popup = draw.volumePopupRect(self.screen_w, self.screen_h, self.config.taskbar_clock);
+            const row = volume.outputRect(popup, i);
+            const target = self.volumePopupTargetAt(row.x + 10, row.y + 10);
+            if (@intFromEnum(target) != @intFromEnum(model.UiTarget.volume_output_0) + i) return false;
+            self.dispatchMouseCommand(target);
+            if (self.volume_output_page.failed or !std.mem.eql(u8, &self.volume_outputs.active_id, &id) or
+                !std.mem.eql(u8, &self.volume_outputs.desired_id, &id)) return false;
+            self.redraw();
+        }
+        self.dispatchMouseCommand(.volume_output_auto);
+        if (self.volume_output_page.failed or self.volume_outputs.desired_id[0] != 0 or self.volume_outputs.active_id[0] == 0) return false;
+        var master_after: r4os.abi.AudioServiceMasterState = .{};
+        if (self.ctx.audioMasterState(&master_after) != 0 or master_before.selected_volume_fixed != master_after.selected_volume_fixed or
+            (master_before.flags & r4os.abi.audio_master_state_flag_muted) != (master_after.flags & r4os.abi.audio_master_state_flag_muted)) return false;
+        return true;
     }
 
     fn runWindowIdleSmokeAndPoweroff(self: *App) noreturn {
@@ -4386,6 +4515,14 @@ pub const App = struct {
             .taskbar_keyboard_layout => self.cycleKeyboardLayout(),
             .taskbar_volume => self.toggleVolumePopup(),
             .volume_popup_mute => _ = self.toggleVolumeMute(),
+            .volume_output_0, .volume_output_1, .volume_output_2, .volume_output_3 => {
+                const index = @intFromEnum(target) - @intFromEnum(model.UiTarget.volume_output_0);
+                if (index < self.volume_output_page.count and self.volume_output_page.rows[index].available)
+                    self.selectAudioOutput(self.volume_output_page.rows[index].id);
+            },
+            .volume_output_auto => self.selectAudioOutput(.{0} ** 64),
+            .volume_output_previous => self.changeAudioOutputPage(false),
+            .volume_output_next => self.changeAudioOutputPage(true),
             .taskbar_clock => self.launchClockFromTaskbar(),
             .time_menu_clock => self.launchClockFromTimeMenu(),
             .time_menu_settings => self.launchTimeSettingsFromTimeMenu(),
@@ -4529,7 +4666,14 @@ pub const App = struct {
         if (self.volumeHit(x, y)) return .taskbar_volume;
         if (draw.volumeTrackRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y)) return .volume_popup_slider;
         if (draw.volumeMuteRect(self.screen_w, self.screen_h, self.config.taskbar_clock).contains(x, y)) return .volume_popup_mute;
-        return .volume_popup_backdrop;
+        const rect = draw.volumePopupRect(self.screen_w, self.screen_h, self.config.taskbar_clock);
+        for (0..self.volume_output_page.count) |i| {
+            if (volume.outputRect(rect, i).contains(x, y)) return @enumFromInt(@intFromEnum(model.UiTarget.volume_output_0) + i);
+        }
+        if (volume.outputAutoRect(rect).contains(x, y)) return .volume_output_auto;
+        if (volume.outputPageRect(rect, false).contains(x, y)) return .volume_output_previous;
+        if (volume.outputPageRect(rect, true).contains(x, y)) return .volume_output_next;
+        return if (rect.contains(x, y)) .volume_popup_surface else .volume_popup_backdrop;
     }
 
     fn captureOwner(self: *const App) ?model.UiOwner {
@@ -7504,7 +7648,7 @@ pub const App = struct {
     }
 
     fn invalidateTargetVisual(self: *App, target: model.UiTarget) void {
-        if (target == .volume_popup_backdrop or target == .volume_popup_slider or target == .volume_popup_mute) {
+        if (@intFromEnum(target) >= @intFromEnum(model.UiTarget.volume_popup_backdrop) and @intFromEnum(target) <= @intFromEnum(model.UiTarget.volume_popup_surface)) {
             self.invalidateVolumePopup();
             return;
         }
@@ -9161,7 +9305,7 @@ fn volumeViewEqual(a: volume.View, b: volume.View) bool {
         a.reachable == b.reachable and
         a.muted == b.muted and
         a.percent == b.percent and
-        a.popup_open == b.popup_open;
+        a.popup_open == b.popup_open and a.output_serial == b.output_serial;
 }
 
 fn fixedBytesEqual(a: []const u8, b: []const u8) bool {

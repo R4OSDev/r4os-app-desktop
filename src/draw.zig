@@ -931,6 +931,41 @@ pub fn volumePopup(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, c
     }
     textLit(ctx, mute.x + 29, mute.y + 9, "Mute", if (enabled) theme.text else theme.taskbar_dark, mute_bg);
     if (!enabled) textLit(ctx, rect.x + 119, mute.y + 9, "Unavailable", theme.taskbar_dark, theme.window_bg);
+
+    const page = view.outputs orelse {
+        textLit(ctx, rect.x + 14, rect.y + 129, "Output selection unavailable", theme.taskbar_dark, theme.window_bg);
+        return;
+    };
+    textLit(ctx, rect.x + 14, rect.y + 110, "Output:", theme.text, theme.window_bg);
+    ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, rect.x + 77, rect.y + 110, if (page.active_name[0] == 0) "None available" else std.mem.sliceTo(&page.active_name, 0), theme.text, theme.window_bg, .{ .x = rect.x + 77, .y = rect.y + 108, .w = rect.w - 91, .h = 18 });
+    ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, rect.x + 14, rect.y + 129, if (page.failed) "Switch not confirmed; list refreshed" else page.reason, theme.taskbar_dark, theme.window_bg, .{ .x = rect.x + 14, .y = rect.y + 127, .w = rect.w - 28, .h = 18 });
+    for (page.rows[0..page.count], 0..) |row, i| {
+        const area = volume.outputRect(rect, i);
+        const target: model.UiTarget = @enumFromInt(@intFromEnum(model.UiTarget.volume_output_0) + i);
+        const selected = row.active or pressed_target == target;
+        const bg = if (selected) theme.taskbar_pressed else if (hover_target == target and row.available) theme.taskbar_hover else theme.client_bg;
+        ctx.paintRect(area.x, area.y, @intCast(area.w), @intCast(area.h), bg);
+        bevel(ctx, area.x, area.y, area.w, area.h, selected);
+        const fg = if (row.available) theme.text else theme.taskbar_dark;
+        ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, area.x + 8, area.y + 5, std.mem.sliceTo(&row.name, 0), fg, bg, .{ .x = area.x + 8, .y = area.y + 3, .w = area.w - 78, .h = 16 });
+        ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, area.x + 8, area.y + 19, row.detail, theme.taskbar_dark, bg, area.inset(4, 2));
+        if (row.active) textLit(ctx, area.right() - 60, area.y + 5, "Active", theme.text, bg) else if (row.preferred) textLit(ctx, area.right() - 60, area.y + 5, "Saved", theme.text, bg);
+    }
+    const automatic = volume.outputAutoRect(rect);
+    outputButton(ctx, automatic, "Automatic", page.automatic, enabled and page.supported);
+    outputButton(ctx, volume.outputPageRect(rect, false), "<", pressed_target == .volume_output_previous, page.index > 0);
+    outputButton(ctx, volume.outputPageRect(rect, true), ">", pressed_target == .volume_output_next, page.index + page.count < page.total);
+    var page_text: [32]u8 = undefined;
+    const label = std.fmt.bufPrint(&page_text, "{d}-{d} / {d}", .{ if (page.count == 0) @as(u32, 0) else page.index + 1, page.index + page.count, page.total }) catch "";
+    ctx.paintTextFontSlice(r4os.abi.gui_font_builtin_id, rect.x + 145, rect.y + 309, label, theme.text, theme.window_bg, rect.inset(4, 4));
+    if (page.save_error) textLit(ctx, rect.x + 14, rect.y + 335, "Could not save selection", theme.taskbar_dark, theme.window_bg) else if (page.pending) textLit(ctx, rect.x + 14, rect.y + 335, "Saving...", theme.taskbar_dark, theme.window_bg);
+}
+
+fn outputButton(ctx: *const desk_api.Context, rect: surface.Rect, label: [*:0]const u8, pressed: bool, enabled: bool) void {
+    const bg = if (pressed and enabled) theme.taskbar_pressed else theme.window_bg;
+    ctx.paintRect(rect.x, rect.y, @intCast(rect.w), @intCast(rect.h), bg);
+    bevel(ctx, rect.x, rect.y, rect.w, rect.h, pressed and enabled);
+    ctx.paintText(rect.x + 9, rect.y + 9, label, if (enabled) theme.text else theme.taskbar_dark, bg);
 }
 
 pub fn trayTooltip(ctx: *const desk_api.Context, registry: *const tray.Registry, identity: tray.Identity, screen_w: i32, screen_h: i32) void {
