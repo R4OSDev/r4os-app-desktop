@@ -198,8 +198,6 @@ const default_run_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\NOTEPAD.R4X";
 const run_browse_dir = "C:\\R4OS\\SOFTWARE\\DESKTOP";
 const run_browse_first_index: u32 = 2;
 const run_browse_scan_limit: u32 = 96;
-const desktop_folder_first_index: u32 = 2;
-const desktop_folder_scan_limit: u32 = 512;
 const assoc_config_max_bytes: usize = 4096;
 const task_inventory_page_capacity: usize = @intCast(r4os.abi.program_inventory_page_max);
 const task_inventory_restart_limit: u32 = 8;
@@ -258,6 +256,11 @@ pub const App = struct {
     menu: start_menu.Menu = start_menu.Menu.initDefault(),
     desktop_item_selected: usize = desktop_items.no_selection,
     desktop_items: desktop_items.Items = .{},
+    desktop_changes: r4os.abi.DirectoryChangeCursor = .{},
+    desktop_changes_active: bool = false,
+    desktop_folder_dirty: bool = false,
+    desktop_folder_failed: bool = false,
+    desktop_folder_error_pending: bool = false,
     quick_launch: quick_launch.Bar = quick_launch.Bar.initDefault(),
     assoc: r4std.app_assoc.Config = .{},
     assoc_loaded_from_file: bool = false,
@@ -476,6 +479,12 @@ pub const App = struct {
         self.loadMenuConfig();
         self.repairDesktopFolder();
         self.loadAssociationConfig();
+        // Capture before enumeration: mutations during the load remain
+        // pending and wake the normal desktop activity wait.
+        self.desktop_changes_active = self.desktopFiles().beginDirectoryChanges(.{
+            .ptr = desktop_folder.default_dir,
+            .len = desktop_folder.default_dir.len,
+        }, &self.desktop_changes) == 0;
         self.loadDesktopItemsFolder();
         self.loadQuickLaunchRegistry();
         _ = self.updateKeyboardLayout();
@@ -514,7 +523,7 @@ pub const App = struct {
                 self.ctx.sleepTicks(self.loop_sleep_ticks);
                 continue;
             }
-            var needs_redraw = false;
+            var needs_redraw = self.syncDesktopFolder();
             if (self.syncTrayBroker()) needs_redraw = true;
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
             var remote_events: u32 = 0;
@@ -7707,29 +7716,84 @@ pub const App = struct {
         }
     }
 
-    fn loadDesktopItemsFolder(self: *App) void {
-        var next = desktop_items.Items{};
-        var path_buf: [desktop_items.path_max + 1]u8 = .{0} ** (desktop_items.path_max + 1);
-        var index: u32 = desktop_folder_first_index;
-        var scanned: u32 = 0;
-        while (scanned < desktop_folder_scan_limit) : (scanned += 1) {
-            @memset(path_buf[0..], 0);
-            const kind = self.ctx.dirEntry(desktop_folder.default_dir, index, path_buf[0 .. path_buf.len - 1]);
-            if (kind < 0) break;
-            const path = spanZ(path_buf[0..]);
-            if (path.len != 0) {
-                const fs_kind: desktop_items.FsKind = if (kind == 1) .directory else .file;
-                var item = desktop_items.Item.init(path, fs_kind);
-                if (fs_kind == .file and endsWithIgnoreCase(path, ".LNK")) self.applyDesktopLinkFile(&item);
-                _ = next.add(item);
+    fn desktopFiles(self: *const App) r4os.Files {
+        return .{ .sys = self.ctx.sys };
+    }
+
+    fn desktopFolderReadFailed(self: *App) bool {
+        if (!self.desktop_folder_failed) {
+            self.ctx.println("Desktop folder read failed; previous view retained");
+            self.desktop_folder_error_pending = true;
+        }
+        self.desktop_folder_failed = true;
+        return false;
+    }
+
+    fn syncDesktopFolder(self: *App) bool {
+        var changed = false;
+        if (self.desktop_changes_active) {
+            const rc = self.desktopFiles().pollDirectoryChanges(&self.desktop_changes);
+            if (rc > 0) self.desktop_folder_dirty = true;
+            if (rc < 0) {
+                self.desktop_changes_active = false;
+                _ = self.desktopFolderReadFailed();
             }
-            index += 1;
+        }
+        // A drag and any modal action retain their item indices until done.
+        if (self.desktop_folder_dirty and !self.desktop_drag.active and !self.desktop_drag.pending and self.mouse_down_target == .none and self.dialog == .none) {
+            self.desktop_folder_dirty = false;
+            if (self.reloadDesktopItemsFolder()) {
+                self.invalidateFull();
+                changed = true;
+            }
+        }
+        if (self.desktop_folder_error_pending and self.dialog == .none) {
+            self.desktop_folder_error_pending = false;
+            self.openDialog(.message_window_info);
+            self.setMessageBox(.@"error", .ok, "Desktop folder", "Directory read failed. The previous desktop view has been retained.");
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn loadDesktopItemsFolder(self: *App) void {
+        _ = self.reloadDesktopItemsFolder();
+    }
+
+    fn reloadDesktopItemsFolder(self: *App) bool {
+        var next = desktop_items.Items{};
+        var path_buf: [desktop_items.path_max + 1]u8 = undefined;
+        var iterator = self.desktopFiles().iterate(.{ .ptr = desktop_folder.default_dir, .len = desktop_folder.default_dir.len });
+        while (true) {
+            const entry = switch (iterator.next(&path_buf)) {
+                .entry => |entry| entry,
+                .end => break,
+                .failure => return self.desktopFolderReadFailed(),
+            };
+            if (next.count == next.entries.len) {
+                next.truncated = true;
+                continue;
+            }
+            const fs_kind: desktop_items.FsKind = if (entry.kind == .directory) .directory else .file;
+            var item = desktop_items.Item.init(entry.path, fs_kind);
+            if (fs_kind == .file and endsWithIgnoreCase(entry.path, ".LNK")) self.applyDesktopLinkFile(&item);
+            _ = next.add(item);
         }
         next.sortByTitle();
-        const layout_state = self.loadDesktopLayout();
+        var selected_path: [desktop_items.path_max + 1]u8 = .{0} ** (desktop_items.path_max + 1);
+        if (self.desktop_item_selected < self.desktop_items.count) selected_path = self.desktop_items.entries[self.desktop_item_selected].path;
+        var layout_state = self.loadDesktopLayout();
+        // In-session positions may still await their scheduled save.
+        for (self.desktop_items.entries[0..self.desktop_items.count]) |*old| _ = layout_state.add(old.pathText(), old.x, old.y);
         next.layoutWith(&layout_state, self.screen_w, self.screen_h, theme.taskbar_h);
         self.desktop_items = next;
-        self.desktop_item_selected = desktop_items.no_selection;
+        self.desktop_item_selected = self.findDesktopItemByPath(spanZ(&selected_path)) orelse desktop_items.no_selection;
+        self.last_mouse_down_tick = 0;
+        self.last_mouse_down_target = .none;
+        self.double_click_pending = false;
+        self.desktop_folder_failed = false;
+        self.desktop_folder_error_pending = false;
+        return true;
     }
 
     fn loadDesktopLayout(self: *App) desktop_layout.Layout {
