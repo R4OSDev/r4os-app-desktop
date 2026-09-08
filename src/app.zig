@@ -8047,21 +8047,39 @@ pub const App = struct {
         return data[0] != 0;
     }
 
+    const ConfigLoadResult = enum { missing, empty, loaded, failed };
+
     fn loadDesktopConfig(self: *App) void {
-        if (self.loadDesktopConfigPath(desktop_config_path)) return;
-        self.writeDesktopConfig();
+        if (r4std.config.recoverDocumentSave(self.ctx, desktop_config_path) < 0) {
+            self.ctx.println("Desktop config read/recovery failed; file retained");
+            return;
+        }
+        switch (self.loadDesktopConfigPath(desktop_config_path)) {
+            .missing => self.writeDesktopConfig(),
+            .failed => self.ctx.println("Desktop config unreadable; file retained"),
+            .empty, .loaded => {},
+        }
     }
 
     fn loadTimeConfig(self: *App) void {
-        if (self.loadTimeConfigPath(time_config_path)) return;
-        self.writeTimeConfig();
+        if (r4std.config.recoverDocumentSave(self.ctx, time_config_path) < 0) {
+            self.ctx.println("Time config read/recovery failed; file retained");
+            return;
+        }
+        switch (self.loadTimeConfigPath(time_config_path)) {
+            .missing => self.writeTimeConfig(),
+            .failed => self.ctx.println("Time config unreadable; file retained"),
+            .empty, .loaded => {},
+        }
     }
 
-    fn loadTimeConfigPath(self: *App, path: [*:0]const u8) bool {
+    fn loadTimeConfigPath(self: *App, path: [*:0]const u8) ConfigLoadResult {
         var buffer: [768]u8 = undefined;
         const len = self.ctx.fileRead(path, buffer[0..]);
-        if (len <= 0) return false;
-        return self.time_config.loadFromBytes(buffer[0..@intCast(len)]);
+        if (len == -3) return .missing;
+        if (len == 0) return .empty;
+        if (len < 0 or len > buffer.len) return .failed;
+        return if (self.time_config.loadFromBytes(buffer[0..@intCast(len)])) .loaded else .failed;
     }
 
     fn syncTimeConfig(self: *App) bool {
@@ -8078,11 +8096,13 @@ pub const App = struct {
         return true;
     }
 
-    fn loadDesktopConfigPath(self: *App, path: [*:0]const u8) bool {
+    fn loadDesktopConfigPath(self: *App, path: [*:0]const u8) ConfigLoadResult {
         var buffer: [r4std.config.max_file_bytes]u8 = undefined;
         const len = self.ctx.fileRead(path, buffer[0..]);
-        if (len <= 0) return false;
-        return self.config.loadFromBytes(buffer[0..@intCast(len)]);
+        if (len == -3) return .missing;
+        if (len == 0) return .empty;
+        if (len < 0 or len > buffer.len) return .failed;
+        return if (self.config.loadFromBytes(buffer[0..@intCast(len)])) .loaded else .failed;
     }
 
     fn writeDesktopConfig(self: *App) void {
@@ -8090,7 +8110,8 @@ pub const App = struct {
         var buffer: [r4std.config.max_output_bytes]u8 = .{0} ** r4std.config.max_output_bytes;
         const bytes = self.config.writeTo(buffer[0..]);
         if (bytes.len == 0) return;
-        _ = self.ctx.fileWrite(desktop_config_path, bytes);
+        if (r4std.config.saveDocument(self.ctx, desktop_config_path, bytes) < 0)
+            self.ctx.println("Desktop config save failed");
     }
 
     fn reloadWallpaper(self: *App) void {
@@ -8109,7 +8130,8 @@ pub const App = struct {
         var buffer: [384]u8 = .{0} ** 384;
         const bytes = self.time_config.writeToForState(buffer[0..], self.ctx.timeState());
         if (bytes.len == 0) return;
-        _ = self.ctx.fileWrite(time_config_path, bytes);
+        if (r4std.config.saveDocument(self.ctx, time_config_path, bytes) < 0)
+            self.ctx.println("Time config save failed");
     }
 
     fn setConsoleLaunch(self: *App, title: [*:0]const u8, path: [*:0]const u8, args: [*:0]const u8) void {

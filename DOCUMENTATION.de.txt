@@ -219,3 +219,12 @@ Build und Test
 
 Interaktive Sichttests erfolgen ueber das GUI-Profil des Workspace-Builds.
 Headless API-/Bootsmokes laufen ueber das Testprofil.
+
+
+Desktop-Defaults ab 0.78.63
+-------------------------
+Desktop- und Zeitkonfiguration werden beim Start zuerst wiederhergestellt.
+Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
+nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
+nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
+meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.

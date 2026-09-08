@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.32`
+- Version: `0.1.42`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -44,3 +44,12 @@ Detailed German technical notes from the migration are preserved in
 Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
 and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
+
+
+Desktop-Defaults ab 0.78.63
+-------------------------
+Desktop- und Zeitkonfiguration werden beim Start zuerst wiederhergestellt.
+Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
+nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
+nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
+meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
