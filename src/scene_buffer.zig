@@ -253,8 +253,8 @@ pub const SceneBuffer = struct {
 
     /// Replays one bounded Indexed8 source block directly into the XRGB scene.
     /// The full guest/viewport mapping keeps adjacent blocks pixel-identical;
-    /// palette expansion happens once per source block instead of once per
-    /// scaled destination pixel.
+    /// integer scaling resolves each visible source pixel once, then repeats
+    /// horizontal runs and completed rows. Other ratios use global mapping.
     pub fn blitIndexed8Nearest(self: *SceneBuffer, clip: surface.Rect, image: Indexed8Nearest) bool {
         if (image.source_w == 0 or image.source_h == 0 or image.source_stride < image.source_w or
             image.guest_w == 0 or image.guest_h == 0 or image.viewport.w <= 0 or image.viewport.h <= 0 or
@@ -275,6 +275,14 @@ pub const SceneBuffer = struct {
         const bottom = @min(scene_clip.bottom(), image.viewport.bottom());
         if (right <= left or bottom <= top) return true;
 
+        const viewport_width: u32 = @intCast(image.viewport.w);
+        const viewport_height: u32 = @intCast(image.viewport.h);
+        if (viewport_width % image.guest_w == 0 and viewport_height % image.guest_h == 0) {
+            const scale_x = viewport_width / image.guest_w;
+            const scale_y = viewport_height / image.guest_h;
+            if (scale_x > 0 and scale_x == scale_y) return self.blitIndexed8Integer(left, top, right, bottom, image, @intCast(scale_x));
+        }
+
         const pixels = self.pixels orelse return false;
         const destination_stride: usize = @intCast(self.width);
         const viewport_w: u64 = @intCast(image.viewport.w);
@@ -294,6 +302,39 @@ pub const SceneBuffer = struct {
                 const source_index = source_row + @as(usize, guest_x - image.source_x);
                 const palette_index = image.indices[source_index];
                 pixels[destination_row + @as(usize, @intCast(destination_x))] = image.palette[palette_index] & 0x00FF_FFFF;
+            }
+        }
+        return true;
+    }
+
+    fn blitIndexed8Integer(self: *SceneBuffer, left: i32, top: i32, right: i32, bottom: i32, image: Indexed8Nearest, scale: i32) bool {
+        const destination = self.pixels orelse return false;
+        const destination_stride: usize = @intCast(self.width);
+        const first_guest_x: u32 = @intCast(@divTrunc(left - image.viewport.x, scale));
+        const last_guest_x: u32 = @intCast(@divTrunc(right - 1 - image.viewport.x, scale));
+        const first_guest_y: u32 = @intCast(@divTrunc(top - image.viewport.y, scale));
+        const last_guest_y: u32 = @intCast(@divTrunc(bottom - 1 - image.viewport.y, scale));
+        if (first_guest_x < image.source_x or last_guest_x >= image.source_x + image.source_w or
+            first_guest_y < image.source_y or last_guest_y >= image.source_y + image.source_h) return false;
+
+        var guest_y = first_guest_y;
+        while (guest_y <= last_guest_y) : (guest_y += 1) {
+            const row_top = @max(top, image.viewport.y + @as(i32, @intCast(guest_y)) * scale);
+            const row_bottom = @min(bottom, image.viewport.y + (@as(i32, @intCast(guest_y)) + 1) * scale);
+            const destination_row = @as(usize, @intCast(row_top)) * destination_stride;
+            const source_row = @as(usize, guest_y - image.source_y) * image.source_stride;
+            var guest_x = first_guest_x;
+            while (guest_x <= last_guest_x) : (guest_x += 1) {
+                const run_left = @max(left, image.viewport.x + @as(i32, @intCast(guest_x)) * scale);
+                const run_right = @min(right, image.viewport.x + (@as(i32, @intCast(guest_x)) + 1) * scale);
+                const palette_index = image.indices[source_row + (guest_x - image.source_x)];
+                const color = image.palette[palette_index] & 0x00FF_FFFF;
+                @memset(destination[destination_row + @as(usize, @intCast(run_left)) .. destination_row + @as(usize, @intCast(run_right))], color);
+            }
+            var destination_y = row_top + 1;
+            while (destination_y < row_bottom) : (destination_y += 1) {
+                const repeat_row = @as(usize, @intCast(destination_y)) * destination_stride;
+                @memcpy(destination[repeat_row + @as(usize, @intCast(left)) .. repeat_row + @as(usize, @intCast(right))], destination[destination_row + @as(usize, @intCast(left)) .. destination_row + @as(usize, @intCast(right))]);
             }
         }
         return true;
@@ -588,6 +629,57 @@ test "scene buffer maps adjacent Indexed8 blocks without scaling seams" {
     }));
 
     try std.testing.expectEqualSlices(u32, &.{ 0x10, 0x10, 0x20, 0x20, 0x30, 0x30, 0x40 }, buffer.pixels.?);
+
+    // Compare tiled replay against independent per-destination mapping. The
+    // padded source and offset viewport expose cropped runs and tile seams.
+    var source: [80]u8 = .{255} ** 80;
+    for (0..8) |row| {
+        for (0..8) |column| source[row * 10 + column] = @intCast(row * 8 + column);
+    }
+    for (&palette, 0..) |*color, index| color.* = 0xAF00_0000 | @as(u32, @intCast(index * 0x030201));
+    const dimensions = [_][2]i32{ .{ 8, 8 }, .{ 16, 16 }, .{ 24, 24 }, .{ 128, 128 }, .{ 19, 13 }, .{ 16, 24 }, .{ 5, 3 } };
+    for (dimensions) |size| {
+        for ([_][2]i32{ .{ -2, -1 }, .{ 3, 2 } }) |origin| {
+            var actual: [132 * 131]u32 = .{0xDEAD_BEEF} ** (132 * 131);
+            var expected = actual;
+            var tiled = SceneBuffer{};
+            try std.testing.expect(tiled.attach(std.mem.sliceAsBytes(actual[0..]), 132, 131));
+            const paint_clip = surface.Rect{ .x = 1, .y = 2, .w = 128, .h = 127 };
+            tiled.setPaintClip(paint_clip);
+            const mapped = surface.Rect{ .x = origin[0], .y = origin[1], .w = size[0], .h = size[1] };
+            for (0..2) |tile_y| {
+                for (0..2) |tile_x| {
+                    const sx: u32 = @intCast(tile_x * 4);
+                    const sy: u32 = @intCast(tile_y * 4);
+                    const tile_left = mapped.x + @divTrunc(@as(i32, @intCast(sx)) * mapped.w + 7, 8);
+                    const tile_top = mapped.y + @divTrunc(@as(i32, @intCast(sy)) * mapped.h + 7, 8);
+                    const tile_right = mapped.x + @divTrunc(@as(i32, @intCast(sx + 4)) * mapped.w + 7, 8);
+                    const tile_bottom = mapped.y + @divTrunc(@as(i32, @intCast(sy + 4)) * mapped.h + 7, 8);
+                    try std.testing.expect(tiled.blitIndexed8Nearest(.{ .x = tile_left, .y = tile_top, .w = tile_right - tile_left, .h = tile_bottom - tile_top }, .{
+                        .indices = source[sy * 10 + sx ..],
+                        .palette = &palette,
+                        .source_x = sx,
+                        .source_y = sy,
+                        .source_w = 4,
+                        .source_h = 4,
+                        .source_stride = 10,
+                        .guest_w = 8,
+                        .guest_h = 8,
+                        .viewport = mapped,
+                    }));
+                }
+            }
+            for (&expected, 0..) |*pixel, offset| {
+                const x: i32 = @intCast(offset % 132);
+                const y: i32 = @intCast(offset / 132);
+                if (!paint_clip.contains(x, y) or !mapped.contains(x, y)) continue;
+                const sx: usize = @intCast(@divTrunc((x - mapped.x) * 8, mapped.w));
+                const sy: usize = @intCast(@divTrunc((y - mapped.y) * 8, mapped.h));
+                pixel.* = palette[source[sy * 10 + sx]] & 0x00FF_FFFF;
+            }
+            try std.testing.expectEqualSlices(u32, &expected, &actual);
+        }
+    }
 }
 
 test "scene buffer paint clip preserves pixels outside incremental damage" {
