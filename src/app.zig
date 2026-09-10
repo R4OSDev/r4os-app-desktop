@@ -315,6 +315,8 @@ pub const App = struct {
     loop_sleep_ticks: u64 = 3,
     // 0.56.28: event-getriebener Idle-Wait statt festem Sleep-Poll.
     activity_seq: u64 = 0,
+    output_revision: u64 = 0,
+    output_events_supported: bool = true,
     activity_wait_supported: bool = true,
     activity_wait_wakes: u64 = 0,
     activity_wait_timeouts: u64 = 0,
@@ -468,6 +470,7 @@ pub const App = struct {
     pub fn run(self: *App) i32 {
         self.screen_w = fallbackDimension(self.ctx.screenWidth(), 1280);
         self.screen_h = fallbackDimension(self.ctx.screenHeight(), 720);
+        _ = self.syncOutputRevision();
         self.initTiming();
         self.initWindowTitles();
         self.fitWindowsToWorkArea();
@@ -524,6 +527,7 @@ pub const App = struct {
                 continue;
             }
             var needs_redraw = self.syncDesktopFolder();
+            if (self.syncOutputRevision()) needs_redraw = true;
             if (self.syncTrayBroker()) needs_redraw = true;
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
             var remote_events: u32 = 0;
@@ -546,6 +550,22 @@ pub const App = struct {
     // warten (Input, RDP-Input, GUI-/Console-Revisionen wecken sofort;
     // Blink/Uhr/Restsyncs laufen im blink_half_ticks-Raster weiter).
     // Fallback auf den alten Sleep, wenn der Kernel das API nicht hat.
+    fn syncOutputRevision(self: *App) bool {
+        if (!self.output_events_supported) return false;
+        var snapshot: r4os.abi.GfxDisplayRevision = .{};
+        if (self.ctx.draw.gfxOutputRevision(&snapshot) != r4os.abi.gfx_output_ok) {
+            self.output_events_supported = false;
+            return false;
+        }
+        if (snapshot.revision == self.output_revision) return false;
+        self.output_revision = snapshot.revision;
+        // Native modesets remain unnegotiated until all surface consumers can
+        // adopt new geometry atomically. HPD still wakes this existing loop;
+        // a receiver change invalidates the scene without a polling timer.
+        self.invalidateFull();
+        return true;
+    }
+
     fn idleWait(self: *App, active: bool) void {
         if (active) {
             // A freshly launched GUI task must get a turn immediately. A

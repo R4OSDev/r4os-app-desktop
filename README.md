@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.42`
+- Version: `0.1.43`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -53,3 +53,10 @@ Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
 nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
 nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
 meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
+
+The existing desktop activity loop observes the optional R4DRAW ABI12
+output revision and invalidates the scene when it changes. Older API tables
+remain supported. No second hotplug timer or event queue is introduced.
+Native resolution changes still require the later coordinated display and
+surface transition; this stage keeps the actual boot geometry.
+Build.bat/Build.sh share PS7 orchestration via the configured SDK checkout.
