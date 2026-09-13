@@ -559,9 +559,9 @@ pub const App = struct {
         }
         if (snapshot.revision == self.output_revision) return false;
         self.output_revision = snapshot.revision;
-        // Native modesets remain unnegotiated until all surface consumers can
-        // adopt new geometry atomically. HPD still wakes this existing loop;
-        // a receiver change invalidates the scene without a polling timer.
+        // A mode receipt publishes public geometry before this revision.
+        // Plain receiver changes keep the same scene allocation and bounds.
+        self.syncScreenGeometry();
         self.invalidateFull();
         return true;
     }
@@ -6606,6 +6606,12 @@ pub const App = struct {
         const revision = self.ctx.displayRevision();
         if (revision == self.last_display_revision) return false;
         self.last_display_revision = revision;
+        self.syncScreenGeometry();
+        self.invalidateFull();
+        return true;
+    }
+
+    fn syncScreenGeometry(self: *App) void {
         const next_w = fallbackDimension(self.ctx.screenWidth(), self.screen_w);
         const next_h = fallbackDimension(self.ctx.screenHeight(), self.screen_h);
         if (next_w != self.screen_w or next_h != self.screen_h) {
@@ -6618,8 +6624,6 @@ pub const App = struct {
                 self.scene.reset();
             }
         }
-        self.invalidateFull();
-        return true;
     }
 
     fn syncGuiTitle(self: *App, index: usize) bool {
