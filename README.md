@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.45`
+- Version: `0.1.49`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
