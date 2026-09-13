@@ -179,6 +179,7 @@ pub const Menu = struct {
             settings.addKnown(.menu_settings_services, .item, "Services", .gui, "/R4OS/SOFTWARE/DESKTOP/SERVICES.R4X");
             settings.addKnown(.menu_settings_log_center, .item, "Log Center", .gui, "/R4OS/SOFTWARE/DESKTOP/LOGCENTER.R4X");
             settings.addKnown(.menu_settings_time, .item, "Time Settings", .gui, "/R4OS/SOFTWARE/DESKTOP/TIMESET.R4X");
+            settings.addKnownArgs(.menu_settings_display, .item, "Display", .gui, "/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X", "/DISPLAY");
         }
         menu.addKnown(.menu_tasks, .action, "Tasks", .action, "");
         menu.addKnown(.menu_restart, .action, "Restart", .action, "");
@@ -527,7 +528,9 @@ fn targetForSubItem(id: SubmenuId, title: []const u8, path: []const u8) model.Ui
             .menu_klickifax
         else
             .none,
-        .settings => if (equalsIgnoreCase(path, "/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X") or equalsIgnoreCase(title, "Appearance"))
+        .settings => if (equalsIgnoreCase(title, "Display") and equalsIgnoreCase(path, "/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X"))
+            .menu_settings_display
+        else if (equalsIgnoreCase(path, "/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X") or equalsIgnoreCase(title, "Appearance"))
             .menu_settings_appearance
         else if (equalsIgnoreCase(path, "/R4OS/SOFTWARE/DESKTOP/APPDEF.R4X") or equalsIgnoreCase(title, "Default Apps"))
             .menu_settings_default_apps
@@ -659,6 +662,8 @@ test "default menu keeps stable Desktop entries" {
     try std.testing.expectEqual(model.UiTarget.menu_halt, menu.target(8));
     try std.testing.expectEqual(model.UiTarget.menu_settings_appearance, menu.submenuTarget(4, 0));
     try std.testing.expectEqualStrings("/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X", std.mem.span(menu.submenuLaunch(4, 0).?.path));
+    try std.testing.expectEqual(model.UiTarget.menu_settings_display, menu.submenuTarget(4, 7));
+    try std.testing.expectEqualStrings("/DISPLAY", std.mem.span(menu.submenuLaunch(4, 7).?.args));
 }
 
 test "menu parser loads MENU.R4S item and action lines" {
@@ -674,6 +679,7 @@ test "menu parser loads MENU.R4S item and action lines" {
         \\ACTION;title=Run...;action=run
         \\SUBMENU;title=Settings;id=settings
         \\SUBITEM;menu=settings;title=Appearance;path=/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X;class=gui;policy=gui
+        \\SUBITEM;menu=settings;title=Display;path=/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X;args=/DISPLAY;class=gui;policy=gui
         \\ACTION;title=Tasks;action=tasks
         \\ACTION;title=Restart;action=restart
         \\ACTION;title=Poweroff;action=poweroff
@@ -693,6 +699,8 @@ test "menu parser loads MENU.R4S item and action lines" {
     try std.testing.expectEqualStrings("/R4OS/SOFTWARE/INTERNET/KLICKIFAX.R4X", std.mem.span(menu.nestedLaunch(0, 2, 0).?.path));
     try std.testing.expectEqual(model.UiTarget.menu_settings, menu.target(3));
     try std.testing.expectEqual(model.UiTarget.menu_settings_appearance, menu.submenuTarget(3, 0));
+    try std.testing.expectEqual(model.UiTarget.menu_settings_display, menu.submenuTarget(3, 1));
+    try std.testing.expectEqualStrings("/DISPLAY", std.mem.span(menu.submenuLaunch(3, 1).?.args));
     try std.testing.expectEqual(model.UiTarget.menu_poweroff, menu.target(6));
 }
 

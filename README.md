@@ -4,13 +4,18 @@
 
 ## Package
 
-- Version: `0.1.43`
+- Version: `0.1.45`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Settings > Display opens the existing Appearance application with `/DISPLAY`
+for common SDR mode selection and confirmation. Both the built-in menu and
+the distribution menu include this entry. The output revision path updates
+Desktop layout and mouse bounds after acknowledged mode changes and rollback.
 
 ## Build
 

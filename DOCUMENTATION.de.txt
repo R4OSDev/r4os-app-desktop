@@ -3,6 +3,12 @@
 
 R4DESK ist die externe Desktop-Anwendung und der Desktop-Host von R4OS.
 
+Ab 0.1.45 oeffnet Settings -> Display APPEARANCE.R4X /DISPLAY fuer die
+gemeinsame SDR-Moduswahl. Standardmenue und MENU.R4S verwenden denselben
+Starteintrag. Der bestehende Output-Revisionspfad uebernimmt nach quittiertem
+Wechsel und Rueckkehr die neue Geometrie. Modusauswahl/Bestaetigung gehoeren
+der Appearance-App, GPU-Ausfuehrung dem Treiber und der Timer dem Displaybesitzer.
+
 Zustaendigkeit
 --------------
 

@@ -28,6 +28,7 @@ pub const UiTarget = enum(u16) {
     menu_programs_internet = 24,
     menu_klickifax = 25,
     menu_update = 26,
+    menu_settings_display = 27,
     start_menu_panel = 50,
     start_menu_backdrop = 51,
     run_close = 60,
@@ -531,6 +532,7 @@ pub const ps_constants = [_]PsConstant{
     .{ .name = "UiTargetMenuRun", .value = @intFromEnum(UiTarget.menu_run) },
     .{ .name = "UiTargetMenuSettings", .value = @intFromEnum(UiTarget.menu_settings) },
     .{ .name = "UiTargetMenuSettingsAppearance", .value = @intFromEnum(UiTarget.menu_settings_appearance) },
+    .{ .name = "UiTargetMenuSettingsDisplay", .value = @intFromEnum(UiTarget.menu_settings_display) },
     .{ .name = "UiTargetMenuSettingsDefaultApps", .value = @intFromEnum(UiTarget.menu_settings_default_apps) },
     .{ .name = "UiTargetMenuSettingsNetwork", .value = @intFromEnum(UiTarget.menu_settings_network) },
     .{ .name = "UiTargetMenuSettingsServices", .value = @intFromEnum(UiTarget.menu_settings_services) },
@@ -763,6 +765,7 @@ test "target owner and layer mapping follows Desktop ids" {
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_settings_services));
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_settings_time));
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_settings_log_center));
+    try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_settings_display));
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_r4code));
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_programs));
     try testing.expectEqual(UiOwner.start_menu, ownerForTarget(.menu_klickifax));
@@ -861,7 +864,15 @@ test "target activation preserves existing hit-test target" {
 }
 
 test "PowerShell export keeps current builder constants covered" {
-    try testing.expectEqual(@as(usize, 145), ps_constants.len);
+    // New UI targets extend the export; check exact coverage instead of a
+    // stale total shared with unrelated owner/event constants.
+    inline for (std.meta.fields(UiTarget)) |field| {
+        var matches: usize = 0;
+        for (ps_constants) |constant| {
+            if (std.mem.startsWith(u8, constant.name, "UiTarget") and constant.value == field.value) matches += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), matches);
+    }
     try testing.expectEqual(@as(usize, 12), start_menu_items.len);
     try testing.expectEqual(@as(usize, 3), policy_labels.len);
     try testing.expectEqual(@as(u8, 1), start_menu_first_id);

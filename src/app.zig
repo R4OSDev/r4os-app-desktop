@@ -4441,7 +4441,7 @@ pub const App = struct {
                         self.invalidateStartMenu();
                     }
                 },
-                .menu_terminal, .menu_notepad, .menu_paint, .menu_calc, .menu_synth, .menu_devmgr, .menu_r4code, .menu_programs_internet, .menu_settings_appearance, .menu_settings_default_apps, .menu_settings_registry, .menu_settings_network, .menu_settings_services, .menu_settings_log_center, .menu_settings_time => {
+                .menu_terminal, .menu_notepad, .menu_paint, .menu_calc, .menu_synth, .menu_devmgr, .menu_r4code, .menu_programs_internet, .menu_settings_appearance, .menu_settings_display, .menu_settings_default_apps, .menu_settings_registry, .menu_settings_network, .menu_settings_services, .menu_settings_log_center, .menu_settings_time => {
                     if (self.submenuIndexForTarget(target)) |hit| {
                         self.menu_submenu_open = true;
                         self.menu_submenu_parent = hit.parent;
@@ -4528,7 +4528,7 @@ pub const App = struct {
             .menu_update, .menu_programs, .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks, .menu_restart, .menu_poweroff, .menu_halt => {
                 if (self.menuIndexForTarget(target)) |index| self.activateMenu(index);
             },
-            .menu_terminal, .menu_notepad, .menu_paint, .menu_calc, .menu_synth, .menu_devmgr, .menu_r4code, .menu_programs_internet, .menu_settings_appearance, .menu_settings_default_apps, .menu_settings_registry, .menu_settings_network, .menu_settings_services, .menu_settings_log_center, .menu_settings_time => {
+            .menu_terminal, .menu_notepad, .menu_paint, .menu_calc, .menu_synth, .menu_devmgr, .menu_r4code, .menu_programs_internet, .menu_settings_appearance, .menu_settings_display, .menu_settings_default_apps, .menu_settings_registry, .menu_settings_network, .menu_settings_services, .menu_settings_log_center, .menu_settings_time => {
                 if (self.submenuIndexForTarget(target)) |hit| self.activateSubmenu(hit.parent, hit.index);
             },
             .menu_klickifax => if (self.nestedIndexForTarget(target)) |hit| self.activateNestedSubmenu(hit.parent, hit.child, hit.index),
@@ -5459,7 +5459,7 @@ pub const App = struct {
             model.UiTarget.menu_klickifax => self.launchProgram(launch),
             model.UiTarget.menu_programs, model.UiTarget.menu_programs_internet => {},
             model.UiTarget.menu_settings => self.openDialog(.message_settings),
-            model.UiTarget.menu_settings_appearance, model.UiTarget.menu_settings_default_apps, model.UiTarget.menu_settings_registry, model.UiTarget.menu_settings_network, model.UiTarget.menu_settings_services, model.UiTarget.menu_settings_log_center, model.UiTarget.menu_settings_time => self.launchProgram(launch),
+            model.UiTarget.menu_settings_appearance, model.UiTarget.menu_settings_display, model.UiTarget.menu_settings_default_apps, model.UiTarget.menu_settings_registry, model.UiTarget.menu_settings_network, model.UiTarget.menu_settings_services, model.UiTarget.menu_settings_log_center, model.UiTarget.menu_settings_time => self.launchProgram(launch),
             model.UiTarget.menu_restart => self.openDialog(.confirm_restart),
             model.UiTarget.menu_poweroff => self.openDialog(.confirm_poweroff),
             model.UiTarget.menu_halt => self.openDialog(.confirm_halt),
