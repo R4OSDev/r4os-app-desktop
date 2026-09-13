@@ -2930,6 +2930,9 @@ fn utf8SequenceLengthAt(value: []const u8, start: usize) usize {
 test "indexed dirty replay matches the full painter including text alpha and clear order" {
     try @import("cursor_controller_test.zig").check();
     try checkCursorCapture();
+    var gfx_fixture: @import("gfx_renderer_test.zig").Fixture = .{};
+    const graphics = try gfx_fixture.open();
+    defer graphics.destroy();
     const index_module = @import("gui_command_index.zig");
     var commands: [1027]r4os.abi.GuiFrameCommand = undefined;
     commands[0] = .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x203040 };
@@ -2964,10 +2967,15 @@ test "indexed dirty replay matches the full painter including text alpha and cle
         var x: i32 = 0;
         while (x < 64) : (x += 3) {
             scene.setPaintClip(.{ .x = x, .y = y, .w = 3, .h = 5 });
+            graphics.begin(&scene);
             _ = hostedFrameCommands(&ctx, bounds, frame);
+            graphics.end();
         }
     }
     try std.testing.expectEqualSlices(u32, &expected, &actual);
+    try std.testing.expect(graphics.batches > 0 and graphics.fills > graphics.batches and graphics.rejected_batches == 0);
+    const gfx_info = graphics.info() orelse return error.RendererUnavailable;
+    try std.testing.expect(gfx_info.backend == 1 and gfx_info.gpu_operations == 0 and gfx_info.cpu_write_bytes != 0);
 }
 
 fn checkCursorCapture() !void {

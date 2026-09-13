@@ -4,6 +4,7 @@ const paint = @import("paint.zig");
 const scene_buffer = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
 const window_service = @import("window_service_gate.zig");
+const gfx_renderer = @import("gfx_renderer.zig");
 
 pub const Context = struct {
     sys: r4os.r4sys.Context,
@@ -13,6 +14,7 @@ pub const Context = struct {
     self_handle: r4os.abi.ProgramProcessHandle,
     scene: ?*scene_buffer.SceneBuffer = null,
     window_session: window_service.Session = .{},
+    graphics: ?*gfx_renderer.Renderer = null,
 
     pub fn init(app: *r4os.App) ?Context {
         const sys = app.system();
@@ -317,10 +319,13 @@ pub const Context = struct {
         raster_generation: u64,
         out_map: *r4os.abi.GuiSharedRasterMap,
     ) i32 {
-        return self.draw.guiSharedRasterAcquire(frame_owner, frame_generation, raster_handle, raster_generation, out_map);
+        const result = self.draw.guiSharedRasterAcquire(frame_owner, frame_generation, raster_handle, raster_generation, out_map);
+        if (result == r4os.abi.gui_frame_result_ok) if (self.graphics) |graphics| graphics.retainRaster(&out_map.lease);
+        return result;
     }
 
     pub fn guiSharedRasterRelease(self: *const Context, lease: *const r4os.abi.GuiSharedRasterLease) i32 {
+        if (self.graphics) |graphics| graphics.releaseRaster(lease);
         return self.draw.guiSharedRasterRelease(lease);
     }
 
@@ -527,6 +532,7 @@ pub const Context = struct {
     }
 
     pub fn remoteFramePublishSceneRect(self: *const Context, scene: *const scene_buffer.SceneBuffer, rect: surface.Rect, cursor_x: i32, cursor_y: i32) i32 {
+        scene.flushPending();
         if (scene.width <= 0 or scene.height <= 0) return r4os.abi.remote_frame_error_invalid;
         const pixels = scene.pixels orelse return r4os.abi.remote_frame_error_unavailable;
         const clipped = scene.clipRect(rect) orelse scene.fullRect();
@@ -559,6 +565,7 @@ pub const Context = struct {
     }
 
     pub fn remoteFramePublishSceneRegionsCursor(self: *const Context, scene: *const scene_buffer.SceneBuffer, rects: []const surface.Rect, cursor_x: i32, cursor_y: i32, cursor_visible: bool) i32 {
+        scene.flushPending();
         if (rects.len == 0 or rects.len > r4os.abi.display_damage_max_regions) return r4os.abi.remote_frame_error_invalid;
         if (scene.width <= 0 or scene.height <= 0) return r4os.abi.remote_frame_error_invalid;
         const pixels = scene.pixels orelse return r4os.abi.remote_frame_error_unavailable;
@@ -617,14 +624,17 @@ pub const Context = struct {
 
     pub fn beginScene(self: *Context, scene: *scene_buffer.SceneBuffer) void {
         self.scene = scene;
+        if (self.graphics) |graphics| graphics.begin(scene);
     }
 
     pub fn beginSceneClipped(self: *Context, scene: *scene_buffer.SceneBuffer, clip: surface.Rect) void {
         scene.setPaintClip(clip);
         self.scene = scene;
+        if (self.graphics) |graphics| graphics.begin(scene);
     }
 
     pub fn endScene(self: *Context) void {
+        if (self.graphics) |graphics| graphics.end();
         self.scene = null;
     }
 
@@ -707,6 +717,7 @@ pub const Context = struct {
     }
 
     pub fn displayBlitSceneRect(self: *const Context, scene: *const scene_buffer.SceneBuffer, rect: surface.Rect) i32 {
+        scene.flushPending();
         const clipped = scene.clipRect(rect) orelse return 0;
         const pixels = scene.pixels orelse return -1;
         const x: u32 = @intCast(clipped.x);
@@ -759,6 +770,7 @@ pub const Context = struct {
         input_tick: u64,
         out: *r4os.abi.DisplayPresentResult,
     ) i32 {
+        scene.flushPending();
         if (!self.supportsDisplayPresentRegions() or rects.len == 0 or rects.len > r4os.abi.display_damage_max_regions) return r4os.abi.display_present_error_unavailable;
         const pixels = scene.pixels orelse return r4os.abi.display_present_error_unavailable;
         if (scene.width <= 0 or scene.height <= 0) return r4os.abi.display_present_error_invalid;

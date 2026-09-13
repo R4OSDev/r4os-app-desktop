@@ -2,6 +2,11 @@ const std = @import("std");
 const surface = @import("surface.zig");
 
 pub const SceneBuffer = struct {
+    pub const RenderHook = struct {
+        context: usize,
+        fill: *const fn (usize, surface.Rect, u32) bool,
+        flush: *const fn (usize) void,
+    };
     memory: ?[]u8 = null,
     pixels: ?[]u32 = null,
     width: i32 = 0,
@@ -10,6 +15,11 @@ pub const SceneBuffer = struct {
     // Keeping it on the scene avoids replaying a whole hosted application for
     // every cursor movement while the committed framebuffer remains complete.
     paint_clip: ?surface.Rect = null,
+    render_hook: ?RenderHook = null,
+
+    pub fn flushPending(self: *const SceneBuffer) void {
+        if (self.render_hook) |hook| hook.flush(hook.context);
+    }
 
     pub fn requiredBytes(width: i32, height: i32) ?usize {
         if (width <= 0 or height <= 0) return null;
@@ -81,6 +91,7 @@ pub const SceneBuffer = struct {
 
     pub fn fillRect(self: *SceneBuffer, rect: surface.Rect, rgb: u32) void {
         const clipped = self.paintClipRect(rect) orelse return;
+        if (self.render_hook) |hook| if (hook.fill(hook.context, clipped, rgb & 0x00FF_FFFF)) return;
         const pixels = self.pixels orelse return;
         const color = rgb & 0x00FF_FFFF;
         const width: usize = @intCast(self.width);
@@ -95,6 +106,7 @@ pub const SceneBuffer = struct {
     }
 
     pub fn blitXrgb32(self: *SceneBuffer, x: i32, y: i32, w: u32, h: u32, source: []const u32) void {
+        self.flushPending();
         if (w == 0 or h == 0) return;
         if (w > @as(u32, @intCast(std.math.maxInt(i32))) or h > @as(u32, @intCast(std.math.maxInt(i32)))) return;
         const src_w: i32 = @intCast(w);
@@ -151,6 +163,7 @@ pub const SceneBuffer = struct {
     /// expand one row and repeat it, and all other sizes use global nearest
     /// mapping so independently transported blocks meet without seams.
     pub fn blitXrgb32Nearest(self: *SceneBuffer, clip: surface.Rect, image: Xrgb32Nearest) bool {
+        self.flushPending();
         if (image.source_w == 0 or image.source_h == 0 or image.source_stride < image.source_w or
             image.guest_w == 0 or image.guest_h == 0 or image.viewport.w <= 0 or image.viewport.h <= 0 or
             @as(u64, image.source_x) + image.source_w > image.guest_w or
@@ -256,6 +269,7 @@ pub const SceneBuffer = struct {
     /// integer scaling resolves each visible source pixel once, then repeats
     /// horizontal runs and completed rows. Other ratios use global mapping.
     pub fn blitIndexed8Nearest(self: *SceneBuffer, clip: surface.Rect, image: Indexed8Nearest) bool {
+        self.flushPending();
         if (image.source_w == 0 or image.source_h == 0 or image.source_stride < image.source_w or
             image.guest_w == 0 or image.guest_h == 0 or image.viewport.w <= 0 or image.viewport.h <= 0 or
             image.palette.len < 256 or
@@ -343,6 +357,7 @@ pub const SceneBuffer = struct {
     /// Blends an Alpha8 coverage mask over the current XRGB scene.  The source
     /// may contain row padding; clipping advances into the original stride.
     pub fn blendAlpha8(self: *SceneBuffer, x: i32, y: i32, w: u32, h: u32, stride: u32, rgb: u32, alpha: []const u8) bool {
+        self.flushPending();
         if (w == 0 or h == 0 or stride < w) return false;
         if (w > @as(u32, @intCast(std.math.maxInt(i32))) or h > @as(u32, @intCast(std.math.maxInt(i32)))) return false;
         const preceding_rows = std.math.mul(usize, @as(usize, h - 1), @as(usize, stride)) catch return false;
@@ -377,6 +392,7 @@ pub const SceneBuffer = struct {
     /// XRGB scene. The caller supplies an explicit client clip; scaling uses
     /// nearest-neighbour source pixels and never exposes transparent corners.
     pub fn blendArgb32(self: *SceneBuffer, clip: surface.Rect, x: i32, y: i32, w: u32, h: u32, scale: u32, source: []const u8) bool {
+        self.flushPending();
         if (w == 0 or h == 0 or scale == 0 or scale > 16) return false;
         const pixel_count = std.math.mul(usize, @as(usize, w), @as(usize, h)) catch return false;
         const required = std.math.mul(usize, pixel_count, @sizeOf(u32)) catch return false;

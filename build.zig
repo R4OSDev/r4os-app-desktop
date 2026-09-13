@@ -12,12 +12,27 @@ pub fn build(b: *std.Build) void {
         .zig_module_roots = &.{
             libraries_dep.namedLazyPath("r4std_zig_binding"),
             libraries_dep.namedLazyPath("r4img_zig_binding"),
+            libraries_dep.namedLazyPath("r4gfx_zig_binding"),
         },
     });
 
     const test_target = b.graph.host;
     const test_optimize: std.builtin.OptimizeMode = .Debug;
     const host_r4os = sdk.createR4osModule(test_target, test_optimize);
+    const r4gfx = b.createModule(.{
+        .root_source_file = libraries_dep.namedLazyPath("r4gfx_zig_binding"),
+        .target = test_target,
+        .optimize = test_optimize,
+    });
+    r4gfx.addImport("r4os", host_r4os);
+    const r4nv_binding = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4nv_zig_binding"), .target = test_target });
+    r4nv_binding.addImport("r4os", host_r4os);
+    const r4gfx_implementation = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Contract/Generated/implementation_abi.zig"), .target = test_target });
+    r4gfx_implementation.addImport("r4os", host_r4os);
+    const r4gfx_provider = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Source/device.zig"), .target = test_target });
+    r4gfx_provider.addImport("r4os", host_r4os);
+    r4gfx_provider.addImport("r4l_contract", r4gfx_implementation);
+    r4gfx_provider.addImport("r4nv_binding", r4nv_binding);
     const r4std_abi = b.createModule(.{
         .root_source_file = libraries_dep.path("R4STD/Bindings/Zig/r4std_abi.zig"),
         .target = test_target,
@@ -99,7 +114,9 @@ pub fn build(b: *std.Build) void {
         .target = test_target,
         .optimize = test_optimize,
     });
-    draw_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
+    draw_module.addImport("r4os", host_r4os);
+    draw_module.addImport("r4gfx", r4gfx);
+    draw_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const draw_tests = b.addTest(.{ .root_module = draw_module });
     const compositor_module = b.createModule(.{
         .root_source_file = b.path("src/compositor.zig"),
@@ -110,6 +127,8 @@ pub fn build(b: *std.Build) void {
     compositor_module.addImport("r4std", r4std);
     compositor_module.addImport("r4std_test", r4std_test);
     compositor_module.addImport("r4img", r4img);
+    compositor_module.addImport("r4gfx", r4gfx);
+    compositor_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const compositor_tests = b.addTest(.{ .root_module = compositor_module });
     const gui_shape_renderer_module = b.createModule(.{
         .root_source_file = b.path("src/gui_shape_renderer.zig"),
@@ -291,6 +310,8 @@ pub fn build(b: *std.Build) void {
     const run_window_service_gate_tests = b.addRunArtifact(window_service_gate_tests);
     const run_tray_tests = b.addRunArtifact(tray_tests);
     const run_physical_input_tests = b.addRunArtifact(physical_input_tests);
+    const render_step = b.step("render-test", "Run the existing compositor and its imported painter checks");
+    render_step.dependOn(&run_compositor_tests.step);
     const test_step = b.step("test", "Run Desktop Zig tests");
     test_step.dependOn(&run_model_tests.step);
     test_step.dependOn(&run_window_tests.step);

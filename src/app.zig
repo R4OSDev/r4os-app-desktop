@@ -1413,6 +1413,7 @@ pub const App = struct {
             if (self.render_stats.last_damage_kind != .cursor or self.render_stats.last_damage_rect.w > 2 * surface.cursor_w or
                 self.render_stats.last_damage_rect.h != surface.cursor_h or !self.smokeRemoteFrameContract()) self.windowIdleSmokeFailed("cursor-fallback-capture");
             self.ctx.println("DESKTOP cursor fallback: OK api=optional mode=software damage=bounded capture=preserved");
+            self.smokeGraphicsResources();
             self.ctx.systemPoweroff();
         }
         const editor_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X";
@@ -1480,7 +1481,20 @@ pub const App = struct {
         self.smokePumpFrames(30);
         if (self.windows[index].instance_id != 0 or self.windows[timer_index].instance_id != 0) self.windowIdleSmokeFailed("close");
         self.ctx.println("DESKTOP window-idle result: OK");
+        self.smokeGraphicsResources();
         self.ctx.systemPoweroff();
+    }
+
+    fn smokeGraphicsResources(self: *App) void {
+        const graphics = self.ctx.graphics orelse self.windowIdleSmokeFailed("gfx-device");
+        const info = graphics.info() orelse self.windowIdleSmokeFailed("gfx-info");
+        if (graphics.batches == 0 or graphics.fills == 0 or graphics.rejected_batches != 0 or info.cpu_write_bytes == 0)
+            self.windowIdleSmokeFailed("gfx-batches");
+        self.ctx.write("DESKTOP graphics resources: OK DEVICE_V1 backend="); self.ctx.printU64(info.backend);
+        self.ctx.write(" batches="); self.ctx.printU64(graphics.batches);
+        self.ctx.write(" fills="); self.ctx.printU64(graphics.fills);
+        self.ctx.write(" imports="); self.ctx.printU64(info.imports);
+        self.ctx.println(" rejected=0");
     }
 
     fn smokeGeometryMatches(self: *App, index: usize) bool {

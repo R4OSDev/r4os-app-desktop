@@ -7,6 +7,7 @@ pub const Overlay = struct {
     saved: [asset.width * asset.height]u32 = undefined,
     rect: surface.Rect = .{ .x=0,.y=0,.w=0,.h=0 },
     pub fn apply(self: *Overlay, scene: *scene_buffer.SceneBuffer, x: i32, y: i32) void {
+        scene.flushPending();
         self.rect = scene.clipRect(.{ .x=x,.y=y,.w=asset.width,.h=asset.height }) orelse return;
         const pixels = scene.pixels.?;
         for (0..@intCast(self.rect.h)) |row| for (0..@intCast(self.rect.w)) |col| {
@@ -17,6 +18,7 @@ pub const Overlay = struct {
         };
     }
     pub fn restore(self: *const Overlay, scene: *scene_buffer.SceneBuffer) void {
+        scene.flushPending();
         const pixels = scene.pixels orelse return;
         for (0..@intCast(self.rect.h)) |row| for (0..@intCast(self.rect.w)) |col| {
             const index = (@as(usize,@intCast(self.rect.y)) + row) * @as(usize,@intCast(scene.width)) + @as(usize,@intCast(self.rect.x)) + col;
