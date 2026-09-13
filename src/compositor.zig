@@ -107,6 +107,7 @@ pub fn compose(
     cursor_blink_on: bool,
     cursor_x: i32,
     cursor_y: i32,
+    cursor_visible: bool,
     hover_target: model.UiTarget,
     pressed_target: model.UiTarget,
     damage: surface.Rect,
@@ -216,7 +217,7 @@ pub fn compose(
     }
 
     const cursor_rect = surface.cursor(cursor_x, cursor_y, screen_w, screen_h).rect;
-    if (layerVisible(&stats, damage, cursor_rect)) {
+    if (cursor_visible and layerVisible(&stats, damage, cursor_rect)) {
         draw.cursor(ctx, cursor_x, cursor_y, screen_w, screen_h);
     }
     return stats;

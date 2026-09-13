@@ -108,6 +108,12 @@ const CursorDamage = struct {
     old_rect: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     new_rect: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 
+    fn add(self: *CursorDamage, old_rect: surface.Rect, new_rect: surface.Rect) void {
+        if (self.active) {
+            self.old_rect = self.old_rect.merged(old_rect); self.new_rect = new_rect;
+        } else self.* = .{ .active=true, .old_rect=old_rect, .new_rect=new_rect };
+    }
+
     fn reset(self: *CursorDamage) void {
         self.* = .{};
     }
@@ -286,6 +292,8 @@ pub const App = struct {
     render_stats: compositor.RenderStats = .{},
     present_source_generation: u64 = 0,
     scene: scene_buffer.SceneBuffer = .{},
+    cursor_controller: @import("cursor_controller.zig").Controller = .{},
+    capture_cursor_damage: CursorDamage = .{},
     cursor_x: i32 = 0,
     cursor_y: i32 = 0,
     event_kind: EventKind = .none,
@@ -540,7 +548,10 @@ pub const App = struct {
             if (self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             self.flushWindowGeometry(false);
+            if (self.syncCursor()) needs_redraw = true;
+            if (self.hasDamage()) needs_redraw = true;
             if (needs_redraw) self.redraw();
+            if (self.capture_cursor_damage.active and self.remote_frame_consumers != 0) _ = self.publishRemoteScene(&.{});
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
         }
     }
@@ -583,6 +594,7 @@ pub const App = struct {
         const blink_delay = self.blink_half_ticks - (now % self.blink_half_ticks);
         var delay = window_service_gate.deadlineDelay(now, blink_delay, &.{ tray_deadline, self.next_clock_check_tick });
         delay = @max(1, self.window_geometry_updates.delay(now, delay));
+        if (self.cursor_controller.retryPending()) delay = @min(delay, self.loop_sleep_ticks);
         if (self.activity_wait_supported) {
             const rc = self.ctx.desktopActivityWait(self.activity_seq, delay, &self.activity_seq);
             if (rc >= 0) {
@@ -1388,6 +1400,21 @@ pub const App = struct {
     }
 
     fn runWindowIdleSmokeAndPoweroff(self: *App) noreturn {
+        if (argsContain(self.ctx.argsRaw(), "/CURSOR")) {
+            var info: r4os.abi.DisplayCursorInfo = .{ .display_generation=79 };
+            if (!self.ctx.draw.supportsDisplayCursor() or self.ctx.draw.displayCursorInfo(&info) != r4os.abi.gfx_output_error_unsupported or
+                info.display_generation != 79) self.windowIdleSmokeFailed("cursor-fallback-api");
+            _ = self.syncCursor();
+            if (!self.cursor_controller.software or self.cursor_controller.acquired) self.windowIdleSmokeFailed("cursor-fallback-owner");
+            _ = self.updateCursor(8, 0); self.redraw();
+            _ = self.updateCursor(9, 0);
+            if (!self.cursor_damage.active) self.windowIdleSmokeFailed("cursor-fallback-damage");
+            self.redraw();
+            if (self.render_stats.last_damage_kind != .cursor or self.render_stats.last_damage_rect.w > 2 * surface.cursor_w or
+                self.render_stats.last_damage_rect.h != surface.cursor_h or !self.smokeRemoteFrameContract()) self.windowIdleSmokeFailed("cursor-fallback-capture");
+            self.ctx.println("DESKTOP cursor fallback: OK api=optional mode=software damage=bounded capture=preserved");
+            self.ctx.systemPoweroff();
+        }
         const editor_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X";
         const timer_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X";
         self.ctx.println("DESKTOP window-idle smoke");
@@ -5230,7 +5257,7 @@ pub const App = struct {
         var display_copy_succeeded = false;
         var display_present_succeeded = false;
         if (scene_ready) {
-            remote_publish_rc = self.ctx.remoteFramePublishSceneRegions(&self.scene, clipped_regions, self.cursor_x, self.cursor_y);
+            remote_publish_rc = self.publishRemoteScene(clipped_regions);
             self.present_source_generation +%= 1;
             if (self.present_source_generation == 0) self.present_source_generation = 1;
             const present_rc = self.ctx.displayPresentSceneRegions(
@@ -5254,6 +5281,8 @@ pub const App = struct {
             }
         }
         self.last_display_revision = self.ctx.displayRevision();
+        self.cursor_controller.presented(canonical_present);
+        if (self.cursor_controller.clean_pending and !canonical_present) self.invalidateCursor();
         if (self.performance_present) |trace| {
             if (display_copy_succeeded and display_present_succeeded and
                 (cull_stats.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index))) != 0)
@@ -5337,10 +5366,36 @@ pub const App = struct {
             self.blink_phase == 0,
             self.cursor_x,
             self.cursor_y,
+            self.cursor_controller.software,
             self.hover_target,
             self.mouse_down_target,
             damage_rect,
         );
+    }
+
+    fn syncCursor(self: *App) bool {
+        const changed = self.cursor_controller.poll(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0,
+            self.cursor_x, self.cursor_y, !self.terminal_mode);
+        if (changed) self.invalidateCursor();
+        return changed;
+    }
+
+    fn publishRemoteScene(self: *App, physical_regions: []const surface.Rect) i32 {
+        if (!self.scene.matches(self.screen_w, self.screen_h)) return r4os.abi.remote_frame_error_unavailable;
+        var regions: [surface.max_damage_regions]surface.Rect = undefined;
+        var count: usize = 0;
+        for (physical_regions) |rect| appendDamageRegion(&regions, &count, rect);
+        if (self.capture_cursor_damage.active) {
+            if (clipDamageRect(self.capture_cursor_damage.old_rect, self.screen_w, self.screen_h)) |rect| appendDamageRegion(&regions, &count, rect);
+            if (clipDamageRect(self.capture_cursor_damage.new_rect, self.screen_w, self.screen_h)) |rect| appendDamageRegion(&regions, &count, rect);
+        }
+        if (count == 0) return r4os.abi.remote_frame_error_unavailable;
+        var capture: @import("cursor_capture.zig").Overlay = .{};
+        if (!self.cursor_controller.software and !self.terminal_mode) capture.apply(&self.scene, self.cursor_x, self.cursor_y);
+        defer capture.restore(&self.scene);
+        const rc = self.ctx.remoteFramePublishSceneRegionsCursor(&self.scene, regions[0..count], self.cursor_x, self.cursor_y, !self.terminal_mode);
+        if (rc >= 0 or rc == r4os.abi.remote_frame_error_unavailable) self.capture_cursor_damage.reset();
+        return rc;
     }
 
     fn ensureSceneBuffer(self: *App) bool {
@@ -8261,7 +8316,8 @@ pub const App = struct {
         self.cursor_x = next_x;
         self.cursor_y = next_y;
         const new_rect = surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
-        self.queueCursorDamage(old_rect, new_rect);
+        if (self.cursor_controller.software) self.queueCursorDamage(old_rect, new_rect);
+        self.capture_cursor_damage.add(old_rect, new_rect);
         self.render_stats.cursor_moves +%= 1;
         return true;
     }

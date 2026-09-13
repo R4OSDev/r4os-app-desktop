@@ -1,3 +1,4 @@
+const cursor_asset = @import("cursor_asset.zig");
 const r4os = @import("r4os");
 const desk_api = @import("api.zig");
 const std = @import("std");
@@ -1691,72 +1692,22 @@ pub fn cursor(ctx: *const desk_api.Context, x: i32, y: i32, screen_w: i32, scree
 
     var row: usize = 0;
     while (row < @as(usize, @intCast(surface.cursor_h))) : (row += 1) {
-        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursorBlackBits(row), 0x000000);
-        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursorWhiteBits(row), 0xFFFFFF);
+        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursor_asset.blackBits(row), 0x000000);
+        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursor_asset.whiteBits(row), 0xFFFFFF);
     }
 }
 
 fn cursorRuns(ctx: *const desk_api.Context, x: i32, y: i32, bits: u16, color: u32) void {
     var col: usize = 0;
     while (col < @as(usize, @intCast(surface.cursor_w))) {
-        if (!cursorBitSet(bits, col)) {
+        if (!cursor_asset.bitSet(bits, col)) {
             col += 1;
             continue;
         }
         const start = col;
-        while (col < @as(usize, @intCast(surface.cursor_w)) and cursorBitSet(bits, col)) : (col += 1) {}
+        while (col < @as(usize, @intCast(surface.cursor_w)) and cursor_asset.bitSet(bits, col)) : (col += 1) {}
         ctx.paintRect(x + @as(i32, @intCast(start)), y, @intCast(col - start), 1, color);
     }
-}
-
-fn cursorBitSet(bits: u16, col: usize) bool {
-    const shift: u4 = @intCast(11 - col);
-    return (bits & (@as(u16, 1) << shift)) != 0;
-}
-
-fn cursorBlackBits(row: usize) u16 {
-    return switch (row) {
-        0 => 0b100000000000,
-        1 => 0b110000000000,
-        2 => 0b101000000000,
-        3 => 0b100100000000,
-        4 => 0b100010000000,
-        5 => 0b100001000000,
-        6 => 0b100000100000,
-        7 => 0b100000010000,
-        8 => 0b100000001000,
-        9 => 0b100000000100,
-        10 => 0b100001111100,
-        11 => 0b100101000000,
-        12 => 0b101001000000,
-        13 => 0b110010100000,
-        14 => 0b100010100000,
-        15 => 0b000010010000,
-        16 => 0b000010010000,
-        17 => 0b000001100000,
-        else => 0,
-    };
-}
-
-fn cursorWhiteBits(row: usize) u16 {
-    return switch (row) {
-        2 => 0b010000000000,
-        3 => 0b011000000000,
-        4 => 0b011100000000,
-        5 => 0b011110000000,
-        6 => 0b011111000000,
-        7 => 0b011111100000,
-        8 => 0b011111110000,
-        9 => 0b011111111000,
-        10 => 0b011110000000,
-        11 => 0b011010000000,
-        12 => 0b010010000000,
-        13 => 0b000001000000,
-        14 => 0b000001000000,
-        15 => 0b000001100000,
-        16 => 0b000001100000,
-        else => 0,
-    };
 }
 
 fn windowButton(ctx: *const desk_api.Context, x: i32, y: i32, glyph: ButtonGlyph, pressed: bool) void {
@@ -2977,6 +2928,8 @@ fn utf8SequenceLengthAt(value: []const u8, start: usize) usize {
 }
 
 test "indexed dirty replay matches the full painter including text alpha and clear order" {
+    try @import("cursor_controller_test.zig").check();
+    try checkCursorCapture();
     const index_module = @import("gui_command_index.zig");
     var commands: [1027]r4os.abi.GuiFrameCommand = undefined;
     commands[0] = .{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x203040 };
@@ -3015,6 +2968,24 @@ test "indexed dirty replay matches the full painter including text alpha and cle
         }
     }
     try std.testing.expectEqualSlices(u32, &expected, &actual);
+}
+
+fn checkCursorCapture() !void {
+    const capture = @import("cursor_capture.zig");
+    var software_pixels: [32 * 32]u32 = undefined;
+    var capture_pixels: [32 * 32]u32 = undefined;
+    var scene: scene_buffer.SceneBuffer = .{};
+    var ctx: desk_api.Context = undefined; ctx.scene = &scene;
+    for ([_][2]i32{.{2,3},.{-5,-7},.{30,31}}) |position| {
+        @memset(&software_pixels, 0x2468ac); @memset(&capture_pixels, 0x2468ac);
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&software_pixels), 32, 32));
+        cursor(&ctx, position[0], position[1], 32, 32);
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&capture_pixels), 32, 32));
+        var arrow: capture.Overlay = .{}; arrow.apply(&scene, position[0], position[1]);
+        try std.testing.expectEqualSlices(u32, &software_pixels, &capture_pixels);
+        arrow.restore(&scene);
+        for (capture_pixels) |pixel| try std.testing.expectEqual(@as(u32, 0x2468ac), pixel);
+    }
 }
 
 test "hosted command text clipping keeps visible prefix" {

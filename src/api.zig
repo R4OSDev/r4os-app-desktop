@@ -555,6 +555,10 @@ pub const Context = struct {
     }
 
     pub fn remoteFramePublishSceneRegions(self: *const Context, scene: *const scene_buffer.SceneBuffer, rects: []const surface.Rect, cursor_x: i32, cursor_y: i32) i32 {
+        return self.remoteFramePublishSceneRegionsCursor(scene, rects, cursor_x, cursor_y, true);
+    }
+
+    pub fn remoteFramePublishSceneRegionsCursor(self: *const Context, scene: *const scene_buffer.SceneBuffer, rects: []const surface.Rect, cursor_x: i32, cursor_y: i32, cursor_visible: bool) i32 {
         if (rects.len == 0 or rects.len > r4os.abi.display_damage_max_regions) return r4os.abi.remote_frame_error_invalid;
         if (scene.width <= 0 or scene.height <= 0) return r4os.abi.remote_frame_error_invalid;
         const pixels = scene.pixels orelse return r4os.abi.remote_frame_error_unavailable;
@@ -578,7 +582,7 @@ pub const Context = struct {
             .dirty_h = @intCast(bounds.h),
             .cursor_x = cursor_x,
             .cursor_y = cursor_y,
-            .cursor_flags = r4os.abi.remote_frame_cursor_flag_visible,
+            .cursor_flags = if (cursor_visible) r4os.abi.remote_frame_cursor_flag_visible else 0,
         };
         const frame_pixels = @as(u64, info.width) * info.height;
         const max_frame_pixels: u64 = 0xffff_ffff / @sizeOf(u32);
