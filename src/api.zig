@@ -638,6 +638,28 @@ pub const Context = struct {
         self.scene = null;
     }
 
+    pub const LayerPaint = struct {
+        context: Context,
+        hook: ?scene_buffer.SceneBuffer.LayerHook = null,
+        key: u32 = 0,
+        pub fn end(self: *const LayerPaint) void {
+            if (self.context.scene) |scene| scene.flushPending();
+            if (self.hook) |hook| hook.end(hook.context,self.key);
+        }
+    };
+    // Painter order and geometry stay in compositor.zig. A collector can
+    // redirect one layer, or reuse it without replaying its drawing commands.
+    pub fn beginLayer(self: *const Context, key: u32, bounds: surface.Rect) ?LayerPaint {
+        var result: LayerPaint = .{ .context = self.* };
+        const scene = self.scene orelse return result;
+        const hook = scene.layer_hook orelse return result;
+        scene.flushPending();
+        result.context.scene = hook.begin(hook.context,key,bounds,scene.paintBounds()) orelse return null;
+        result.context.graphics = null;
+        result.hook = hook; result.key = key;
+        return result;
+    }
+
     pub fn scenePaintBounds(self: *const Context) ?surface.Rect {
         const scene = self.scene orelse return null;
         return scene.paintBounds();

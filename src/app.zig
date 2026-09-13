@@ -5,6 +5,8 @@ const r4std = @import("r4std");
 const appearance_signal = @import("appearance_signal.zig");
 const desk_api = @import("api.zig");
 const compositor = @import("compositor.zig");
+const composition_worker = @import("composition_worker.zig");
+const composition_software = @import("composition_software.zig");
 const desktop_config = @import("desktop_config.zig");
 const desktop_folder = @import("desktop_folder.zig");
 const desktop_items = @import("desktop_items.zig");
@@ -292,6 +294,9 @@ pub const App = struct {
     render_stats: compositor.RenderStats = .{},
     present_source_generation: u64 = 0,
     scene: scene_buffer.SceneBuffer = .{},
+    composition: ?*composition_worker.Worker = null,
+    cpu_scene_current: bool = false,
+    gpu_pending: ?GpuFrame = null,
     cursor_controller: @import("cursor_controller.zig").Controller = .{},
     capture_cursor_damage: CursorDamage = .{},
     cursor_x: i32 = 0,
@@ -534,6 +539,7 @@ pub const App = struct {
                 self.ctx.sleepTicks(self.loop_sleep_ticks);
                 continue;
             }
+            self.pollComposition();
             var needs_redraw = self.syncDesktopFolder();
             if (self.syncOutputRevision()) needs_redraw = true;
             if (self.syncTrayBroker()) needs_redraw = true;
@@ -578,6 +584,12 @@ pub const App = struct {
     }
 
     fn idleWait(self: *App, active: bool) void {
+        if (self.composition) |worker| if (worker.busy()) {
+            // Damage coalesces while this immutable capture is in flight.
+            // Input is still consumed every cycle without a busy-yield loop.
+            self.ctx.sleepTicks(1);
+            return;
+        };
         if (active) {
             // A freshly launched GUI task must get a turn immediately. A
             // timer wait here can miss the child's first revision wake while
@@ -1495,6 +1507,38 @@ pub const App = struct {
         self.ctx.write(" fills="); self.ctx.printU64(graphics.fills);
         self.ctx.write(" imports="); self.ctx.printU64(info.imports);
         self.ctx.println(" rejected=0");
+        self.smokeCompositionResources();
+    }
+
+    fn smokeCompositionResources(self: *App) void {
+        const worker = self.composition orelse self.windowIdleSmokeFailed("composition-owner");
+        if (worker.busy() or worker.available(self.output_revision)) return;
+        self.invalidateFull(); self.redraw();
+        const expected = std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?));
+        const bounds = self.scene.fullRect();
+        const offsets = self.consoleScrollOffsets(); const views = self.guiFrameViews();
+        // Both passes replay the productive scene. The second starts without
+        // any cached layer, as after compositor reconstruction.
+        for (0..2) |_| {
+            worker.cache.start(bounds) catch self.windowIdleSmokeFailed("composition-capture");
+            self.scene.layer_hook = worker.cache.hook();
+            self.ctx.beginSceneClipped(&self.scene,bounds);
+            _ = self.composeDamageRect(bounds,&offsets,&views);
+            self.ctx.endScene(); self.scene.clearPaintClip(); self.scene.layer_hook = null;
+            _ = worker.cache.finish() catch self.windowIdleSmokeFailed("composition-layers");
+            _ = composition_software.paint(&worker.graphics.client,&worker.graphics.device,&worker.cache,&self.scene) catch
+                self.windowIdleSmokeFailed("composition-software");
+            if (std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-pixels");
+            worker.cache.deinit();
+        }
+        // Enter the same asynchronous failure branch as a rejected GPU
+        // frame, then require full reconstruction from the current sources.
+        @memset(self.scene.pixels.?,0x13579B);
+        worker.engine.cancel(error.Unsupported);
+        self.pollComposition(); self.redraw();
+        if (!self.cpu_scene_current or worker.busy() or
+            std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-fallback");
+        self.ctx.println("DESKTOP composition: OK layers=shared reconstruction=2 fault=software idle=no-gpu-job");
     }
 
     fn smokeGeometryMatches(self: *App, index: usize) bool {
@@ -5126,6 +5170,8 @@ pub const App = struct {
     }
 
     fn redraw(self: *App) void {
+        self.pollComposition();
+        if (self.composition) |worker| if (worker.blocksCapture()) return;
         _ = self.updateTrayLayout();
         var regions: [surface.max_damage_regions]surface.Rect = undefined;
         var region_count = self.damage.takeRegions(&regions);
@@ -5219,8 +5265,101 @@ pub const App = struct {
         return self.ctx.fileWrite("C:\\TEMP\\SNES-PRESENT.TXT", output[0..length]) == @as(i32, @intCast(length));
     }
 
+    const GpuFrame = struct {
+        bounds: surface.Rect,
+        pixels: u32,
+        regions: u32,
+        kind: compositor.DamageKind,
+        start_tick: u64,
+        start_ns: u64,
+        composed_tick: u64,
+        composed_ns: u64,
+        cursor_queued_tick: u64,
+        cull: compositor.CullStats,
+        gui_generations: [4]u64,
+        remote_result: i32 = r4os.abi.remote_frame_error_unavailable,
+    };
+
+    fn captureGpuFrame(self: *App, regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) bool {
+        const worker = self.composition orelse return false;
+        if (!self.ensureSceneBuffer()) { worker.rejectCapture(); return false; }
+        const start_tick = self.ctx.ticks();
+        const start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+        worker.cache.start(surface.desktop(self.screen_w, self.screen_h).rect) catch { worker.rejectCapture(); return false; };
+        self.scene.layer_hook = worker.cache.hook();
+        defer self.scene.layer_hook = null;
+        self.refreshConsoleSnapshots();
+        const offsets = self.consoleScrollOffsets();
+        const views = self.guiFrameViews();
+        var cull = compositor.CullStats{};
+        var bounds = regions[0];
+        var pixels: u64 = 0;
+        for (regions) |region| {
+            self.ctx.beginSceneClipped(&self.scene, region);
+            accumulateCullStats(&cull, self.composeDamageRect(region, &offsets, &views));
+            self.ctx.endScene(); self.scene.clearPaintClip();
+            bounds = bounds.merged(region); pixels +|= rectArea(region);
+        }
+        _ = worker.cache.finish() catch { worker.rejectCapture(); self.cpu_scene_current = false; return false; };
+        var frame: GpuFrame = .{ .bounds = bounds, .pixels = @intCast(@min(pixels, std.math.maxInt(u32))),
+            .regions = @intCast(regions.len), .kind = if (regions.len == 1 and isFullRect(bounds,self.screen_w,self.screen_h)) .full else kind,
+            .start_tick = start_tick, .start_ns = start_ns, .composed_tick = self.ctx.ticks(),
+            .composed_ns = self.ctx.sys.monotonicNanoseconds() orelse 0, .cursor_queued_tick = cursor_queued_tick,
+            .cull = cull, .gui_generations = undefined };
+        for (views, 0..) |view, index| frame.gui_generations[index] = view.info.committed_generation;
+        // Remote capture is an explicit CPU consumer. Ordinary local frames
+        // never reconstruct or copy a final CPU fullscreen image.
+        if (self.remote_frame_consumers != 0) {
+            const graphics = self.ctx.graphics orelse { worker.rejectCapture(); self.cpu_scene_current = false; return false; };
+            _ = composition_software.paint(&graphics.client, &graphics.device, &worker.cache, &self.scene) catch {
+                worker.rejectCapture(); self.cpu_scene_current = false; return false;
+            };
+            self.cpu_scene_current = true;
+            frame.remote_result = self.publishRemoteScene(regions);
+        } else self.cpu_scene_current = false;
+        if (!worker.start()) { worker.rejectCapture(); self.cpu_scene_current = false; return false; }
+        self.gpu_pending = frame;
+        return true;
+    }
+
+    fn pollComposition(self: *App) void {
+        const worker = self.composition orelse return;
+        switch (worker.poll(&self.ctx.draw)) {
+            .idle, .pending => {},
+            .failed => {
+                self.gpu_pending = null; self.cpu_scene_current = false;
+                self.render_stats.present_backend_fallbacks +%= 1;
+                self.invalidateFull();
+                self.ctx.println("R4DESK composition: software fallback; complete scene reconstruction");
+            },
+            .visible => {
+                const frame = self.gpu_pending orelse return;
+                self.gpu_pending = null;
+                const now = self.ctx.ticks(); const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                self.last_display_revision = self.ctx.displayRevision();
+                self.cursor_controller.presented(true);
+                if (self.performance_present) |trace| if (frame.cull.rendered_gui_windows & (@as(u8,1) << @intCast(trace.window_index)) != 0)
+                    trace.record(frame.gui_generations[trace.window_index]);
+                self.recordPresentStats(frame.bounds, frame.pixels, frame.regions, frame.kind,
+                    elapsedTicks(frame.start_tick,now), elapsedTicks(frame.start_tick,frame.composed_tick), elapsedTicks(frame.composed_tick,now),
+                    elapsedNanoseconds(frame.start_ns,now_ns), elapsedNanoseconds(frame.start_ns,frame.composed_ns), elapsedNanoseconds(frame.composed_ns,now_ns),
+                    if (frame.cursor_queued_tick == 0) 0 else elapsedTicks(frame.cursor_queued_tick,now),
+                    frame.cull, 0, false, true, false, frame.remote_result, .{});
+                // The counters above describe CPU copies; this was a native
+                // present whose visibility was independently observed.
+                self.render_stats.present_attempts +%= 1;
+                self.render_stats.present_successes +%= 1;
+            },
+        }
+    }
+
     fn presentDamageRegionsTimed(self: *App, damage_regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) void {
         if (damage_regions.len == 0) return;
+        self.pollComposition();
+        if (self.composition) |worker| if (worker.blocksCapture()) {
+            for (damage_regions) |region| self.damage.invalidate(region);
+            return;
+        };
         var clipped_storage: [surface.max_damage_regions]surface.Rect = undefined;
         var clipped_count: usize = 0;
         for (damage_regions) |region| {
@@ -5229,6 +5368,21 @@ pub const App = struct {
             }
         }
         if (clipped_count == 0) return;
+        const gpu_available = if (self.composition) |worker|
+            self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision) else false;
+        if (gpu_available) {
+            const worker = self.composition.?;
+            if (worker.engine.needsFull(self.screen_w, self.screen_h) or
+                (self.remote_frame_consumers != 0 and !self.cpu_scene_current)) {
+                clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect; clipped_count = 1;
+            }
+            if (self.captureGpuFrame(clipped_storage[0..clipped_count], kind, cursor_queued_tick)) return;
+        }
+        // GPU output and the fallback's CPU scene are separate resources.
+        // Reconstruct the entire scene before a backend/fault fallback.
+        if (!self.cpu_scene_current) {
+            clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect; clipped_count = 1;
+        }
         const clipped_regions = clipped_storage[0..clipped_count];
         var damage_bounds = clipped_regions[0];
         var damage_pixels: u64 = 0;
@@ -5260,6 +5414,7 @@ pub const App = struct {
                 self.scene.clearPaintClip();
             }
         }
+        self.cpu_scene_current = scene_ready;
         const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
         const compose_end_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const present_start = self.ctx.ticks();
@@ -5395,7 +5550,7 @@ pub const App = struct {
     }
 
     fn publishRemoteScene(self: *App, physical_regions: []const surface.Rect) i32 {
-        if (!self.scene.matches(self.screen_w, self.screen_h)) return r4os.abi.remote_frame_error_unavailable;
+        if (!self.cpu_scene_current or !self.scene.matches(self.screen_w, self.screen_h)) return r4os.abi.remote_frame_error_unavailable;
         var regions: [surface.max_damage_regions]surface.Rect = undefined;
         var count: usize = 0;
         for (physical_regions) |rect| appendDamageRegion(&regions, &count, rect);

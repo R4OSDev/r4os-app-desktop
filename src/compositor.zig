@@ -33,6 +33,18 @@ pub const TasksOverlay = struct {
 pub const RenderStats = draw.RenderStats;
 pub const DamageKind = draw.DamageKind;
 
+// Stable desktop-owned resource identities. Ordering remains the calls in
+// compose/drawWindows, including transient menus and the final cursor.
+pub const Layer = enum(u32) {
+    background = 1, info, wallpaper, grid, taskbar, tray_tooltip,
+    volume_tooltip, start_menu, system_menu, time_menu, volume_popup,
+    overlay, cursor, terminal,
+    item_base = 32, window_base = 64,
+};
+fn layer(ctx: *const desk_api.Context, id: Layer, bounds: surface.Rect) ?desk_api.Context.LayerPaint {
+    return ctx.beginLayer(@intFromEnum(id),bounds);
+}
+
 pub const CullStats = struct {
     layers_visited: u32 = 0,
     layers_culled: u32 = 0,
@@ -118,18 +130,25 @@ pub fn compose(
     if (terminal_mode) {
         if (layerVisible(&stats, damage, desktop_rect)) {
             const snapshot = if (console_snapshots.len > 0) &console_snapshots[0] else null;
-            draw.fullscreenConsole(ctx, screen_w, screen_h, snapshot, terminal_font_size, cursor_blink_on);
+            if (layer(ctx,.terminal,desktop_rect)) |target| {
+                defer target.end();
+                draw.fullscreenConsole(&target.context, screen_w, screen_h, snapshot, terminal_font_size, cursor_blink_on);
+            }
         }
         return stats;
     }
 
     if (layerVisible(&stats, damage, desktop_rect)) {
-        draw.desktopBackground(ctx, screen_w, screen_h, config.desktop_bg);
+        if (layer(ctx,.background,desktop_rect)) |target| {
+            defer target.end(); draw.desktopBackground(&target.context, screen_w, screen_h, config.desktop_bg);
+        }
     }
 
     const info_rect = draw.desktopInfoRect(ctx, screen_w, screen_h);
     if (layerVisible(&stats, damage, info_rect)) {
-        draw.desktopInfoLayer(ctx, screen_w, screen_h, config.desktop_bg);
+        if (layer(ctx,.info,info_rect)) |target| {
+            defer target.end(); draw.desktopInfoLayer(&target.context, screen_w, screen_h, config.desktop_bg);
+        }
     }
 
     if (wallpaper_view.pixels.len > 0) {
@@ -141,14 +160,18 @@ pub fn compose(
             .h = @intCast(wallpaper_view.height),
         };
         if (layerVisible(&stats, damage, wallpaper_rect)) {
-            ctx.paintXrgb32(origin.x, origin.y, wallpaper_view.width, wallpaper_view.height, wallpaper_view.pixels);
+            if (layer(ctx,.wallpaper,wallpaper_rect)) |target| {
+                defer target.end(); target.context.paintXrgb32(origin.x, origin.y, wallpaper_view.width, wallpaper_view.height, wallpaper_view.pixels);
+            }
         }
     }
 
     if (desktop_grid_drag_index != desktop_items.no_selection and
         layerVisible(&stats, damage, surface.workArea(screen_w, screen_h, theme.taskbar_h)))
     {
-        draw.desktopItemGrid(ctx, screen_w, screen_h, items, desktop_grid_drag_index);
+        if (layer(ctx,.grid,surface.workArea(screen_w,screen_h,theme.taskbar_h))) |target| {
+            defer target.end(); draw.desktopItemGrid(&target.context, screen_w, screen_h, items, desktop_grid_drag_index);
+        }
     }
 
     if (layerVisible(&stats, damage, surface.workArea(screen_w, screen_h, theme.taskbar_h))) {
@@ -166,59 +189,77 @@ pub fn compose(
 
     const taskbar_rect = surface.taskbar(screen_w, screen_h, theme.taskbar_h).rect;
     if (layerVisible(&stats, damage, taskbar_rect)) {
-        draw.taskbar(ctx, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, volume_view, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
+        if (layer(ctx,.taskbar,taskbar_rect)) |target| {
+            defer target.end(); draw.taskbar(&target.context, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, volume_view, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
+        }
     }
 
     if (tray_registry.tooltipRect(tray_hover, screen_w, screen_h, theme.taskbar_h)) |tooltip_rect| {
         if (layerVisible(&stats, damage, tooltip_rect)) {
-            draw.trayTooltip(ctx, tray_registry, tray_hover, screen_w, screen_h);
+            if (layer(ctx,.tray_tooltip,tooltip_rect)) |target| {
+                defer target.end(); draw.trayTooltip(&target.context, tray_registry, tray_hover, screen_w, screen_h);
+            }
         }
     }
 
     if (hover_target == .taskbar_volume and !volume_view.popup_open) {
         const tooltip_rect = draw.volumeTooltipRect(screen_w, screen_h, config.taskbar_clock);
         if (layerVisible(&stats, damage, tooltip_rect)) {
-            draw.volumeTooltip(ctx, screen_w, screen_h, config.taskbar_clock, volume_view);
+            if (layer(ctx,.volume_tooltip,tooltip_rect)) |target| {
+                defer target.end(); draw.volumeTooltip(&target.context, screen_w, screen_h, config.taskbar_clock, volume_view);
+            }
         }
     }
 
     if (start_open) {
         const rect = startMenuRect(screen_w, screen_h, menu, menu_submenu_open, menu_submenu_parent, menu_nested_open, menu_nested_parent);
         if (layerVisible(&stats, damage, rect)) {
-            draw.startMenu(ctx, screen_w, screen_h, menu, menu_selected, menu_submenu_open, menu_submenu_parent, menu_submenu_selected, menu_nested_open, menu_nested_parent, menu_nested_selected, hover_target, pressed_target);
+            if (layer(ctx,.start_menu,rect)) |target| {
+                defer target.end(); draw.startMenu(&target.context, screen_w, screen_h, menu, menu_selected, menu_submenu_open, menu_submenu_parent, menu_submenu_selected, menu_nested_open, menu_nested_parent, menu_nested_selected, hover_target, pressed_target);
+            }
         }
     }
 
     if (system_menu.open and system_menu.window_index < windows.len) {
         const rect = surface.Rect{ .x = system_menu.x, .y = system_menu.y, .w = draw.system_menu_w, .h = draw.system_menu_h };
         if (layerVisible(&stats, damage, rect)) {
-            draw.systemMenu(ctx, system_menu.x, system_menu.y, &windows[system_menu.window_index], system_menu.window_index, hover_target, pressed_target);
+            if (layer(ctx,.system_menu,rect)) |target| {
+                defer target.end(); draw.systemMenu(&target.context, system_menu.x, system_menu.y, &windows[system_menu.window_index], system_menu.window_index, hover_target, pressed_target);
+            }
         }
     }
 
     if (time_menu_open) {
         const rect = draw.timeMenuRect(screen_w, screen_h);
         if (layerVisible(&stats, damage, rect)) {
-            draw.timeMenu(ctx, screen_w, screen_h, hover_target, pressed_target);
+            if (layer(ctx,.time_menu,rect)) |target| {
+                defer target.end(); draw.timeMenu(&target.context, screen_w, screen_h, hover_target, pressed_target);
+            }
         }
     }
 
     if (volume_view.popup_open) {
         const rect = draw.volumePopupRect(screen_w, screen_h, config.taskbar_clock);
         if (layerVisible(&stats, damage, rect)) {
-            draw.volumePopup(ctx, screen_w, screen_h, config.taskbar_clock, volume_view, hover_target, pressed_target);
+            if (layer(ctx,.volume_popup,rect)) |target| {
+                defer target.end(); draw.volumePopup(&target.context, screen_w, screen_h, config.taskbar_clock, volume_view, hover_target, pressed_target);
+            }
         }
     }
 
     if (overlayRect(screen_w, screen_h, overlay)) |rect| {
         if (layerVisible(&stats, damage, rect)) {
-            drawOverlay(ctx, screen_w, screen_h, windows, active_window, overlay, hover_target, pressed_target);
+            if (layer(ctx,.overlay,rect)) |target| {
+                defer target.end(); drawOverlay(&target.context, screen_w, screen_h, windows, active_window, overlay, hover_target, pressed_target);
+            }
         }
     }
 
     const cursor_rect = surface.cursor(cursor_x, cursor_y, screen_w, screen_h).rect;
     if (cursor_visible and layerVisible(&stats, damage, cursor_rect)) {
-        draw.cursor(ctx, cursor_x, cursor_y, screen_w, screen_h);
+        if (layer(ctx,.cursor,cursor_rect)) |target| {
+            defer target.end(); draw.cursor(&target.context, cursor_x, cursor_y, screen_w, screen_h);
+        }
     }
     return stats;
 }
@@ -248,7 +289,9 @@ fn drawDesktopItems(
             stats.items_culled +%= 1;
             continue;
         }
-        draw.desktopItem(ctx, items, index, selected, hover_target, pressed_target, bg_color, icon_text_color);
+        if (ctx.beginLayer(@intFromEnum(Layer.item_base)+@as(u32,@intCast(index)),draw.desktopItemRect(items,index))) |target| {
+            defer target.end(); draw.desktopItem(&target.context, items, index, selected, hover_target, pressed_target, bg_color, icon_text_color);
+        }
     }
 }
 
@@ -334,6 +377,11 @@ test "opaque higher windows cull only covered damage and respect visibility and 
 
 test "occlusion composition matches complete painter order after move hide minimize and focus" {
     const scene_buffer = @import("scene_buffer.zig");
+    const composition_layers = @import("composition_layers.zig");
+    var cache = composition_layers.Cache.init(std.testing.allocator,8*1024*1024);
+    defer cache.deinit();
+    var provider: @import("gfx_renderer_test.zig").Fixture = .{};
+    const graphics = try provider.open(); defer graphics.destroy();
     var windows = [_]window.Window{.{
         .kind = .app,
         .x = 10,
@@ -355,6 +403,7 @@ test "occlusion composition matches complete painter order after move hide minim
     for (&frames, 0..) |*frame, i| frame.* = .{ .valid = true, .commands = commands[i .. i + 1] };
     var reference: [320 * 200]u32 = undefined;
     var actual: [320 * 200]u32 = undefined;
+    var composed: [320 * 200]u32 = undefined;
     var scene = scene_buffer.SceneBuffer{};
     var ctx: desk_api.Context = undefined;
     ctx.scene = &scene;
@@ -388,12 +437,43 @@ test "occlusion composition matches complete painter order after move hide minim
         var stats = CullStats{};
         drawWindows(&ctx, &windows, &frames, active, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, damage, &stats);
         try std.testing.expectEqualSlices(u32, &reference, &actual);
+        @memset(&composed,0xABCDEF);
+        try std.testing.expect(scene.attach(std.mem.sliceAsBytes(&composed),320,200));
+        try cache.start(scene.fullRect()); scene.layer_hook = cache.hook();
+        var layer_stats: CullStats = .{};
+        drawWindows(&ctx,&windows,&frames,active,"","","",&.{},&.{},8,0,false,.none,.none,damage,&layer_stats);
+        scene.layer_hook = null;
+        const composition_commands = try cache.finish();
+        try std.testing.expect(composition_commands.len != 0);
+        _ = try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&scene);
+        try std.testing.expectEqualSlices(u32,&reference,&composed);
+        // Repeating the scene keeps all pixel generations; no dirty upload
+        // is needed, although its ordinary painter order is still recorded.
+        var generations: [composition_layers.capacity]u64 = undefined;
+        for (&cache.entries,0..) |*entry,i| { generations[i] = entry.generation; cache.uploaded(i,entry.generation); }
+        const changed = cache.changed_bytes;
+        try cache.start(scene.fullRect()); scene.layer_hook = cache.hook();
+        drawWindows(&ctx,&windows,&frames,active,"","","",&.{},&.{},8,0,false,.none,.none,damage,&layer_stats);
+        scene.layer_hook = null; _ = try cache.finish();
+        try std.testing.expect(cache.changed_bytes == changed);
+        for (&cache.entries,0..) |*entry,i| try std.testing.expect(entry.generation == generations[i] and entry.dirty == null);
         if (scenario == 0) {
             try std.testing.expectEqual(@as(u32, 3), stats.windows_culled);
             try std.testing.expectEqual(@as(u64, 4), baseline_stats.gui_frame_commands);
             try std.testing.expectEqual(@as(u64, 1), stats.gui_frame_commands);
         }
     }
+    try cache.start(scene.fullRect());
+    const idle = try cache.finish();
+    try std.testing.expect(idle.len == 0);
+    const idle_stats = try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&scene);
+    try std.testing.expect(idle_stats.commands == 0 and idle_stats.pixels == 0);
+    var tiny = composition_layers.Cache.init(std.testing.allocator,4);
+    defer tiny.deinit();
+    try tiny.start(scene.fullRect());
+    try std.testing.expectError(error.OutOfMemory,tiny.begin(1,scene.fullRect(),scene.fullRect()));
+    try std.testing.expect(tiny.reserved == 0 and tiny.command_count == 0);
+    try @import("composition_gpu_test.zig").check();
 }
 
 fn drawWindow(
@@ -424,7 +504,12 @@ fn drawWindow(
     const scroll_offset = if (index < console_scroll_offsets.len) console_scroll_offsets[index] else 0;
     const console_snapshot = if (index < console_snapshots.len) &console_snapshots[index] else null;
     const gui_frame = if (index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
-    const replay = draw.appWindow(ctx, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    const target = ctx.beginLayer(@intFromEnum(Layer.window_base)+@as(u32,@intCast(index)),win.frameSurface().rect) orelse {
+        if (gui_frame.valid and index < 8) stats.rendered_gui_windows |= @as(u8,1) << @intCast(index);
+        return;
+    };
+    defer target.end();
+    const replay = draw.appWindow(&target.context, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
     stats.gui_frame_commands +%= replay.commands;
     stats.gui_resource_bytes +%= replay.resource_bytes;
     if (gui_frame.valid and replay.commands != 0 and index < 8) stats.rendered_gui_windows |= @as(u8, 1) << @intCast(index);

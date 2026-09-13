@@ -422,7 +422,7 @@ fn glyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context
     const w = layout.cell_width;
     const h = layout.cell_height;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
-    if (x >= scene.width or y >= scene.height) return;
+    if (!scene.fullRect().intersects(.{ .x = x, .y = y, .w = @intCast(w), .h = @intCast(h) })) return;
 
     rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0 .. w * h]);
 
@@ -441,7 +441,8 @@ fn glyphClipped(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, l
 }
 
 fn glyphSceneClipped(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
-    const clipped = clipGlyphCell(bounds, x, y, layout.cell_width, layout.cell_height, scene.width, scene.height) orelse return;
+    const layer_bounds = scene.clipRect(bounds) orelse return;
+    const clipped = clipGlyphCell(layer_bounds, x, y, layout.cell_width, layout.cell_height, scene.fullRect().right(), scene.fullRect().bottom()) orelse return;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     const count = layout.cell_width * layout.cell_height;
     rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0..count]);

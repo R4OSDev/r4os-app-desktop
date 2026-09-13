@@ -4,6 +4,7 @@ const r4std = @import("r4std");
 const desktop_api = @import("api.zig");
 const app = @import("app.zig");
 const gfx_renderer = @import("gfx_renderer.zig");
+const composition_worker = @import("composition_worker.zig");
 
 pub fn r4_app_main(r4_app: *r4os.App) i32 {
     if (!r4std.init(r4_app.startContext())) return r4os.abi.err_no_group;
@@ -23,6 +24,14 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
             ctx.write(" adapter="); ctx.printU64(info.adapter_id); ctx.write("\n");
         }
     } else ctx.println("R4DESK gfx: scene fallback");
-    var desktop = app.App{ .ctx = &ctx, .images = &images };
+    const composition = composition_worker.Worker.create(ctx.allocator(), r4_app.startContext(), ctx.sys);
+    defer if (composition) |worker| {
+        ctx.write("R4DESK composition: visible="); ctx.printU64(worker.frames_visible);
+        ctx.write(" uploads="); ctx.printU64(worker.engine.uploaded_bytes);
+        ctx.write(" draws="); ctx.printU64(worker.engine.render_jobs);
+        ctx.write(" preparations="); ctx.printU64(worker.prepared_threads); ctx.write("\n");
+        worker.destroy();
+    };
+    var desktop = app.App{ .ctx = &ctx, .images = &images, .composition = composition };
     return desktop.run();
 }

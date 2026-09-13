@@ -62,7 +62,7 @@ pub const Renderer = struct {
     pub fn begin(self: *Renderer, scene: *scene_buffer.SceneBuffer) void {
         self.end();
         const pixels = scene.pixels orelse return;
-        if (scene.width <= 0 or scene.height <= 0) return;
+        if (scene.width <= 0 or scene.height <= 0 or scene.premultiplied or scene.origin_x != 0 or scene.origin_y != 0 or scene.layer_hook != null) return;
         const generation = std.math.add(u64, self.generation, 1) catch return;
         var descriptor = std.mem.zeroes(gfx.R4GfxResourceDesc);
         descriptor.version = 1; descriptor.size = @sizeOf(gfx.R4GfxResourceDesc);
