@@ -159,9 +159,12 @@ pub const Window = struct {
     }
 
     pub fn setMinClientSize(self: *Window, client_w: i32, client_h: i32, screen_w: i32, screen_h: i32) bool {
-        const work_h = @max(default_min_h, screen_h - theme.taskbar_h);
-        const next_w = clamp(@max(default_min_w, client_w + 16), default_min_w, @max(default_min_w, screen_w));
-        const next_h = clamp(@max(default_min_h, client_h + theme.title_h + 18), default_min_h, work_h);
+        return self.setMinClientSizeIn(client_w, client_h, surface.workArea(screen_w, screen_h, theme.taskbar_h));
+    }
+    pub fn setMinClientSizeIn(self: *Window, client_w: i32, client_h: i32, work_area: surface.Rect) bool {
+        const work_h = @max(default_min_h, work_area.h);
+        const next_w = clamp(@max(default_min_w, client_w +| 16), default_min_w, @max(default_min_w, work_area.w));
+        const next_h = clamp(@max(default_min_h, client_h +| (theme.title_h + 18)), default_min_h, work_h);
         if (next_w == self.min_frame_w and next_h == self.min_frame_h) return false;
 
         self.min_frame_w = next_w;
@@ -172,16 +175,18 @@ pub const Window = struct {
                 .y = self.y,
                 .w = @max(self.w, self.min_frame_w),
                 .h = @max(self.h, self.min_frame_h),
-            }).clampInside(surface.workArea(screen_w, screen_h, theme.taskbar_h));
+            }).clampInside(work_area);
             self.setNormal(next.x, next.y, @max(next.w, self.min_frame_w), @max(next.h, self.min_frame_h));
         }
         return true;
     }
 
     pub fn toggleMaximize(self: *Window, screen_w: i32, screen_h: i32) void {
-        const work_area = surface.workArea(screen_w, screen_h, theme.taskbar_h);
+        self.toggleMaximizeIn(surface.workArea(screen_w, screen_h, theme.taskbar_h));
+    }
+    pub fn toggleMaximizeIn(self: *Window, work_area: surface.Rect) void {
         if (self.maximized) {
-            const restored = self.normalRect(screen_w, screen_h);
+            const restored = self.normalRectIn(work_area);
             self.x = restored.x;
             self.y = restored.y;
             self.w = restored.w;
@@ -270,16 +275,19 @@ pub const Window = struct {
     }
 
     pub fn resizeFrom(self: *Window, start: Geometry, handle: ResizeHandle, mouse_dx: i32, mouse_dy: i32, screen_w: i32, screen_h: i32) void {
+        self.resizeIn(start, handle, mouse_dx, mouse_dy, surface.workArea(screen_w, screen_h, theme.taskbar_h));
+    }
+    pub fn resizeIn(self: *Window, start: Geometry, handle: ResizeHandle, mouse_dx: i32, mouse_dy: i32, bounds: surface.Rect) void {
         if (!self.visible or self.minimized or self.maximized) return;
 
-        const work_w = screen_w;
-        const work_h = screen_h - theme.taskbar_h;
+        const work_w = bounds.right();
+        const work_h = bounds.bottom();
         var next = start;
 
         if (handle.affectsLeft()) {
             const right = start.x + start.w;
-            const max_x = @max(0, right - self.min_frame_w);
-            next.x = clamp(start.x + mouse_dx, 0, max_x);
+            const max_x = @max(bounds.x, right - self.min_frame_w);
+            next.x = clamp(start.x + mouse_dx, bounds.x, max_x);
             next.w = right - next.x;
         } else if (handle.affectsRight()) {
             const max_w = @max(self.min_frame_w, work_w - start.x);
@@ -288,8 +296,8 @@ pub const Window = struct {
 
         if (handle.affectsTop()) {
             const bottom = start.y + start.h;
-            const max_y = @max(0, bottom - self.min_frame_h);
-            next.y = clamp(start.y + mouse_dy, 0, max_y);
+            const max_y = @max(bounds.y, bottom - self.min_frame_h);
+            next.y = clamp(start.y + mouse_dy, bounds.y, max_y);
             next.h = bottom - next.y;
         } else if (handle.affectsBottom()) {
             const max_h = @max(self.min_frame_h, work_h - start.y);
@@ -300,7 +308,9 @@ pub const Window = struct {
     }
 
     fn normalRect(self: *const Window, screen_w: i32, screen_h: i32) surface.Rect {
-        const work_area = surface.workArea(screen_w, screen_h, theme.taskbar_h);
+        return self.normalRectIn(surface.workArea(screen_w, screen_h, theme.taskbar_h));
+    }
+    fn normalRectIn(self: *const Window, work_area: surface.Rect) surface.Rect {
         const w = clamp(self.normal_w, self.min_frame_w, @max(self.min_frame_w, work_area.w));
         const h = clamp(self.normal_h, self.min_frame_h, @max(self.min_frame_h, work_area.h));
         return (surface.Rect{
@@ -604,6 +614,14 @@ test "window app minimum client size raises resize floor" {
     win.resizeFrom(win.geometry(), .bottom_right, -400, -400, 640, 480);
     try std.testing.expectEqual(@as(i32, 256), win.w);
     try std.testing.expectEqual(@as(i32, 208), win.h);
+    // A late client minimum update on the left-hand output must retain its
+    // signed desktop position and use that output's logical work area.
+    win.x = -750; win.y = 50;
+    const secondary: surface.Rect = .{ .x = -800, .y = 0, .w = 800, .h = 600 };
+    try std.testing.expect(win.setMinClientSizeIn(300, 220, secondary));
+    try std.testing.expectEqual(@as(i32, -750), win.x);
+    try std.testing.expectEqual(@as(i32, 316), win.w);
+    try std.testing.expectEqual(@as(i32, 258), win.h);
 }
 
 test "active window blocks input to overlapping higher slot" {

@@ -25,6 +25,7 @@ pub const table: provider.c.DeviceV1 = .{
     .image_prepare = provider.prepareImage,
     .image_present = provider.presentImage,
     .render_submit_list = provider.submitRenderList,
+    .render_submit_grid_list = provider.submitRenderGridList,
     .presentation_info = provider.swapchain.presentationInfo,
     .swapchain_open = provider.swapchain.open,
     .swapchain_acquire = provider.swapchain.acquire,

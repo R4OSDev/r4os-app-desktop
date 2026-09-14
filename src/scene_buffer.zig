@@ -73,7 +73,7 @@ pub const SceneBuffer = struct {
     }
 
     pub fn attachLayer(self: *SceneBuffer, memory: []u8, bounds: surface.Rect) bool {
-        if (bounds.x < 0 or bounds.y < 0 or bounds.isEmpty()) return false;
+        if (bounds.isEmpty()) return false;
         _ = std.math.add(i32, bounds.x, bounds.w) catch return false;
         _ = std.math.add(i32, bounds.y, bounds.h) catch return false;
         if (!self.attach(memory, bounds.w, bounds.h)) return false;
@@ -130,7 +130,7 @@ pub const SceneBuffer = struct {
     }
 
     pub fn clipRect(self: *const SceneBuffer, rect: surface.Rect) ?surface.Rect {
-        if ((self.pixels == null and self.primitive_hook == null) or rect.isEmpty() or self.width <= 0 or self.height <= 0) return null;
+        if ((self.pixels == null and self.primitive_hook == null and self.layer_hook == null) or rect.isEmpty() or self.width <= 0 or self.height <= 0) return null;
         const left = @max(self.origin_x, rect.x);
         const top = @max(self.origin_y, rect.y);
         const right = @min(self.fullRect().right(), rect.right());

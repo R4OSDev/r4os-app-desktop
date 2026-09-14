@@ -125,7 +125,7 @@ pub fn compose(
     damage: surface.Rect,
 ) CullStats {
     var stats = CullStats{};
-    const desktop_rect = surface.desktop(screen_w, screen_h).rect;
+    const desktop_rect = ctx.output_bounds orelse surface.desktop(screen_w, screen_h).rect;
 
     if (terminal_mode) {
         if (layerVisible(&stats, damage, desktop_rect)) {
@@ -140,7 +140,7 @@ pub fn compose(
 
     if (layerVisible(&stats, damage, desktop_rect)) {
         if (layer(ctx,.background,desktop_rect)) |target| {
-            defer target.end(); draw.desktopBackground(&target.context, screen_w, screen_h, config.desktop_bg);
+            defer target.end(); target.context.paintRect(desktop_rect.x, desktop_rect.y, @intCast(desktop_rect.w), @intCast(desktop_rect.h), config.desktop_bg);
         }
     }
 
@@ -181,7 +181,7 @@ pub fn compose(
         stats.items_culled +%= @intCast(items.count);
     }
 
-    if (layerVisible(&stats, damage, surface.workArea(screen_w, screen_h, theme.taskbar_h))) {
+    if (layerVisible(&stats, damage, ctx.output_bounds orelse surface.workArea(screen_w, screen_h, theme.taskbar_h))) {
         drawWindows(ctx, windows, gui_frames, active_window, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, &stats);
     } else {
         countCulledWindows(windows, &stats);
@@ -255,10 +255,13 @@ pub fn compose(
         }
     }
 
-    const cursor_rect = surface.cursor(cursor_x, cursor_y, screen_w, screen_h).rect;
+    const cursor_rect: surface.Rect = if (ctx.output_bounds != null) .{ .x = cursor_x, .y = cursor_y, .w = surface.cursor_w, .h = surface.cursor_h }
+        else surface.cursor(cursor_x, cursor_y, screen_w, screen_h).rect;
     if (cursor_visible and layerVisible(&stats, damage, cursor_rect)) {
         if (layer(ctx,.cursor,cursor_rect)) |target| {
-            defer target.end(); draw.cursor(&target.context, cursor_x, cursor_y, screen_w, screen_h);
+            defer target.end(); draw.cursor(&target.context, cursor_x, cursor_y,
+                if (ctx.output_bounds != null) cursor_x + surface.cursor_w else screen_w,
+                if (ctx.output_bounds != null) cursor_y + surface.cursor_h else screen_h);
         }
     }
     return stats;

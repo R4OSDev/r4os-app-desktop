@@ -15,6 +15,7 @@ pub const Context = struct {
     scene: ?*scene_buffer.SceneBuffer = null,
     window_session: window_service.Session = .{},
     graphics: ?*gfx_renderer.Renderer = null,
+    output_bounds: ?surface.Rect = null,
 
     pub fn init(app: *r4os.App) ?Context {
         const sys = app.system();
@@ -374,6 +375,12 @@ pub const Context = struct {
 
     pub fn openWindowService(self: *Context) bool {
         return self.window_session.open(self);
+    }
+
+    pub fn displayControlExchange(self: *Context, request: *const r4os.abi.DisplayControlExchange, out: *r4os.abi.DisplayControlExchange) i32 {
+        const got = self.window_session.call(self, r4os.abi.display_control_op_exchange, std.mem.asBytes(request), std.mem.asBytes(out));
+        if (got != @sizeOf(r4os.abi.DisplayControlExchange)) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
+        return r4os.abi.service_api_result_ok;
     }
 
     pub fn closeWindowService(self: *Context) void {

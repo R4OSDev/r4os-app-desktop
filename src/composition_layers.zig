@@ -4,12 +4,14 @@ const std = @import("std");
 const scene = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
 const primitives = @import("primitive_frame.zig");
+const geometry = @import("output_geometry.zig");
 pub const capacity = 64;
 pub const command_capacity = capacity * surface.max_damage_regions;
 pub const Entry = struct {
     key: u32 = 0,
     pixels: []u32 = &.{},
     bounds: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    capture_bounds: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     generation: u64 = 0,
     frame: u64 = 0,
     dirty: ?surface.Rect = null,
@@ -33,6 +35,8 @@ pub const Cache = struct {
     changed_bytes: u64 = 0,
     unchanged_layers: u64 = 0,
     recording: ?*primitives.Frame = null,
+    view: ?geometry.topology.Viewport = null,
+    logical_screen: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 
     pub fn init(allocator: std.mem.Allocator, budget: usize) Cache { return .{ .allocator = allocator, .budget = budget }; }
     pub fn deinit(self: *Cache) void {
@@ -41,11 +45,27 @@ pub const Cache = struct {
         self.scratch = &.{}; self.reserved = 0; self.painter = .{}; self.active = null; self.collecting = false;
     }
     pub fn start(self: *Cache, bounds: surface.Rect) !void {
+        self.view = null;
+        if (self.recording) |recording| recording.view = null;
+        try self.startInternal(bounds, bounds);
+    }
+    pub fn startOutput(self: *Cache, view: geometry.topology.Viewport) !void {
+        const recording = self.recording orelse return error.State;
+        if (recording.mirror) return error.State;
+        // Changing scale/origin/rotation invalidates layer and font resource
+        // generations even when their rounded native dimensions coincide.
+        if (self.view == null or !std.meta.eql(self.view.?, view)) for (&self.entries) |*entry| { entry.initialized = false; };
+        const bounds = try geometry.logical(view);
+        self.view = view; recording.view = view;
+        try self.startInternal(geometry.native(view), bounds);
+    }
+    fn startInternal(self: *Cache, bounds: surface.Rect, logical_bounds: surface.Rect) !void {
         if (self.collecting or self.active != null) return error.Busy;
         if (bounds.x != 0 or bounds.y != 0 or bounds.isEmpty()) return error.Invalid;
         self.frame = try std.math.add(u64,self.frame,1);
         if (self.recording) |recording| try recording.start(self.frame);
-        self.screen = bounds; self.command_count = 0; self.failure = null; self.collecting = true;
+        self.screen = bounds; self.logical_screen = logical_bounds;
+        self.command_count = 0; self.failure = null; self.collecting = true;
     }
     pub fn finish(self: *Cache) ![]const Command {
         if (!self.collecting or self.active != null) return error.State;
@@ -78,19 +98,21 @@ pub const Cache = struct {
         if (!self.collecting or self.active != null) return error.State;
         if (self.failure != null) return null;
         if (key == 0 or self.command_count == self.commands.len) return error.Capacity;
-        const clipped = intersect(self.screen,bounds) orelse return null;
-        const scissor = intersect(clipped,damage) orelse return null;
+        const clipped = intersect(self.logical_screen,bounds) orelse return null;
+        const logical_scissor = intersect(clipped,damage) orelse return null;
+        const raster = if (self.view) |view| intersect(try geometry.rasterRect(view, clipped), self.screen) orelse return null else clipped;
+        const scissor = if (self.view) |view| intersect(try geometry.rasterRect(view, logical_scissor), raster) orelse return null else logical_scissor;
         const index = for (&self.entries,0..) |*entry,i| { if (entry.key == key) break i; } else
             for (&self.entries,0..) |*entry,i| { if (entry.key == 0) break i; } else return error.Capacity;
         const entry = &self.entries[index];
         const mirror = if (self.recording) |recording| recording.mirror else true;
-        if (!std.meta.eql(entry.bounds,clipped)) {
+        if (!std.meta.eql(entry.bounds,raster) or !std.meta.eql(entry.capture_bounds,clipped)) {
             if (entry.frame == self.frame) return error.State;
             const bytes = scene.SceneBuffer.requiredBytes(clipped.w,clipped.h) orelse return error.Bounds;
             if (mirror) try self.resize(&entry.pixels,bytes/4);
-            entry.key = key; entry.bounds = clipped; entry.initialized = false; entry.dirty = null;
+            entry.key = key; entry.bounds = raster; entry.capture_bounds = clipped; entry.initialized = false; entry.dirty = null;
         }
-        const repaint = if (entry.initialized) scissor else clipped;
+        const repaint = if (entry.initialized) logical_scissor else clipped;
         const bytes = scene.SceneBuffer.requiredBytes(repaint.w,repaint.h) orelse return error.Bounds;
         if (mirror) {
             try self.resize(&entry.pixels,scene.SceneBuffer.requiredBytes(clipped.w,clipped.h).?/4);

@@ -5,6 +5,7 @@ const desktop_api = @import("api.zig");
 const app = @import("app.zig");
 const gfx_renderer = @import("gfx_renderer.zig");
 const composition_worker = @import("composition_worker.zig");
+const output_manager = @import("output_manager.zig");
 
 pub fn r4_app_main(r4_app: *r4os.App) i32 {
     if (!r4std.init(r4_app.startContext())) return r4os.abi.err_no_group;
@@ -32,6 +33,8 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
         ctx.write(" preparations="); ctx.printU64(worker.prepared_threads); ctx.write("\n");
         worker.destroy();
     };
-    var desktop = app.App{ .ctx = &ctx, .images = &images, .composition = composition };
+    const outputs = output_manager.Manager.create(ctx.allocator(), r4_app.startContext(), ctx.sys, ctx.draw);
+    defer if (outputs) |manager| manager.destroy();
+    var desktop = app.App{ .ctx = &ctx, .images = &images, .composition = composition, .outputs = outputs };
     return desktop.run();
 }

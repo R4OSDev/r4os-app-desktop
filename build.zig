@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
             libraries_dep.namedLazyPath("r4std_zig_binding"),
             libraries_dep.namedLazyPath("r4img_zig_binding"),
             libraries_dep.namedLazyPath("r4gfx_zig_binding"),
+            libraries_dep.namedLazyPath("r4gfx_desktop_outputs"),
         },
     });
 
@@ -25,6 +26,8 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     r4gfx.addImport("r4os", host_r4os);
+    const topology = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4gfx_desktop_outputs"), .target = test_target });
+    topology.addImport("r4os", host_r4os);
     const r4nv_binding = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4nv_zig_binding"), .target = test_target });
     r4nv_binding.addImport("r4os", host_r4os);
     const r4gfx_implementation = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Contract/Generated/implementation_abi.zig"), .target = test_target });
@@ -283,6 +286,8 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     physical_input_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
+    for ([_]*std.Build.Module{ draw_module, compositor_module, paint_module, scene_buffer_tests.root_module,
+        wallpaper_module, gui_shape_renderer_module }) |module| module.addImport("r4gfx_desktop_outputs", topology);
     const physical_input_tests = b.addTest(.{ .root_module = physical_input_module });
 
     const run_model_tests = b.addRunArtifact(model_tests);

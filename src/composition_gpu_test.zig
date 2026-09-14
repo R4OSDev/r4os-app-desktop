@@ -14,7 +14,8 @@ const gpu = @import("composition_gpu.zig");
 const surface = @import("surface.zig");
 const Model = struct {
     const s = p.swapchain.lifecycle;
-    const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined, count: usize = 0 };
+    const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined,
+        grids: [c.render_list_capacity]c.R4GfxLogicalGrid = @splat(std.mem.zeroes(c.R4GfxLogicalGrid)), count: usize = 0 };
     const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
     const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
@@ -41,6 +42,7 @@ const Model = struct {
         value.device_refresh = refresh; value.resource_create = create; value.resource_release = release;
         value.copy_submit_ex = copy; value.render_submit = render; value.image_present = present;
         value.render_submit_list = renderList;
+        value.render_submit_grid_list = renderGridList;
         value.job_info = info; value.job_fence = fence; value.job_cancel = cancel; value.job_release = releaseJob;
         value.presentation_info = presentationInfo; value.swapchain_open = chainOpen; value.swapchain_acquire = chainAcquire;
         value.swapchain_present = chainPresent; value.swapchain_poll = chainPoll; value.swapchain_release = chainRelease; value.swapchain_close = chainClose;
@@ -136,7 +138,7 @@ const Model = struct {
     }
     fn refresh(device: *const c.R4GfxDevice, out: *c.R4GfxDeviceInfo) callconv(.c) i32 {
         const rc = p.refresh(device, out);
-        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list;
+        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list | c.device_gpu_grid;
         return rc;
     }
     fn create(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, out: *c.R4GfxResource) callconv(.c) i32 {
@@ -201,6 +203,18 @@ const Model = struct {
         if (rc == 0) { batches += 1; max_batch = @max(max_batch, input.count); }
         return rc;
     }
+    fn renderGridList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderGridListRequest, out: *c.R4GfxJob) callconv(.c) i32 {
+        if (reject_draw) return c.status_unsupported;
+        std.debug.assert(input.version == 1 and input.size == @sizeOf(c.R4GfxRenderGridListRequest) and input.count > 0 and input.count <= c.render_list_capacity);
+        const requests: [*]const c.R4GfxRenderRequest = @ptrFromInt(input.commands);
+        const grids: [*]const c.R4GfxLogicalGrid = @ptrFromInt(input.grids);
+        var list: List = .{ .count = input.count };
+        @memcpy(list.requests[0..input.count], requests[0..input.count]);
+        @memcpy(list.grids[0..input.count], grids[0..input.count]);
+        const rc = submit(device, .{ .list = list }, requests[0].dependency_count, requests[0].dependencies, out);
+        if (rc == 0) { batches += 1; max_batch = @max(max_batch, input.count); }
+        return rc;
+    }
     fn present(device: *const c.R4GfxDevice, input: *const c.R4GfxImagePresentRequest, out: *c.R4GfxJob) callconv(.c) i32 {
         return submit(device,.{.present=input.*},input.dependency_count,input.dependencies,out);
     }
@@ -224,19 +238,34 @@ const Model = struct {
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
         var value: c.R4GfxResourceInfo=undefined; std.debug.assert(p.resourceInfo(device,resource,&value)==0); return value.image;
     }
-    fn executeDraw(device: *const c.R4GfxDevice, value: c.R4GfxRenderRequest) void {
+    fn executeDraw(device: *const c.R4GfxDevice, value: c.R4GfxRenderRequest, grid: c.R4GfxLogicalGrid) void {
                 // The model executes each clipped sample through the real CPU
                 // provider. Target clipping never changes the source transform.
                 for (0..value.scissor.height) |row| for (0..value.scissor.width) |column| {
                     const x = @as(i64, value.scissor.x) + @as(i64, @intCast(column));
                     const y = @as(i64, value.scissor.y) + @as(i64, @intCast(row));
+                    const target = image(device, &value.target);
+                    if (x < 0 or y < 0 or x >= target.width or y >= target.height or x < value.target_rect.x or y < value.target_rect.y or
+                        x >= @as(i64, value.target_rect.x) + value.target_rect.width or y >= @as(i64, value.target_rect.y) + value.target_rect.height) continue;
                     var command: c.R4GfxDraw = .{ .source = value.source, .target = value.target, .pipeline = value.pipeline, .sampler = value.sampler,
                         .source_rect = std.mem.zeroes(c.R4GfxRect), .target_rect = .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 },
                         .color = value.color, .opacity = if (value.source.slot == 0) 0 else value.opacity };
                     if (value.source.slot != 0) command.source_rect = .{
-                        .x = @intCast(@as(i64, value.source_rect.x) + @divTrunc((x - value.target_rect.x) * value.source_rect.width, value.target_rect.width)),
-                        .y = @intCast(@as(i64, value.source_rect.y) + @divTrunc((y - value.target_rect.y) * value.source_rect.height, value.target_rect.height)),
+                        .x = @intCast(@as(i64, value.source_rect.x) + @divTrunc((2 * (x - value.target_rect.x) + 1) * value.source_rect.width, 2 * @as(i64, value.target_rect.width))),
+                        .y = @intCast(@as(i64, value.source_rect.y) + @divTrunc((2 * (y - value.target_rect.y) + 1) * value.source_rect.height, 2 * @as(i64, value.target_rect.height))),
                         .width = 1, .height = 1 };
+                    if (grid.enabled != 0) {
+                        const px = x + grid.target_x; const py = y + grid.target_y;
+                        const oriented: [2]i64 = switch (grid.rotation) {
+                            0 => .{ px, py }, 1 => .{ grid.pixel_height - 1 - py, px },
+                            2 => .{ grid.pixel_width - 1 - px, grid.pixel_height - 1 - py },
+                            3 => .{ py, grid.pixel_width - 1 - px }, else => unreachable,
+                        };
+                        const lx = @divFloor((2 * oriented[0] + 1) * 120, 2 * @as(i64, grid.scale)) - grid.viewport_x;
+                        const ly = @divFloor((2 * oriented[1] + 1) * 120, 2 * @as(i64, grid.scale)) - grid.viewport_y;
+                        command.source_rect.x = @intCast(value.source_rect.x + @divFloor(lx * grid.guest_width, grid.viewport_width) - grid.source_x);
+                        command.source_rect.y = @intCast(value.source_rect.y + @divFloor(ly * grid.guest_height, grid.viewport_height) - grid.source_y);
+                    }
                     var stats: c.R4GfxRenderStats = undefined;
                     std.debug.assert(p.render(device, &.{ .commands = @intFromPtr(&command), .command_count = 1, .flags = 0, .pixel_budget = 1 }, &stats) == 0);
                 };
@@ -255,8 +284,8 @@ const Model = struct {
                 const from: [*]const u8=@ptrFromInt(src.cpu_address); const to: [*]u8=@ptrFromInt(dst.cpu_address);
                 for(0..value.row_count) |row| @memcpy(to[value.copy.target_offset+row*value.target_pitch..][0..value.copy.byte_length],from[value.copy.source_offset+row*value.source_pitch..][0..value.copy.byte_length]);
             },
-            .draw => |value| executeDraw(device, value),
-            .list => |*value| for (value.requests[0..value.count]) |request| executeDraw(device, request),
+            .draw => |value| executeDraw(device, value, std.mem.zeroes(c.R4GfxLogicalGrid)),
+            .list => |*value| for (value.requests[0..value.count], value.grids[0..value.count]) |request, grid| executeDraw(device, request, grid),
             .present => |value| {
                 const src=image(device,&value.source); const from:[*]const u8=@ptrFromInt(src.cpu_address);
                 std.debug.assert(src.width==8 and src.height==8);
@@ -434,7 +463,45 @@ fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *con
     for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
     try checkShapesAndLargeImage(graphics, device);
     try checkAssets();
+    try checkOutputTransforms(graphics, device);
     std.debug.print("[desktop-primitives] fill/glyph/indexed/alpha/ARGB: bounded GPU capture; no CPU layer pixels; warm upload=0; fallback remains complete\n", .{});
+}
+
+fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    const geometry = @import("output_geometry.zig");
+    const software = @import("output_cpu.zig");
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    for ([_]u32{ 120, 240, 180 }) |scale| {
+        for (0..4) |rotation| {
+            const view: geometry.topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8, .scale = scale,
+                .origin = .{ .x = -31, .y = 12 }, .rotation = @enumFromInt(rotation) };
+            const bounds = try geometry.logical(view);
+            var pixels: [64]u32 = undefined;
+            for (0..@intCast(bounds.h)) |y| for (0..@intCast(bounds.w)) |x| {
+                pixels[y * @as(usize, @intCast(bounds.w)) + x] = @intCast(0x102030 + y * 0x010700 + x * 0x0b01);
+            };
+            const source = pixels[0..@intCast(bounds.w * bounds.h)];
+            var expected: [64]u32 = undefined;
+            software.transform(view, source, @intCast(bounds.w), &expected);
+            for (0..2) |iteration| {
+                const converted = frame.assets.converted_pixels;
+                try cache.startOutput(view);
+                const painter = (try cache.begin(1, bounds, bounds)).?;
+                painter.blitXrgb32(bounds.x, bounds.y, @intCast(bounds.w), @intCast(bounds.h), source);
+                try cache.end(1); _ = try cache.finish();
+                try t.expect(cache.reserved == 0 and std.meta.eql(cache.commands[0].scissor, geometry.native(view)));
+                try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+                try t.expectEqualSlices(u32, &expected, &Model.visible);
+                if (iteration == 1) try t.expectEqual(converted, frame.assets.converted_pixels);
+            }
+        }
+    }
+    try engine.close();
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-outputs] signed origin, native composition, four rotations, 150/200 percent and warm assets: OK\n", .{});
 }
 
 fn shapesAndLargeImage(painter: *scene.SceneBuffer, pixels: []const u32) !void {

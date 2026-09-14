@@ -31,6 +31,9 @@ pub const Renderer = struct {
     rasters: [128]Raster = @splat(.{}),
 
     pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext) ?*Renderer {
+        return createForAdapter(allocator, raw, 0);
+    }
+    pub fn createForAdapter(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, adapter: u32) ?*Renderer {
         const client = gfx.DeviceV1Client.init(raw) catch return null;
         const bytes = client.storage_size();
         if (bytes == 0 or bytes > std.math.maxInt(usize)) return null;
@@ -39,7 +42,7 @@ pub const Renderer = struct {
         const self = allocator.create(Renderer) catch { allocator.free(storage); return null; };
         var device: gfx.R4GfxDevice = undefined;
         if (client.device_open(&.{ .version = 1, .size = @sizeOf(gfx.R4GfxDeviceConfig), .storage_address = @intFromPtr(storage.ptr),
-            .storage_bytes = storage.len, .start_context = @intFromPtr(raw), .preferred_adapter = 0, .flags = 0 }, &device) != gfx.status_ok)
+            .storage_bytes = storage.len, .start_context = @intFromPtr(raw), .preferred_adapter = adapter, .flags = 0 }, &device) != gfx.status_ok)
         { allocator.destroy(self); allocator.free(storage); return null; }
         self.* = .{ .allocator = allocator, .client = client, .storage = storage, .device = device };
         var descriptor = std.mem.zeroes(gfx.R4GfxResourceDesc);

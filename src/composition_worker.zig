@@ -26,16 +26,21 @@ pub const Worker = struct {
     failure_reported: bool = false,
     prepared_threads: u64 = 0,
     frames_visible: u64 = 0,
+    frames_completed: u64 = 0,
     completed_frame: u64 = 0,
     completed_status: ?gfx.R4GfxSwapchainFrameStatus = null,
 
     pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context) ?*Worker {
-        const graphics = renderer.Renderer.create(allocator, raw) orelse return null;
+        return createForOutput(allocator, raw, sys, 0, null);
+    }
+    pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context, adapter: u32, head: ?u32) ?*Worker {
+        const graphics = renderer.Renderer.createForAdapter(allocator, raw, adapter) orelse return null;
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
         const primitive_frame = primitives.Frame.init(allocator) catch { allocator.destroy(self); graphics.destroy(); return null; };
         self.* = .{ .graphics = graphics, .sys = sys, .cache = layers.Cache.init(allocator, 128 * 1024 * 1024),
             .engine = gpu.Engine.init(&graphics.client, &graphics.device), .primitives = primitive_frame };
         self.cache.recording = &self.primitives;
+        self.engine.head = head;
         return self;
     }
     pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.engine.pending() or self.awaiting_visible; }
@@ -46,15 +51,19 @@ pub const Worker = struct {
     }
     pub fn available(self: *Worker, revision: u64) bool {
         if (self.blocksCapture() or self.failed_revision == revision) return false;
-        const info = self.graphics.info() orelse return false;
+        self.revision = revision;
+        const info = self.graphics.info() orelse { if (self.engine.head != null) self.fail(error.Graphics); return false; };
         const required = gfx.device_gpu_copy_rows | gfx.device_gpu_render | gfx.device_gpu_present;
-        if (info.gpu_operations & required != required) return false;
+        if (info.gpu_operations & required != required) { if (self.engine.head != null) self.fail(error.Unsupported); return false; }
         if (self.device_generation != info.device_generation or self.reset_generation != info.reset_generation) {
             self.engine.invalidate();
             self.device_generation = info.device_generation; self.reset_generation = info.reset_generation;
         }
         self.revision = revision;
-        self.engine.acquire(self.engine.input_ns) catch return false;
+        self.engine.acquire(self.engine.input_ns) catch |err| {
+            if (err != error.Busy) self.fail(err);
+            return false;
+        };
         return true;
     }
     pub fn start(self: *Worker) bool {
@@ -124,8 +133,9 @@ pub const Worker = struct {
         } else self.engine.pollPresentation() catch |err| self.fail(err);
         if (self.engine.completion()) |done| {
             self.completed_frame = done.frame; self.completed_status = done.status;
-            if (done.status.result == 1) { self.frames_visible +|= 1; return .visible; }
-            if (done.status.result == 2 or done.status.result == 3) return .discarded;
+            if (done.status.result == 1) { self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible; }
+            if (done.status.result == 2) { self.frames_completed +|= 1; return .discarded; }
+            if (done.status.result == 3) return .discarded;
             self.fail(error.Graphics);
         }
         if (self.awaiting_visible) {
@@ -133,13 +143,14 @@ pub const Worker = struct {
             // Statistics carry the last observed Window/BEGUN receipt. A CE
             // fence alone cannot confirm scanout, even after the source frees.
             for (0..8) |head| {
+                if (self.engine.head) |selected| if (selected != head) continue;
                 var info: r4os.abi.DisplayPresentationStats = .{};
                 if (draw.displayPresentationStats(@intCast(head), &info) != r4os.abi.gfx_output_ok or info.backend.adapter_id != fence.adapter_id or
                     info.backend.device_generation != fence.device_generation or info.backend.reset_generation != fence.reset_generation) continue;
                 if (info.flags & r4os.abi.display_presentation_flag_lost != 0) { self.fail(error.Graphics); break; }
                 if (info.visible_ns != 0 and info.source_timeline == fence.timeline and info.source_point == fence.point) {
                     self.completed_frame = self.engine.frame; self.completed_status = null;
-                    self.awaiting_visible = false; self.frames_visible +|= 1; return .visible;
+                    self.awaiting_visible = false; self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible;
                 }
             }
             if (self.awaiting_visible and now >= self.deadline) self.fail(error.Deadline);
@@ -171,5 +182,17 @@ pub const Worker = struct {
         }
         const allocator = self.graphics.allocator;
         self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
+    }
+    pub fn tryDestroy(self: *Worker) bool {
+        if (!self.collectThread()) return false;
+        if (self.engine.active()) {
+            if (self.engine.fault == null) self.engine.cancel(error.State);
+            _ = self.engine.advance(&self.cache, self.sys.monotonicNanoseconds() orelse self.deadline);
+            if (self.engine.active()) return false;
+        }
+        self.engine.close() catch return false;
+        const allocator = self.graphics.allocator;
+        self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
+        return true;
     }
 };

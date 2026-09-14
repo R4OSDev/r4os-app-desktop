@@ -21,6 +21,20 @@ pub const View = struct {
     foreground: u32 = 0,
     background: u32 = 0,
     identity: Identity = .{},
+    // Source-space rotation is part of the cache key. It is applied once
+    // on an asset miss, never by downloading a final GPU framebuffer.
+    rotation: u2 = 0,
+
+    pub fn rasterWidth(self: View) u32 { return if (self.rotation & 1 != 0) self.height else self.width; }
+    pub fn rasterHeight(self: View) u32 { return if (self.rotation & 1 != 0) self.width else self.height; }
+    pub fn rasterPixel(self: View, x: usize, y: usize) u32 {
+        return switch (self.rotation) {
+            0 => self.pixel(x, y),
+            1 => self.pixel(self.width - 1 - y, x),
+            2 => self.pixel(self.width - 1 - x, self.height - 1 - y),
+            3 => self.pixel(y, self.height - 1 - x),
+        };
+    }
 
     pub fn valid(self: View) bool {
         if (self.width == 0 or self.height == 0 or self.width > 8192 or self.height > 8192 or
@@ -36,7 +50,7 @@ pub const View = struct {
     pub fn key(self: View) [32]u8 {
         var hash = std.crypto.hash.Blake3.init(.{});
         const values = [_]u32{ @intFromEnum(self.format), self.width, self.height, self.foreground, self.background,
-            self.identity.font, self.identity.revision, self.identity.glyph, self.identity.dpi_x, self.identity.dpi_y };
+            self.identity.font, self.identity.revision, self.identity.glyph, self.identity.dpi_x, self.identity.dpi_y, self.rotation };
         hash.update(std.mem.asBytes(&values));
         if (self.format == .glyph) {
             // Ignore provider row padding above the actual cell width.

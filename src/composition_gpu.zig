@@ -16,6 +16,9 @@ pub const Completion = struct { frame: u64, status: gfx.R4GfxSwapchainFrameStatu
 pub const Engine = struct {
     client: *const gfx.DeviceV1Client,
     device: *const gfx.R4GfxDevice,
+    // Null preserves the legacy primary negotiation. Explicit outputs never
+    // borrow a different head when their receiver disappears.
+    head: ?u32 = null,
     images: [layers.capacity]Image = @splat(.{}),
     assets: [primitive_assets.texture_capacity]Image = @splat(.{}),
     outputs: [gfx.swapchain_image_capacity]Image = @splat(.{}),
@@ -54,6 +57,7 @@ pub const Engine = struct {
     primitive_jobs: u64 = 0,
     primitive_draws: u64 = 0,
     batch_enabled: bool = false,
+    grid_enabled: bool = false,
     reserved_bytes: u64 = 0,
     budget_bytes: u64 = 256 * 1024 * 1024,
 
@@ -171,11 +175,14 @@ pub const Engine = struct {
         const operations = gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows;
         if (device_info.gpu_operations & operations != operations) return error.Unsupported;
         self.batch_enabled = device_info.gpu_operations & gfx.device_gpu_render_list != 0;
+        self.grid_enabled = device_info.gpu_operations & gfx.device_gpu_grid != 0;
+        if (cache.recording) |recording| if (recording.view != null and !self.grid_enabled) return error.Unsupported;
         try self.stateResource(&self.over, gfx.resource_pipeline, gfx.render_operation_over);
         try self.stateResource(&self.blit, gfx.resource_pipeline, gfx.render_operation_blit);
         try self.stateResource(&self.sampler, gfx.resource_sampler, gfx.render_sampler_nearest);
         var presentation: ?gfx.R4GfxPresentationInfo = null;
         for (0..8) |head| {
+            if (self.head) |selected| if (selected != head) continue;
             var value: gfx.R4GfxPresentationInfo = undefined;
             if (self.client.presentation_info(self.device, @intCast(head), &value) != gfx.status_ok or
                 value.flags & gfx.present_native == 0 or value.adapter_id != device_info.adapter_id or
@@ -183,6 +190,7 @@ pub const Engine = struct {
                 value.width != cache.screen.w or value.height != cache.screen.h) continue;
             presentation = value; break;
         }
+        if (self.head != null and presentation == null) return error.Stale;
         if (self.chain.slot != 0) {
             if (presentation == null or self.presentation.?.display_generation != presentation.?.display_generation or
                 self.presentation.?.width != presentation.?.width or self.presentation.?.height != presentation.?.height) try self.closeChain();
@@ -417,6 +425,8 @@ pub const Engine = struct {
                 if (self.next_primitive == recording.count) { self.phase = .draw; return; }
                 const first = recording.commands[self.next_primitive];
                 var requests: [gfx.render_list_capacity]gfx.R4GfxRenderRequest = undefined;
+                var grids: [gfx.render_list_capacity]gfx.R4GfxLogicalGrid = undefined;
+                var mapped = false;
                 var count: usize = 0;
                 const limit: usize = if (self.batch_enabled) requests.len else 1;
                 // Preserve painter order. Only adjacent commands with the same
@@ -424,6 +434,7 @@ pub const Engine = struct {
                 while (count < limit and self.next_primitive + count < recording.count) : (count += 1) {
                     const command = recording.commands[self.next_primitive + count];
                     if (command.layer != first.layer or command.texture != first.texture or command.over != first.over) break;
+                    grids[count] = @bitCast(command.grid); mapped = mapped or command.grid.enabled != 0;
                     requests[count] = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
                         .source = if (command.texture) |texture| self.assets[texture].resource else empty,
                         .target = self.images[command.layer].resource,
@@ -436,7 +447,11 @@ pub const Engine = struct {
                 }
                 const slot = try self.reserve();
                 var handle: gfx.R4GfxJob = undefined;
-                if (count == 1) try accepted(self.client.render_submit(self.device, &requests[0], &handle))
+                if (mapped) {
+                    if (!self.grid_enabled) return error.Unsupported;
+                    try accepted(self.client.render_submit_grid_list(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderGridListRequest),
+                        .commands = @intFromPtr(&requests), .grids = @intFromPtr(&grids), .count = @intCast(count), .reserved = 0 }, &handle));
+                } else if (count == 1) try accepted(self.client.render_submit(self.device, &requests[0], &handle))
                 else try accepted(self.client.render_submit_list(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderListRequest),
                     .commands = @intFromPtr(&requests), .count = @intCast(count), .reserved = 0 }, &handle));
                 try self.track(slot, handle, null, 0, 0);

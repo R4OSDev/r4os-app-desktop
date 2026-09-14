@@ -5,6 +5,7 @@ const image = @import("primitive_image.zig");
 const assets = @import("primitive_assets.zig");
 const scene = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
+const geometry = @import("output_geometry.zig");
 pub const capacity = 8192;
 const Error = error{ OutOfMemory, State, Invalid, Capacity, Bounds, Overflow };
 pub const Command = struct {
@@ -15,6 +16,7 @@ pub const Command = struct {
     scissor: surface.Rect,
     color: u32 = 0,
     over: bool = false,
+    grid: @import("r4os").abi.GfxSampleGrid = .{},
 };
 pub const Frame = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +28,7 @@ pub const Frame = struct {
     active: ?struct { layer: u8, bounds: surface.Rect } = null,
     fractional_pixels: u64 = 0,
     merged_fills: u64 = 0,
+    view: ?geometry.topology.Viewport = null,
 
     pub fn init(allocator: std.mem.Allocator) !Frame {
         var cache = try assets.Cache.init(allocator, 64 * 1024 * 1024);
@@ -40,7 +43,8 @@ pub const Frame = struct {
     }
     pub fn begin(self: *Frame, layer: u8, bounds: surface.Rect) !void {
         if (self.active != null) return error.State;
-        self.active = .{ .layer = layer, .bounds = bounds };
+        const raster = if (self.view) |view| geometry.intersect(try geometry.rasterRect(view, bounds), geometry.native(view)) orelse return error.Bounds else bounds;
+        self.active = .{ .layer = layer, .bounds = raster };
     }
     pub fn end(self: *Frame) !void {
         if (self.active == null) return error.State;
@@ -59,6 +63,7 @@ pub const Frame = struct {
         if (self.mirror) self.software(painter, operation);
     }
     fn append(self: *Frame, value: Command) !void {
+        if (value.target.isEmpty() or value.scissor.isEmpty()) return;
         if (self.count != 0 and value.texture == null and !value.over) {
             const prior = &self.commands[self.count - 1];
             if (prior.texture == null and !prior.over and prior.layer == value.layer and
@@ -74,24 +79,32 @@ pub const Frame = struct {
         if (self.count == self.commands.len) return error.Capacity;
         self.commands[self.count] = value; self.count += 1;
     }
-    fn local(self: *const Frame, rect: surface.Rect) surface.Rect {
+    fn local(self: *const Frame, rect: surface.Rect) Error!surface.Rect {
         const bounds = self.active.?.bounds;
-        return .{ .x = rect.x - bounds.x, .y = rect.y - bounds.y, .w = rect.w, .h = rect.h };
+        const raster = if (self.view) |view| geometry.rasterRect(view, rect) catch return error.Bounds else rect;
+        return .{ .x = raster.x - bounds.x, .y = raster.y - bounds.y, .w = raster.w, .h = raster.h };
     }
     fn record(self: *Frame, operation: image.Paint) Error!void {
         const active = self.active orelse return error.State;
         switch (operation) {
-            .clear => |rect| try self.append(.{ .layer = active.layer, .target = self.local(rect), .scissor = self.local(rect) }),
-            .fill => |fill| try self.append(.{ .layer = active.layer, .target = self.local(fill.rect), .scissor = self.local(fill.rect), .color = 0xff000000 | fill.rgb }),
+            .clear => |rect| try self.append(.{ .layer = active.layer, .target = try self.local(rect), .scissor = try self.local(rect) }),
+            .fill => |fill| try self.append(.{ .layer = active.layer, .target = try self.local(fill.rect), .scissor = try self.local(fill.rect), .color = 0xff000000 | fill.rgb }),
             .picture => |picture| {
                 if (!picture.view.valid() or picture.guest_w == 0 or picture.guest_h == 0 or picture.viewport.isEmpty()) return error.Invalid;
                 if (@as(u64, picture.source_x) + picture.view.width > picture.guest_w or
                     @as(u64, picture.source_y) + picture.view.height > picture.guest_h) return error.Bounds;
                 const clipped = intersect(picture.clip, picture.viewport) orelse return;
+                if (self.view != null) return self.gridPicture(picture, clipped);
                 const whole = picture.source_x == 0 and picture.source_y == 0 and picture.guest_w == picture.view.width and picture.guest_h == picture.view.height;
                 const integer = @rem(picture.viewport.w, @as(i64, picture.guest_w)) == 0 and @rem(picture.viewport.h, @as(i64, picture.guest_h)) == 0;
                 if (!whole and !integer) return self.fractional(picture, clipped);
-                const entry = try self.assets.intern(picture.view);
+                var asset_view = picture.view;
+                if (self.view) |view| {
+                    asset_view.rotation = @intFromEnum(view.rotation);
+                    asset_view.identity.dpi_x = (96 * view.scale + 60) / 120;
+                    asset_view.identity.dpi_y = asset_view.identity.dpi_x;
+                }
+                const entry = try self.assets.intern(asset_view);
                 const target: surface.Rect = if (whole) picture.viewport else blk: {
                     const sx = @divTrunc(picture.viewport.w, @as(i64, picture.guest_w));
                     const sy = @divTrunc(picture.viewport.h, @as(i64, picture.guest_h));
@@ -101,10 +114,38 @@ pub const Frame = struct {
                 };
                 const clip = intersect(clipped, target) orelse return;
                 try self.append(.{ .layer = active.layer, .texture = entry.texture, .source = entry.rect,
-                    .target = self.local(target), .scissor = self.local(clip),
+                    .target = try self.local(target), .scissor = try self.local(clip),
                     .over = picture.view.format == .argb or picture.view.format == .alpha });
             },
         }
+    }
+    fn gridPicture(self: *Frame, picture: image.Picture, clipped: surface.Rect) Error!void {
+        const view = self.view.?; const active = self.active.?;
+        var asset = picture.view;
+        asset.rotation = 0;
+        asset.identity.dpi_x = (96 * view.scale + 60) / 120; asset.identity.dpi_y = asset.identity.dpi_x;
+        const entry = try self.assets.intern(asset);
+        // A transported subimage covers only the logical cells whose guest-
+        // edge samples fall into its source range. Adjacent chunks share the
+        // same integer boundary, without CPU scaling or repeated edge texels.
+        const x0 = (@as(u64, picture.source_x) * @as(u32, @intCast(picture.viewport.w)) + picture.guest_w - 1) / picture.guest_w;
+        const y0 = (@as(u64, picture.source_y) * @as(u32, @intCast(picture.viewport.h)) + picture.guest_h - 1) / picture.guest_h;
+        const x1 = ((@as(u64, picture.source_x) + picture.view.width) * @as(u32, @intCast(picture.viewport.w)) + picture.guest_w - 1) / picture.guest_w;
+        const y1 = ((@as(u64, picture.source_y) + picture.view.height) * @as(u32, @intCast(picture.viewport.h)) + picture.guest_h - 1) / picture.guest_h;
+        const coverage: surface.Rect = .{ .x = std.math.cast(i32, @as(i64, picture.viewport.x) + @as(i64, @intCast(x0))) orelse return error.Bounds,
+            .y = std.math.cast(i32, @as(i64, picture.viewport.y) + @as(i64, @intCast(y0))) orelse return error.Bounds,
+            .w = @intCast(x1 - x0), .h = @intCast(y1 - y0) };
+        const clip = intersect(clipped, coverage) orelse return;
+        try self.append(.{ .layer = active.layer, .texture = entry.texture, .source = entry.rect,
+            .target = try self.local(coverage), .scissor = try self.local(clip),
+            .over = asset.format == .argb or asset.format == .alpha,
+            .grid = .{ .enabled = 1, .rotation = @intFromEnum(view.rotation), .scale = view.scale,
+                .pixel_width = view.pixel_w, .pixel_height = view.pixel_h,
+                .target_x = active.bounds.x, .target_y = active.bounds.y,
+                .viewport_x = std.math.cast(i32, @as(i64, picture.viewport.x) - view.origin.x) orelse return error.Bounds,
+                .viewport_y = std.math.cast(i32, @as(i64, picture.viewport.y) - view.origin.y) orelse return error.Bounds,
+                .viewport_width = @intCast(picture.viewport.w), .viewport_height = @intCast(picture.viewport.h),
+                .guest_width = picture.guest_w, .guest_height = picture.guest_h, .source_x = picture.source_x, .source_y = picture.source_y } });
     }
     fn fractional(self: *Frame, picture: image.Picture, clip: surface.Rect) Error!void {
         if (picture.view.format != .xrgb and picture.view.format != .indexed) return error.Invalid;

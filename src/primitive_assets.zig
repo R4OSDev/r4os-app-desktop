@@ -73,6 +73,7 @@ pub const Cache = struct {
     }
     pub fn intern(self: *Cache, view: image.View) !Entry {
         if (self.frame == 0 or !view.valid()) return error.Invalid;
+        const width = view.rasterWidth(); const height = view.rasterHeight();
         const key = view.key();
         for (self.entries) |entry| if (entry.live and std.mem.eql(u8, &entry.key, &key)) {
             const texture = &self.textures[entry.texture];
@@ -81,28 +82,28 @@ pub const Cache = struct {
         };
         if (for (self.entries) |entry| { if (!entry.live) break false; } else true)
             self.forget(self.oldest(0, texture_capacity, true) orelse return error.Capacity);
-        const small = view.width <= 128 and view.height <= 128;
+        const small = width <= 128 and height <= 128;
         var chosen: ?usize = null;
         if (small) for (self.textures[0..atlas_count], 0..) |*texture, index| {
-            if (placement(texture, view.width, view.height) != null) { chosen = index; break; }
+            if (placement(texture, width, height) != null) { chosen = index; break; }
         };
         if (chosen == null) {
             const index = self.oldest(if (small) 0 else atlas_count, if (small) atlas_count else texture_capacity, false) orelse return error.Capacity;
-            try self.allocate(index, if (small) atlas_dimension else view.width, if (small) atlas_dimension else view.height);
+            try self.allocate(index, if (small) atlas_dimension else width, if (small) atlas_dimension else height);
             chosen = index;
         }
         const index = chosen.?;
         self.textures[index].pinned = self.frame;
         const entry_index = for (self.entries, 0..) |entry, i| { if (!entry.live) break i; } else return error.Capacity;
         const texture = &self.textures[index];
-        const rect = placement(texture, view.width, view.height) orelse return error.Capacity;
+        const rect = placement(texture, width, height) orelse return error.Capacity;
         const generation = try std.math.add(u64, self.generation, 1);
-        for (0..view.height) |y| for (0..view.width) |x| {
-            texture.pixels[(@as(usize, @intCast(rect.y)) + y) * texture.width + @as(usize, @intCast(rect.x)) + x] = view.pixel(x, y);
+        for (0..height) |y| for (0..width) |x| {
+            texture.pixels[(@as(usize, @intCast(rect.y)) + y) * texture.width + @as(usize, @intCast(rect.x)) + x] = view.rasterPixel(x, y);
         };
         if (texture.y != rect.y) texture.row_height = 0;
-        texture.x = @as(u32, @intCast(rect.x)) + view.width; texture.y = @intCast(rect.y);
-        texture.row_height = @max(texture.row_height, view.height);
+        texture.x = @as(u32, @intCast(rect.x)) + width; texture.y = @intCast(rect.y);
+        texture.row_height = @max(texture.row_height, height);
         texture.generation = generation; self.generation = generation;
         texture.pinned = self.frame; texture.touched = self.frame;
         texture.dirty = if (texture.dirty) |prior| prior.merged(rect) else rect;
