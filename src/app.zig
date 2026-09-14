@@ -576,6 +576,7 @@ pub const App = struct {
             self.flushWindowGeometry(false);
             if (self.syncCursor()) needs_redraw = true;
             if (self.hasDamage()) needs_redraw = true;
+            self.syncRefreshPolicy();
             if (needs_redraw) self.redraw();
             if (self.capture_cursor_damage.active and self.remote_frame_consumers != 0) _ = self.publishRemoteScene(&.{});
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
@@ -587,6 +588,35 @@ pub const App = struct {
     // warten (Input, RDP-Input, GUI-/Console-Revisionen wecken sofort;
     // Blink/Uhr/Restsyncs laufen im blink_half_ticks-Raster weiter).
     // Fallback auf den alten Sleep, wenn der Kernel das API nicht hat.
+    fn syncRefreshPolicy(self: *App) void {
+        const manager = self.outputs orelse return;
+        const now = self.ctx.sys.monotonicNanoseconds() orelse return;
+        const overlay_blocked = self.start_open or self.system_menu_open or self.time_menu_open or self.dialog != .none or
+            self.menu_submenu_open or self.menu_nested_open;
+        for (&manager.slots) |*slot| {
+            if (!slot.occupied() or slot.logical_index == null) continue;
+            const entry = for (manager.snapshot.entries[0..manager.snapshot.count]) |value| {
+                if (std.meta.eql(value.target, slot.target)) break value;
+            } else continue;
+            slot.refresh.select(manager.saved_refresh.find(entry.key) orelse .{ .key = entry.key });
+            const bounds = slot.bounds();
+            var fullscreen = false;
+            if (!overlay_blocked) for (&self.windows, 0..) |*win, index| {
+                if (!win.visible or win.minimized or win.instance_id == 0 or index != self.active_window) continue;
+                const rect: surface.Rect = if (self.terminal_mode and index == 0)
+                    .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h } else win.clientSurface().rect;
+                if (rect.x <= bounds.x and rect.y <= bounds.y and @as(i64, rect.x) + rect.w >= @as(i64, bounds.x) + bounds.w and
+                    @as(i64, rect.y) + rect.h >= @as(i64, bounds.y) + bounds.h) fullscreen = true;
+            };
+            const scene: u32 = (if (fullscreen) @as(u32, r4os.abi.gfx_refresh_scene_fullscreen) else 0) |
+                (if (slot.activity.animated(now)) @as(u32, r4os.abi.gfx_refresh_scene_animated) else 0) |
+                (if (self.remote_frame_consumers != 0) @as(u32, r4os.abi.gfx_refresh_scene_capture) else 0);
+            const ready = !slot.disabled and !slot.paused and !slot.failed and !slot.reconfiguring and
+                !manager.reconcile and !self.display_settings.busy();
+            slot.refresh.step(&self.ctx.draw, slot.target, now, scene, ready);
+        }
+    }
+
     fn syncOutputRevision(self: *App) bool {
         if (!self.output_events_supported) return false;
         var snapshot: r4os.abi.GfxDisplayRevision = .{};
@@ -7075,6 +7105,7 @@ pub const App = struct {
         if (!cache.pending) return false;
         return switch (cache.refresh(self.ctx.allocator(), self.ctx)) {
             .updated => blk: {
+                if (self.outputs) |manager| manager.contentFrame(self.windows[index].clientSurface().rect);
                 self.invalidateGuiFrameDamage(index, cache.view());
                 break :blk true;
             },
@@ -7121,7 +7152,7 @@ pub const App = struct {
                 if (next.desktop_bg != requested) return false;
                 if (requested == self.config.desktop_bg) return false;
             },
-            .reload => if (self.outputs) |outputs| outputs.reloadColors(),
+            .reload => if (self.outputs) |outputs| { outputs.reloadColors(); outputs.reloadRefresh(); },
         }
         self.config = next;
         self.reloadWallpaper();
@@ -7151,6 +7182,7 @@ pub const App = struct {
             const previous_state = snapshot.state;
             const previous_offset = snapshot.effective_offset;
             const stats = self.refreshConsoleSnapshot(i, rect);
+            if (self.outputs) |manager| manager.contentFrame(rect);
             self.invalidateTerminalRefresh(i, rect, previous_valid, previous_state, previous_offset, stats);
             changed = true;
         }

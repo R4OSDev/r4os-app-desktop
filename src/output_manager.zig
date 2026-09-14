@@ -8,6 +8,7 @@ const catalog = @import("r4gfx_desktop_outputs");
 pub const topology = catalog.topology;
 pub const preferences = catalog.preferences;
 pub const color_preferences = catalog.color_preferences;
+pub const refresh_preferences = catalog.refresh_preferences;
 const geometry = @import("output_geometry.zig");
 const surface = @import("surface.zig");
 const worker = @import("composition_worker.zig");
@@ -28,6 +29,8 @@ pub const Slot = struct {
     retry_after_ns: u64 = 0,
     reported: u64 = 0,
     discarded_reported: u64 = 0,
+    refresh: catalog.refresh_client.Client = .{},
+    activity: catalog.refresh_client.Activity = .{},
     pub fn occupied(self: *const Slot) bool { return self.target.connector_id != 0; }
     pub fn bounds(self: *const Slot) surface.Rect { return geometry.logical(self.view) catch unreachable; }
     pub fn dirty(self: *const Slot) bool { return self.logical_index != null and !self.failed and !self.paused and self.damage.active; }
@@ -45,6 +48,7 @@ pub const Manager = struct {
     snapshot: catalog.Snapshot = .{},
     saved: preferences.Config = .{},
     saved_colors: color_preferences.Config = .{},
+    saved_refresh: refresh_preferences.Config = .{},
     desired: ?topology.Layout = null,
     translation: topology.Point = .{},
     revision: u64 = 0,
@@ -61,7 +65,28 @@ pub const Manager = struct {
         self.* = .{ .allocator = allocator, .raw = raw, .sys = sys, .draw = draw };
         self.loadPreferences();
         self.reloadColors();
+        self.reloadRefresh();
         return self;
+    }
+    pub fn reloadRefresh(self: *Manager) void {
+        if (r4std.config.recoverDocumentSave(&self.sys, refresh_preferences.path) < 0) {
+            self.sys.println("R4DESK refresh preferences: save recovery failed"); return;
+        }
+        var bytes: [refresh_preferences.max_bytes]u8 = undefined;
+        const count = self.sys.fileRead(refresh_preferences.path, &bytes);
+        var next: refresh_preferences.Config = .{};
+        if (count != -3) {
+            if (count <= 0 or count > bytes.len) { self.sys.println("R4DESK refresh preferences: read failed"); return; }
+            next = refresh_preferences.Config.parse(bytes[0..@intCast(count)]) catch {
+                self.sys.println("R4DESK refresh preferences: invalid document"); return;
+            };
+        }
+        self.saved_refresh = next;
+    }
+    pub fn contentFrame(self: *Manager, rect: surface.Rect) void {
+        const now = self.sys.monotonicNanoseconds() orelse return;
+        for (&self.slots) |*slot| if (slot.logical_index != null and !slot.disabled and
+            geometry.intersect(slot.bounds(), rect) != null) slot.activity.frame(now);
     }
     pub fn reloadColors(self: *Manager) void {
         if (r4std.config.recoverDocumentSave(&self.sys, color_preferences.path) < 0) {
@@ -329,6 +354,7 @@ pub const Manager = struct {
         for (&self.slots) |*slot| {
             if (!slot.occupied()) continue;
             if (slot.logical_index == null or slot.failed or slot.reconfiguring) {
+                slot.refresh.release(&self.draw, slot.target);
                 if (slot.failed) self.fail(slot);
                 if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
                 if (slot.software) |owner| if (owner.destroy()) { slot.software = null; };
