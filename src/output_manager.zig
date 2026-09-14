@@ -7,6 +7,7 @@ const gfx = @import("r4gfx");
 const catalog = @import("r4gfx_desktop_outputs");
 pub const topology = catalog.topology;
 pub const preferences = catalog.preferences;
+pub const color_preferences = catalog.color_preferences;
 const geometry = @import("output_geometry.zig");
 const surface = @import("surface.zig");
 const worker = @import("composition_worker.zig");
@@ -14,6 +15,7 @@ const cpu = @import("output_cpu.zig");
 const a = r4os.abi;
 pub const Slot = struct {
     target: a.GfxOutputTarget = .{},
+    color_revision: u64 = 0,
     view: topology.Viewport = .{ .pixel_w = 0, .pixel_h = 0 },
     logical_index: ?usize = null,
     disabled: bool = false,
@@ -22,6 +24,7 @@ pub const Slot = struct {
     software: ?*cpu.Output = null,
     damage: surface.Dirty = .{},
     failed: bool = false,
+    reconfiguring: bool = false,
     retry_after_ns: u64 = 0,
     reported: u64 = 0,
     discarded_reported: u64 = 0,
@@ -41,6 +44,7 @@ pub const Manager = struct {
     layout: topology.Layout = .{},
     snapshot: catalog.Snapshot = .{},
     saved: preferences.Config = .{},
+    saved_colors: color_preferences.Config = .{},
     desired: ?topology.Layout = null,
     translation: topology.Point = .{},
     revision: u64 = 0,
@@ -56,7 +60,33 @@ pub const Manager = struct {
         const self = allocator.create(Manager) catch return null;
         self.* = .{ .allocator = allocator, .raw = raw, .sys = sys, .draw = draw };
         self.loadPreferences();
+        self.reloadColors();
         return self;
+    }
+    pub fn reloadColors(self: *Manager) void {
+        if (r4std.config.recoverDocumentSave(&self.sys, color_preferences.path) < 0) {
+            self.sys.println("R4DESK color profiles: save recovery failed"); return;
+        }
+        var bytes: [color_preferences.max_bytes]u8 = undefined;
+        const count = self.sys.fileRead(color_preferences.path, &bytes);
+        var next: color_preferences.Config = .{};
+        if (count != -3) {
+            if (count <= 0 or count > bytes.len) { self.sys.println("R4DESK color profiles: read failed"); return; }
+            next = color_preferences.Config.parse(bytes[0..@intCast(count)]) catch {
+                self.sys.println("R4DESK color profiles: invalid document"); return;
+            };
+        }
+        if (std.meta.eql(self.saved_colors, next)) return;
+        // Old images finish under their original owner before a new profile
+        // can acquire this output. Reconfiguration is not a GPU failure.
+        for (&self.slots) |*slot| if (slot.occupied()) {
+            const entry = for (self.snapshot.entries[0..self.snapshot.count]) |value| {
+                if (std.meta.eql(value.target, slot.target)) break value;
+            } else continue;
+            if (std.meta.eql(self.saved_colors.find(entry.key), next.find(entry.key))) continue;
+            slot.reconfiguring = true; slot.logical_index = null;
+        };
+        self.saved_colors = next; self.reconcile = true;
     }
     fn loadPreferences(self: *Manager) void {
         if (r4std.config.recoverDocumentSave(&self.sys, preferences.path) < 0) {
@@ -80,6 +110,38 @@ pub const Manager = struct {
         const encoded = try next.encode(&bytes);
         if (r4std.config.saveDocument(&self.sys, preferences.path, encoded) < 0) return error.Save;
         self.saved = next;
+    }
+    pub fn saveColorPreferences(self: *Manager, choice: color_preferences.Choice) !void {
+        // Merge with the current document: Appearance may have saved an ICC
+        // choice for another monitor while this confirmation was pending.
+        if (r4std.config.recoverDocumentSave(&self.sys, color_preferences.path) < 0) return error.Save;
+        var bytes: [color_preferences.max_bytes]u8 = undefined;
+        const count = self.sys.fileRead(color_preferences.path, &bytes);
+        const previous: color_preferences.Config = if (count == -3) .{} else blk: {
+            if (count <= 0 or count > bytes.len) return error.Save;
+            break :blk try color_preferences.Config.parse(bytes[0..@intCast(count)]);
+        };
+        const next = try previous.remember(choice);
+        const encoded = try next.encode(&bytes);
+        if (r4std.config.saveDocument(&self.sys, color_preferences.path, encoded) < 0) return error.Save;
+        self.saved_colors = next;
+    }
+    pub fn softwareOnly(self: *const Manager, target: a.GfxOutputTarget) bool {
+        for (self.software_targets) |failed| if (failed.connector_id != 0 and failed.adapter_id == target.adapter_id and
+            failed.connector_id == target.connector_id and failed.head_id == target.head_id and
+            failed.device_generation == target.device_generation and failed.connection_generation == target.connection_generation) return true;
+        return false;
+    }
+    pub fn colorReady(self: *Manager, entry: catalog.Entry) bool {
+        if (self.softwareOnly(entry.target) or entry.presentation.flags & a.display_presentation_info_native == 0) return false;
+        if (self.saved_colors.find(entry.key)) |choice| if (choice.enabled()) return false;
+        for (&self.slots) |*slot| if (!slot.failed and !slot.reconfiguring and std.meta.eql(slot.target, entry.target)) {
+            if (slot.gpu) |owner| if (owner.graphics.info()) |info| {
+                const required = owner.engine.requiredOperations() | gfx.device_gpu_color;
+                return info.gpu_operations & required == required;
+            };
+        };
+        return false;
     }
     pub fn configure(self: *Manager, layout: ?topology.Layout) void {
         self.desired = layout; self.reconcile = true;
@@ -109,7 +171,7 @@ pub const Manager = struct {
             // A failed target stays quarantined until its owners drain and
             // its retry deadline expires. Other outputs continue meanwhile.
             const quarantined = for (&self.slots) |*slot| {
-                if (slot.failed and std.meta.eql(slot.target, entry.target)) break true;
+                if ((slot.failed or slot.reconfiguring) and std.meta.eql(slot.target, entry.target)) break true;
             } else false;
             if (quarantined) continue;
             var value: topology.Output = .{ .key = entry.key,
@@ -194,7 +256,8 @@ pub const Manager = struct {
     }
     fn acquire(self: *Manager, entry: catalog.Entry, view: topology.Viewport) ?*Slot {
         const slot = for (&self.slots) |*current| {
-            if (!current.failed and std.meta.eql(current.target, entry.target) and
+            if (!current.failed and !current.reconfiguring and std.meta.eql(current.target, entry.target) and
+                current.color_revision == (if (entry.color) |value| value.revision else @as(u64, 0)) and
                 current.view.pixel_w == view.pixel_w and current.view.pixel_h == view.pixel_h) break current;
         } else for (&self.slots) |*current| { if (!current.occupied()) break current; } else return null;
         if (slot.occupied()) {
@@ -204,16 +267,27 @@ pub const Manager = struct {
             return slot;
         }
         slot.target = entry.target; slot.view = view;
-        const software_only = for (self.software_targets) |target| { if (std.meta.eql(target, entry.target)) break true; } else false;
-        if (!software_only) slot.gpu = worker.Worker.createForOutput(self.allocator, self.raw, self.sys, entry.target.adapter_id, entry.target.head_id);
+        slot.color_revision = if (entry.color) |value| value.revision else 0;
+        const choice = self.saved_colors.find(entry.key);
+        const profile_requested = if (choice) |value| value.enabled() else false;
+        const profile_supported = if (entry.color) |color| color.flags & 7 == 7 and
+            color.format == a.gfx_buffer_format_xrgb8888 and color.bpc == 8 and color.primaries == 1 and color.transfer == 1 and color.range == 1 else false;
+        // The general ICC path runs on the CPU until the GPU advertises the
+        // matching profile transform. Ordinary SDR keeps its native worker.
+        const profile_enabled = profile_requested and profile_supported;
+        if (profile_requested and !profile_supported) self.sys.println("R4DESK color profile unavailable for this output encoding");
+        const software_only = self.softwareOnly(entry.target);
+        if (!software_only and !profile_enabled) slot.gpu = worker.Worker.createForOutput(self.allocator, self.raw, self.sys,
+            entry.target.adapter_id, entry.target.head_id, entry.color, entry.presentation.format);
         const accelerated = if (slot.gpu) |owner| blk: {
             const info = owner.graphics.info() orelse break :blk false;
-            const needed = gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows;
+            const needed = owner.engine.requiredOperations();
             break :blk info.gpu_operations & needed == needed;
         } else false;
         if (!accelerated) {
             if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
-            if (slot.gpu == null and entry.presentation.flags & a.display_presentation_info_system_source != 0)
+            if (slot.gpu == null and entry.presentation.format == a.gfx_buffer_format_xrgb8888 and
+                (entry.color == null or profile_supported) and entry.presentation.flags & a.display_presentation_info_system_source != 0)
                 slot.software = cpu.Output.create(self.allocator, self.raw, self.draw, view, entry.target);
             if (slot.software == null or slot.software.?.lost) {
                 if (!std.meta.eql(self.reported_failure, entry.target)) {
@@ -227,6 +301,9 @@ pub const Manager = struct {
                 }
                 self.fail(slot); return null;
             }
+            if (profile_enabled) slot.software.?.setProfile(&self.sys, choice.?) catch |err| {
+                self.sys.write("R4DESK color profile unavailable; using SDR: "); self.sys.println(@errorName(err));
+            };
         }
         return slot;
     }
@@ -251,7 +328,7 @@ pub const Manager = struct {
         const now = self.sys.monotonicNanoseconds() orelse 0;
         for (&self.slots) |*slot| {
             if (!slot.occupied()) continue;
-            if (slot.logical_index == null or slot.failed) {
+            if (slot.logical_index == null or slot.failed or slot.reconfiguring) {
                 if (slot.failed) self.fail(slot);
                 if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
                 if (slot.software) |owner| if (owner.destroy()) { slot.software = null; };

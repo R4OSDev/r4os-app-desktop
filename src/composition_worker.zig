@@ -31,14 +31,19 @@ pub const Worker = struct {
     completed_status: ?gfx.R4GfxSwapchainFrameStatus = null,
 
     pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context) ?*Worker {
-        return createForOutput(allocator, raw, sys, 0, null);
+        return createForOutput(allocator, raw, sys, 0, null, null, gfx.format_xrgb8888);
     }
-    pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context, adapter: u32, head: ?u32) ?*Worker {
+    pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context,
+        adapter: u32, head: ?u32, encoding: ?r4os.abi.GfxOutputColorState, format: u32) ?*Worker
+    {
+        if (encoding) |value| if (value.identity.adapter_id != adapter) return null;
         const graphics = renderer.Renderer.createForAdapter(allocator, raw, adapter) orelse return null;
+        var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        engine.configureOutput(encoding, format) catch { graphics.destroy(); return null; };
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
         const primitive_frame = primitives.Frame.init(allocator) catch { allocator.destroy(self); graphics.destroy(); return null; };
         self.* = .{ .graphics = graphics, .sys = sys, .cache = layers.Cache.init(allocator, 128 * 1024 * 1024),
-            .engine = gpu.Engine.init(&graphics.client, &graphics.device), .primitives = primitive_frame };
+            .engine = engine, .primitives = primitive_frame };
         self.cache.recording = &self.primitives;
         self.engine.head = head;
         return self;
@@ -53,7 +58,7 @@ pub const Worker = struct {
         if (self.blocksCapture() or self.failed_revision == revision) return false;
         self.revision = revision;
         const info = self.graphics.info() orelse { if (self.engine.head != null) self.fail(error.Graphics); return false; };
-        const required = gfx.device_gpu_copy_rows | gfx.device_gpu_render | gfx.device_gpu_present;
+        const required = self.engine.requiredOperations();
         if (info.gpu_operations & required != required) { if (self.engine.head != null) self.fail(error.Unsupported); return false; }
         if (self.device_generation != info.device_generation or self.reset_generation != info.reset_generation) {
             self.engine.invalidate();

@@ -7,21 +7,27 @@ const gfx = @import("r4gfx");
 const layers = @import("composition_layers.zig");
 const surface = @import("surface.zig");
 const primitive_assets = @import("primitive_assets.zig");
+const color = @import("composition_software.zig");
 const empty = std.mem.zeroes(gfx.R4GfxResource);
-const Image = struct { resource: gfx.R4GfxResource = empty, info: gfx.R4GfxResourceInfo = undefined, generation: u64 = 0, charge: u64 = 0 };
+const Image = struct { resource: gfx.R4GfxResource = empty, color_view: gfx.R4GfxResource = empty, info: gfx.R4GfxResourceInfo = undefined, generation: u64 = 0, charge: u64 = 0 };
 const Job = struct { handle: gfx.R4GfxJob, fence: gfx.R4GfxCopyFence, upload: ?usize = null, asset_upload: ?usize = null, generation: u64 = 0, bytes: u64 = 0, complete: bool = false };
 pub const Error = error{ Busy, Unsupported, Stale, Graphics, Limit, State, Deadline, Incomplete };
 pub const Progress = enum { pending, copied, failed };
 pub const Completion = struct { frame: u64, status: gfx.R4GfxSwapchainFrameStatus };
 pub const Engine = struct {
     client: *const gfx.DeviceV1Client,
+    colors: *const gfx.ColorV1Client,
     device: *const gfx.R4GfxDevice,
     // Null preserves the legacy primary negotiation. Explicit outputs never
     // borrow a different head when their receiver disappears.
     head: ?u32 = null,
+    output_format: u32 = gfx.format_xrgb8888,
+    output_color: gfx.R4GfxColorDescription = color.description(false, true),
+    color_output: bool = false,
     images: [layers.capacity]Image = @splat(.{}),
     assets: [primitive_assets.texture_capacity]Image = @splat(.{}),
     outputs: [gfx.swapchain_image_capacity]Image = @splat(.{}),
+    workings: [gfx.swapchain_image_capacity]Image = @splat(.{}),
     output_index: usize = 0,
     chain: gfx.R4GfxSwapchain = std.mem.zeroes(gfx.R4GfxSwapchain),
     presentation: ?gfx.R4GfxPresentationInfo = null,
@@ -41,7 +47,9 @@ pub const Engine = struct {
     jobs: [gfx.device_job_capacity]?Job = @splat(null),
     last: ?usize = null,
     stage_job: ?usize = null,
-    phase: enum { idle, upload, asset_upload, primitives, draw, present, drain } = .idle,
+    phase: enum { idle, upload, asset_upload, primitives, linear_clear, draw, encode, present, drain } = .idle,
+    clear_working: bool = true,
+    encode_area: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     frame: u64 = 0,
     next_image: usize = 0,
     next_command: usize = 0,
@@ -61,9 +69,37 @@ pub const Engine = struct {
     reserved_bytes: u64 = 0,
     budget_bytes: u64 = 256 * 1024 * 1024,
 
-    pub fn init(client: *const gfx.DeviceV1Client, device: *const gfx.R4GfxDevice) Engine { return .{ .client = client, .device = device }; }
+    pub fn init(client: *const gfx.DeviceV1Client, colors: *const gfx.ColorV1Client, device: *const gfx.R4GfxDevice) Engine { return .{ .client = client, .colors = colors, .device = device }; }
+    /// Configure the confirmed wire encoding before any resources or worker
+    /// thread exist. A changed output gets a new owner after the old one drains.
+    pub fn configureOutput(self: *Engine, state: ?r4os.abi.GfxOutputColorState, format: u32) Error!void {
+        if (self.active() or self.reserved_bytes != 0 or self.chain.slot != 0) return error.Busy;
+        var description = color.description(false, true);
+        if (state) |value| {
+            if (value.version != 1 or value.size < @sizeOf(r4os.abi.GfxOutputColorState) or value.flags & 7 != 7 or
+                value.format != format or value.reference_white == 0 or value.peak < value.reference_white or value.black >= value.reference_white or
+                (value.primaries != gfx.color_primaries_srgb and value.primaries != gfx.color_primaries_bt2020) or
+                (value.transfer != gfx.color_transfer_srgb and value.transfer != gfx.color_transfer_pq and value.transfer != gfx.color_transfer_hlg) or
+                (value.range != gfx.color_range_full and value.range != gfx.color_range_limited)) return error.Unsupported;
+            description.primaries = value.primaries; description.transfer = value.transfer; description.range = value.range;
+            description.reference_white = value.reference_white; description.peak = value.peak; description.black = value.black;
+            description.precision = switch (format) {
+                gfx.format_xrgb8888 => if (value.bpc == 8) gfx.color_precision_unorm8 else return error.Unsupported,
+                gfx.format_xrgb2101010 => if (value.bpc == 10) gfx.color_precision_unorm10 else return error.Unsupported,
+                else => return error.Unsupported,
+            };
+        } else if (format != gfx.format_xrgb8888) return error.Unsupported;
+        try accepted(self.colors.color_description_validate(&description));
+        self.output_format = format; self.output_color = description;
+        self.color_output = !std.meta.eql(description, color.description(false, true));
+    }
+    pub fn requiredOperations(self: *const Engine) u32 {
+        return gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows |
+            @as(u32, if (self.color_output) gfx.device_gpu_color else 0);
+    }
     pub fn active(self: *const Engine) bool { return self.phase != .idle; }
     fn output(self: *Engine) *Image { return &self.outputs[self.output_index]; }
+    fn working(self: *Engine) *Image { return &self.workings[self.output_index]; }
     pub fn invalidate(self: *Engine) void { for (&self.outputs) |*value| value.generation = 0; }
     pub fn pending(self: *const Engine) bool {
         for (self.chain_frames) |key| if (key != 0) return true;
@@ -138,8 +174,9 @@ pub const Engine = struct {
     }
     pub fn prepared(self: *Engine, cache: *const layers.Cache) bool {
         if (self.chain_status) |status| if (status.life >= 2) return false;
-        if (self.over.slot == 0 or self.blit.slot == 0 or self.sampler.slot == 0 or
-            !self.imageFits(self.output(), cache.screen.w, cache.screen.h, gfx.format_xrgb8888) or
+        if (self.over.slot == 0 or self.blit.slot == 0 or self.fill.slot == 0 or self.sampler.slot == 0 or
+            !self.imageFits(self.working(), cache.screen.w, cache.screen.h, gfx.format_abgr16161616f) or
+            !self.imageFits(self.output(), cache.screen.w, cache.screen.h, self.output_format) or
             !self.imageFits(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
                 if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888)) return false;
         var visited: [layers.capacity]bool = @splat(false);
@@ -147,7 +184,7 @@ pub const Engine = struct {
             if (visited[command.entry]) continue;
             visited[command.entry] = true;
             const entry = &cache.entries[command.entry];
-            if (!self.imageFits(&self.images[command.entry], entry.bounds.w, entry.bounds.h, gfx.format_argb8888)) return false;
+            if (!self.imageFits(&self.images[command.entry], entry.bounds.w, entry.bounds.h, gfx.format_argb8888) or self.images[command.entry].color_view.slot == 0) return false;
         }
         if (cache.recording) |recording| {
             if (self.fill.slot == 0) return false;
@@ -172,12 +209,13 @@ pub const Engine = struct {
         if (cache.collecting or cache.failure != null or cache.command_count == 0) return error.State;
         var device_info: gfx.R4GfxDeviceInfo = undefined;
         try accepted(self.client.device_refresh(self.device, &device_info));
-        const operations = gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows;
+        const operations = self.requiredOperations();
         if (device_info.gpu_operations & operations != operations) return error.Unsupported;
         self.batch_enabled = device_info.gpu_operations & gfx.device_gpu_render_list != 0;
         self.grid_enabled = device_info.gpu_operations & gfx.device_gpu_grid != 0;
         if (cache.recording) |recording| if (recording.view != null and !self.grid_enabled) return error.Unsupported;
         try self.stateResource(&self.over, gfx.resource_pipeline, gfx.render_operation_over);
+        try self.stateResource(&self.fill, gfx.resource_pipeline, gfx.render_operation_fill);
         try self.stateResource(&self.blit, gfx.resource_pipeline, gfx.render_operation_blit);
         try self.stateResource(&self.sampler, gfx.resource_sampler, gfx.render_sampler_nearest);
         var presentation: ?gfx.R4GfxPresentationInfo = null;
@@ -187,10 +225,10 @@ pub const Engine = struct {
             if (self.client.presentation_info(self.device, @intCast(head), &value) != gfx.status_ok or
                 value.flags & gfx.present_native == 0 or value.adapter_id != device_info.adapter_id or
                 value.device_generation != device_info.device_generation or value.reset_generation != device_info.reset_generation or
-                value.width != cache.screen.w or value.height != cache.screen.h) continue;
+                value.width != cache.screen.w or value.height != cache.screen.h or value.format != self.output_format) continue;
             presentation = value; break;
         }
-        if (self.head != null and presentation == null) return error.Stale;
+        if ((self.head != null or self.color_output) and presentation == null) return error.Stale;
         if (self.chain.slot != 0) {
             if (presentation == null or self.presentation.?.display_generation != presentation.?.display_generation or
                 self.presentation.?.width != presentation.?.width or self.presentation.?.height != presentation.?.height) try self.closeChain();
@@ -199,13 +237,14 @@ pub const Engine = struct {
         if (count < 1 or count > self.outputs.len) return error.Unsupported;
         const direct = presentation != null and presentation.?.flags & gfx.present_direct != 0 and device_info.gpu_operations & gfx.device_gpu_direct != 0;
         for (self.outputs[0..count]) |*value| {
-            self.imageKind(value, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, direct, deadline) catch |err| {
+            self.imageKind(value, cache.screen.w, cache.screen.h, self.output_format, true, direct, deadline) catch |err| {
                 // Contiguous scanout storage can be unavailable under VRAM
                 // pressure. The regular render/copy pool remains usable.
                 if (!direct or (err != error.Unsupported and err != error.Limit)) return err;
-                try self.image(value, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, deadline);
+                try self.image(value, cache.screen.w, cache.screen.h, self.output_format, true, deadline);
             };
         }
+        for (self.workings[0..count]) |*value| try self.image(value, cache.screen.w, cache.screen.h, gfx.format_abgr16161616f, true, deadline);
         if (presentation) |value| if (self.chain.slot == 0) {
             var handles: [gfx.swapchain_image_capacity]gfx.R4GfxResource = undefined;
             for (0..count) |i| handles[i] = self.outputs[i].resource;
@@ -224,6 +263,7 @@ pub const Engine = struct {
             const entry = &cache.entries[index];
             if (!entry.initialized or entry.generation == 0) return error.State;
             try self.image(&self.images[index], entry.bounds.w, entry.bounds.h, gfx.format_argb8888, true, deadline);
+            try self.colorView(&self.images[index]);
         }
         if (cache.recording) |recording| {
             try self.stateResource(&self.fill, gfx.resource_pipeline, gfx.render_operation_fill);
@@ -242,13 +282,21 @@ pub const Engine = struct {
     fn image(self: *Engine, target: *Image, width: i32, height: i32, format: u32, native: bool, deadline: u64) Error!void {
         return self.imageKind(target, width, height, format, native, false, deadline);
     }
+    fn colorView(self: *Engine, source: *Image) Error!void {
+        if (source.color_view.slot != 0) return;
+        var desc = descriptor(gfx.resource_image);
+        desc.source_kind = gfx.source_color_view;
+        desc.source_address = @intFromPtr(&source.resource);
+        try accepted(self.colors.color_resource_create(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxColorResourceDesc),
+            .resource = desc, .description = color.description(false, false) }, &source.color_view));
+    }
     fn imageKind(self: *Engine, target: *Image, width: i32, height: i32, format: u32, native: bool, scanout: bool, deadline: u64) Error!void {
         if (width <= 0 or height <= 0) return error.State;
         if (target.resource.slot != 0) {
             if (self.imageFits(target, width, height, format)) return;
             try self.releaseImage(target);
         }
-        const row: u64 = @as(u64, @intCast(width)) * 4;
+        const row: u64 = @as(u64, @intCast(width)) * @as(u64, if (format == gfx.format_abgr16161616f) 8 else 4);
         const pitch = if (native) (row + 255) & ~@as(u64, 255) else row;
         const size = pitch * @as(u64, @intCast(height));
         const charge = (size + (if (native) @as(u64, 65535) else 4095)) & ~(if (native) @as(u64, 65535) else 4095);
@@ -260,7 +308,10 @@ pub const Engine = struct {
             desc.source_kind = gfx.source_create_system;
             desc.image = .{ .cpu_address = 0, .byte_length = size, .pitch = pitch, .width = @intCast(width), .height = @intCast(height), .format = format, .reserved = 0 };
         }
-        try accepted(self.client.resource_create(self.device, &desc, &target.resource));
+        if (format == gfx.format_xrgb8888 or format == gfx.format_xrgb2101010 or format == gfx.format_abgr16161616f) {
+            try accepted(self.colors.color_resource_create(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxColorResourceDesc),
+                .resource = desc, .description = if (format == gfx.format_abgr16161616f) color.description(true, false) else self.output_color }, &target.resource));
+        } else try accepted(self.client.resource_create(self.device, &desc, &target.resource));
         // The resource remains tracked even if its metadata cannot be read.
         target.info = std.mem.zeroes(gfx.R4GfxResourceInfo);
         target.charge = charge; self.reserved_bytes += charge;
@@ -274,6 +325,10 @@ pub const Engine = struct {
         target.generation = 0;
     }
     fn releaseImage(self: *Engine, image_value: *Image) Error!void {
+        if (image_value.color_view.slot != 0) {
+            try accepted(self.client.resource_release(self.device, &image_value.color_view));
+            image_value.color_view = empty;
+        }
         if (image_value.resource.slot == 0) return;
         try accepted(self.client.resource_release(self.device, &image_value.resource));
         self.reserved_bytes -= image_value.charge;
@@ -287,6 +342,9 @@ pub const Engine = struct {
         // background (or fullscreen terminal). A new target must start there.
         if (self.needsFull(cache.screen.w, cache.screen.h) and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
         try self.acquire(self.input_ns);
+        self.clear_working = self.needsFull(cache.screen.w, cache.screen.h);
+        self.encode_area = cache.commands[0].scissor;
+        for (cache.commands[1..cache.command_count]) |command| self.encode_area = self.encode_area.merged(command.scissor);
         if (self.acquired) |value| { self.chain_frames[value.slot - 1] = cache.frame; self.reported[value.slot - 1] = false; }
         self.frame = cache.frame; self.deadline = deadline; self.phase = if (cache.recording != null) .asset_upload else .upload;
         self.next_image = 0; self.next_command = 0; self.fault = null; self.present_fence = null;
@@ -422,7 +480,7 @@ pub const Engine = struct {
             },
             .primitives => {
                 const recording = cache.recording orelse return error.State;
-                if (self.next_primitive == recording.count) { self.phase = .draw; return; }
+                if (self.next_primitive == recording.count) { self.phase = .linear_clear; return; }
                 const first = recording.commands[self.next_primitive];
                 var requests: [gfx.render_list_capacity]gfx.R4GfxRenderRequest = undefined;
                 var grids: [gfx.render_list_capacity]gfx.R4GfxLogicalGrid = undefined;
@@ -478,22 +536,53 @@ pub const Engine = struct {
                     self.next_image += 1;
                     return;
                 }
+                self.phase = .linear_clear;
+            },
+            .linear_clear => {
+                if (self.clear_working) {
+                    const slot = try self.reserve();
+                    var handle: gfx.R4GfxJob = undefined;
+                    try accepted(self.client.render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
+                        .source = empty, .target = self.working().resource, .pipeline = self.fill, .sampler = empty,
+                        .source_rect = std.mem.zeroes(gfx.R4GfxSignedRect), .target_rect = rect(cache.screen), .scissor = rect(cache.screen),
+                        .color = 0, .opacity = 255, .transfer = 0, .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer }, &handle));
+                    try self.track(slot, handle, null, 0, 0);
+                    self.render_jobs +|= 1;
+                }
                 self.phase = .draw;
             },
             .draw => {
-                if (self.next_command == cache.command_count) { self.phase = .present; return; }
+                if (self.next_command == cache.command_count) { self.phase = .encode; return; }
                 const slot = try self.reserve();
                 const command = cache.commands[self.next_command]; const entry = &cache.entries[command.entry];
                 const bounds = entry.bounds; const clip = command.scissor;
                 var handle: gfx.R4GfxJob = undefined;
                 try accepted(self.client.render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
-                    .source = self.images[command.entry].resource, .target = self.output().resource, .pipeline = self.over, .sampler = self.sampler,
+                    .source = self.images[command.entry].color_view, .target = self.working().resource, .pipeline = self.over, .sampler = self.sampler,
                     .source_rect = .{ .x = clip.x - bounds.x, .y = clip.y - bounds.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .target_rect = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .scissor = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
-                    .color = 0, .opacity = 255, .transfer = 0, .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer }, &handle));
+                    .color = 0, .opacity = 255, .transfer = gfx.render_transfer_srgb_decode, .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer }, &handle));
                 try self.track(slot, handle, null, 0, 0);
                 self.next_command += 1; self.render_jobs +|= 1;
+            },
+            .encode => {
+                const slot = try self.reserve();
+                var handle: gfx.R4GfxJob = undefined;
+                const area = rect(self.encode_area);
+                const request: gfx.R4GfxRenderRequest = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
+                    .source = self.working().resource, .target = self.output().resource, .pipeline = self.blit, .sampler = self.sampler,
+                    .source_rect = area, .target_rect = area, .scissor = area, .color = 0, .opacity = 255,
+                    .transfer = if (self.color_output) gfx.render_transfer_identity else gfx.render_transfer_srgb_encode,
+                    .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer };
+                if (self.color_output) {
+                    try accepted(self.colors.color_render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderListRequest),
+                        .commands = @intFromPtr(&request), .count = 1, .reserved = 0 },
+                        gfx.color_transform_output | gfx.color_transform_relative_white | gfx.color_transform_dither, &handle));
+                } else try accepted(self.client.render_submit(self.device, &request, &handle));
+                try self.track(slot, handle, null, 0, 0);
+                self.render_jobs +|= 1;
+                self.phase = .present;
             },
             .present => {
                 if (self.chain.slot != 0) {
@@ -541,6 +630,7 @@ pub const Engine = struct {
         for (&self.images) |*value| try self.releaseImage(value);
         for (&self.assets) |*value| try self.releaseImage(value);
         for (&self.outputs) |*value| try self.releaseImage(value);
+        for (&self.workings) |*value| try self.releaseImage(value);
         try self.releaseImage(&self.staging);
         for ([_]*gfx.R4GfxResource{ &self.over, &self.blit, &self.fill, &self.sampler }) |handle| if (handle.slot != 0) {
             try accepted(self.client.resource_release(self.device, handle)); handle.* = empty;

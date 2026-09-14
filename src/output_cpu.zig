@@ -7,6 +7,9 @@ const a = r4os.abi;
 const geometry = @import("output_geometry.zig");
 const scene_buffer = @import("scene_buffer.zig");
 const renderer = @import("gfx_renderer.zig");
+const composition = @import("composition_software.zig");
+const catalog = @import("r4gfx_desktop_outputs");
+const Profile = catalog.profiles.Owner(gfx);
 const empty = std.mem.zeroes(gfx.R4GfxResource);
 pub const Output = struct {
     graphics: *renderer.Renderer,
@@ -20,6 +23,8 @@ pub const Output = struct {
     mapping: a.GfxBufferMap = .{},
     scratch: []u8 = &.{},
     scene: scene_buffer.SceneBuffer = .{},
+    color_composition: composition.Owner = .{},
+    profile: ?Profile = null,
     count: u32 = 0,
     ready: bool = false,
     pending: bool = false,
@@ -32,6 +37,11 @@ pub const Output = struct {
     prepare_error: ?anyerror = null,
     last_status: i32 = 0,
     last_submitted: ?u32 = null,
+    pub fn setProfile(self: *Output, sys: anytype, choice: catalog.color_preferences.Choice) !void {
+        if (self.profile != null or self.acquired != null or self.pending or self.completed != 0) return error.State;
+        if (!choice.enabled()) return;
+        self.profile = try Profile.openFile(self.graphics.allocator, self.graphics.colors, sys, choice.profilePath(), choice.intent, choice.flags);
+    }
 
     pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, draw: r4os.r4draw.Context,
         view: geometry.topology.Viewport, target: a.GfxOutputTarget) ?*Output
@@ -112,7 +122,7 @@ pub const Output = struct {
         }
         const bounds = geometry.logical(self.view) catch { self.abandon(); return null; };
         var storage: []u8 = @as([*]u8, @ptrFromInt(self.mapping.cpu_address))[0..@intCast(bytes)];
-        if (self.view.rotation != .normal or self.view.scale != 120) {
+        if (self.profile != null or self.view.rotation != .normal or self.view.scale != 120) {
             const length = scene_buffer.SceneBuffer.requiredBytes(bounds.w, bounds.h) orelse { self.abandon(); return null; };
             if (length > 64 * 1024 * 1024) { self.abandon(); self.lost = true; return null; }
             if (self.scratch.len < length) {
@@ -123,14 +133,22 @@ pub const Output = struct {
         }
         if (!self.scene.attach(storage, bounds.w, bounds.h)) { self.abandon(); return null; }
         self.scene.origin_x = bounds.x; self.scene.origin_y = bounds.y;
+        self.color_composition.begin(self.graphics.allocator, &self.scene) catch { self.abandon(); return null; };
         return &self.scene;
     }
     pub fn submit(self: *Output, deadline: u64) bool {
         const frame = self.acquired orelse return false;
         if (self.scene.failure != null or self.mapping.lease.id == 0) { self.abandon(); return false; }
-        if (self.view.rotation != .normal or self.view.scale != 120) {
+        self.color_composition.finish(&self.graphics.colors, &self.scene) catch { self.abandon(); return false; };
+        if (self.profile != null or self.view.rotation != .normal or self.view.scale != 120) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
             transform(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]);
+        }
+        if (self.profile) |*profile| {
+            const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
+            profile.applySdr(pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h], self.view.pixel_w, self.view.pixel_h) catch {
+                self.abandon(); return false;
+            };
         }
         if (self.draw.gfxBufferUnmap(&self.mapping.lease) != a.gfx_buffer_result_ok) {
             // Preserve the mapping and acquired image for retained teardown.
@@ -151,6 +169,7 @@ pub const Output = struct {
         return true;
     }
     fn abandon(self: *Output) void {
+        self.color_composition.cancel(&self.scene);
         if (self.mapping.lease.id != 0) {
             if (self.draw.gfxBufferUnmap(&self.mapping.lease) != a.gfx_buffer_result_ok) { self.lost = true; return; }
             self.mapping = .{};
@@ -180,6 +199,11 @@ pub const Output = struct {
             }
         }
         const allocator = self.graphics.allocator;
+        if (self.profile) |*profile| {
+            if (!profile.close()) return false;
+            self.profile = null;
+        }
+        self.color_composition.deinit();
         allocator.free(self.scratch); self.graphics.destroy(); allocator.destroy(self);
         return true;
     }

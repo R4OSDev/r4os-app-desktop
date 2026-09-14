@@ -18,6 +18,12 @@ pub const Entry = struct {
     initialized: bool = false,
 };
 pub const Command = struct { entry: u8, scissor: surface.Rect };
+pub const ColorScratch = struct {
+    pub const side = 64;
+    linear: [side * side * 4]u16 = undefined,
+    encoded: [side * side]u32 = undefined,
+    touched: [side]u64 = @splat(0),
+};
 pub const Cache = struct {
     allocator: std.mem.Allocator,
     budget: usize,
@@ -26,6 +32,7 @@ pub const Cache = struct {
     commands: [command_capacity]Command = undefined,
     command_count: usize = 0,
     scratch: []u32 = &.{},
+    color_scratch: ?*ColorScratch = null,
     painter: scene.SceneBuffer = .{},
     active: ?struct { index: usize, scissor: surface.Rect } = null,
     screen: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -42,12 +49,31 @@ pub const Cache = struct {
     pub fn deinit(self: *Cache) void {
         for (&self.entries) |*entry| { self.allocator.free(entry.pixels); entry.* = .{}; }
         self.allocator.free(self.scratch);
+        if (self.color_scratch) |storage| self.allocator.destroy(storage);
+        self.color_scratch = null;
         self.scratch = &.{}; self.reserved = 0; self.painter = .{}; self.active = null; self.collecting = false;
     }
     pub fn start(self: *Cache, bounds: surface.Rect) !void {
+        if (bounds.x != 0 or bounds.y != 0) return error.Invalid;
         self.view = null;
         if (self.recording) |recording| recording.view = null;
         try self.startInternal(bounds, bounds);
+    }
+    /// CPU canvases may cover a monitor at a nonzero logical origin. Layer
+    /// bounds retain those coordinates; only pixel offsets are normalized.
+    pub fn startCpuOutput(self: *Cache, bounds: surface.Rect) !void {
+        if (self.recording != null) return error.State;
+        self.view = null;
+        try self.startInternal(bounds, bounds);
+    }
+    pub fn colorStorage(self: *Cache) !*ColorScratch {
+        if (self.color_scratch) |storage| return storage;
+        const bytes = @sizeOf(ColorScratch);
+        if (bytes > self.budget or self.reserved > self.budget - bytes) return error.OutOfMemory;
+        const storage = try self.allocator.create(ColorScratch);
+        self.color_scratch = storage;
+        self.reserved += bytes;
+        return storage;
     }
     pub fn startOutput(self: *Cache, view: geometry.topology.Viewport) !void {
         const recording = self.recording orelse return error.State;
@@ -61,7 +87,7 @@ pub const Cache = struct {
     }
     fn startInternal(self: *Cache, bounds: surface.Rect, logical_bounds: surface.Rect) !void {
         if (self.collecting or self.active != null) return error.Busy;
-        if (bounds.x != 0 or bounds.y != 0 or bounds.isEmpty()) return error.Invalid;
+        if (bounds.isEmpty()) return error.Invalid;
         self.frame = try std.math.add(u64,self.frame,1);
         if (self.recording) |recording| try recording.start(self.frame);
         self.screen = bounds; self.logical_screen = logical_bounds;

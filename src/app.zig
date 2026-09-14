@@ -252,6 +252,9 @@ const DesktopLayoutAsyncSave = struct {
 pub const App = struct {
     ctx: *desk_api.Context,
     images: *const r4img.Context,
+    png: *const r4img.PngContext,
+    raster: *const r4img.RasterContext,
+    colors: *const gfx.ColorV1Client,
     screen_w: i32 = 1280,
     screen_h: i32 = 720,
     start_open: bool = false,
@@ -298,6 +301,7 @@ pub const App = struct {
     render_stats: compositor.RenderStats = .{},
     present_source_generation: u64 = 0,
     scene: scene_buffer.SceneBuffer = .{},
+    cpu_composition: composition_software.Owner = .{},
     composition: ?*composition_worker.Worker = null,
     outputs: ?*output_manager.Manager = null,
     display_settings: display_control.Owner = .{},
@@ -1561,14 +1565,18 @@ pub const App = struct {
     }
 
     fn smokeGraphicsResources(self: *App) void {
+        @import("smoke_color.zig").check(self.ctx.allocator(), self.images, self.raster, self.colors) catch |err| self.windowIdleSmokeFailed(@errorName(err));
+        self.ctx.println("DESKTOP color runtime: OK ICC-BMP shared-CMM linear-alpha SDR");
         const graphics = self.ctx.graphics orelse self.windowIdleSmokeFailed("gfx-device");
         const info = graphics.info() orelse self.windowIdleSmokeFailed("gfx-info");
-        if (graphics.batches == 0 or graphics.fills == 0 or graphics.rejected_batches != 0 or info.cpu_write_bytes == 0)
-            self.windowIdleSmokeFailed("gfx-batches");
+        if (graphics.rejected_batches != 0 or (!self.managedOutputs() and
+            (self.cpu_composition.frames == 0 or self.cpu_composition.stats.pixels == 0)))
+            self.windowIdleSmokeFailed("gfx-color-composition");
         self.ctx.write("DESKTOP graphics resources: OK DEVICE_V1 backend="); self.ctx.printU64(info.backend);
         self.ctx.write(" batches="); self.ctx.printU64(graphics.batches);
         self.ctx.write(" fills="); self.ctx.printU64(graphics.fills);
         self.ctx.write(" imports="); self.ctx.printU64(info.imports);
+        self.ctx.write(" linear-frames="); self.ctx.printU64(self.cpu_composition.frames);
         self.ctx.println(" rejected=0");
         self.smokeCompositionResources();
     }
@@ -1590,7 +1598,7 @@ pub const App = struct {
             _ = self.composeDamageRect(bounds,&offsets,&views);
             self.ctx.endScene(); self.scene.clearPaintClip(); self.scene.layer_hook = null;
             _ = worker.cache.finish() catch self.windowIdleSmokeFailed("composition-layers");
-            _ = composition_software.paint(&worker.graphics.client,&worker.graphics.device,&worker.cache,&self.scene) catch
+            _ = composition_software.paint(&worker.graphics.colors,&worker.cache,&self.scene) catch
                 self.windowIdleSmokeFailed("composition-software");
             if (std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-pixels");
             worker.cache.deinit();
@@ -5526,10 +5534,12 @@ pub const App = struct {
         // Their explicit CPU mirror is independent of native output storage.
         if (self.remote_frame_consumers != 0 and self.ensureSceneBuffer()) {
             const bounds = surface.desktop(self.screen_w, self.screen_h).rect;
+            self.cpu_composition.begin(self.ctx.allocator(), &self.scene) catch { self.cpu_scene_current = false; return; };
             self.ctx.beginSceneClipped(&self.scene, bounds);
             _ = self.composeDamageRect(bounds, &offsets, &views);
-            self.ctx.endScene(); self.scene.clearPaintClip();
-            self.cpu_scene_current = self.scene.failure == null;
+            self.ctx.endScene();
+            self.cpu_composition.finish(self.colors, &self.scene) catch { self.cpu_scene_current = false; return; };
+            self.cpu_scene_current = true;
             if (self.cpu_scene_current) _ = self.publishRemoteScene(&.{bounds});
         } else self.cpu_scene_current = false;
     }
@@ -5648,7 +5658,7 @@ pub const App = struct {
         // never reconstruct or copy a final CPU fullscreen image.
         if (self.remote_frame_consumers != 0) {
             const graphics = self.ctx.graphics orelse { worker.rejectCapture(); self.cpu_scene_current = false; return false; };
-            _ = composition_software.paint(&graphics.client, &graphics.device, &worker.cache, &self.scene) catch {
+            _ = composition_software.paint(&graphics.colors, &worker.cache, &self.scene) catch {
                 worker.rejectCapture(); self.cpu_scene_current = false; return false;
             };
             self.cpu_scene_current = true;
@@ -5771,6 +5781,10 @@ pub const App = struct {
             @intCast(@max(0, damage_bounds.h)),
         );
         const scene_ready = self.ensureSceneBuffer();
+        if (!scene_ready) { self.cpu_scene_current = false; self.invalidateFull(); return; }
+        self.cpu_composition.begin(self.ctx.allocator(), &self.scene) catch {
+            self.cpu_scene_current = false; self.invalidateFull(); return;
+        };
         const console_scroll_offsets = self.consoleScrollOffsets();
         self.refreshConsoleSnapshots();
         const gui_frame_views = self.guiFrameViews();
@@ -5788,11 +5802,11 @@ pub const App = struct {
             }
         }
         self.cpu_scene_current = scene_ready;
-        if (scene_ready and self.scene.failure != null) {
+        self.cpu_composition.finish(self.colors, &self.scene) catch {
             self.cpu_scene_current = false;
             self.invalidateFull();
             return;
-        }
+        };
         const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
         const compose_end_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const present_start = self.ctx.ticks();
@@ -7107,7 +7121,7 @@ pub const App = struct {
                 if (next.desktop_bg != requested) return false;
                 if (requested == self.config.desktop_bg) return false;
             },
-            .reload => {},
+            .reload => if (self.outputs) |outputs| outputs.reloadColors(),
         }
         self.config = next;
         self.reloadWallpaper();
@@ -8752,7 +8766,7 @@ pub const App = struct {
             self.wallpaper_state.clear(allocator);
             return;
         }
-        if (!self.wallpaper_state.load(&self.ctx.sys, self.images, allocator, self.config.wallpaperPath())) {
+        if (!self.wallpaper_state.load(&self.ctx.sys, self.images, self.png, self.raster, self.colors, allocator, self.config.wallpaperPath(), self.config.desktop_bg)) {
             self.wallpaper_state.clear(allocator);
         }
     }

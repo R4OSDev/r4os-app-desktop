@@ -448,7 +448,7 @@ test "occlusion composition matches complete painter order after move hide minim
         scene.layer_hook = null;
         const composition_commands = try cache.finish();
         try std.testing.expect(composition_commands.len != 0);
-        _ = try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&scene);
+        _ = try @import("composition_software.zig").paint(&graphics.colors,&cache,&scene);
         try std.testing.expectEqualSlices(u32,&reference,&composed);
         // Repeating the scene keeps all pixel generations; no dirty upload
         // is needed, although its ordinary painter order is still recorded.
@@ -469,13 +469,33 @@ test "occlusion composition matches complete painter order after move hide minim
     try cache.start(scene.fullRect());
     const idle = try cache.finish();
     try std.testing.expect(idle.len == 0);
-    const idle_stats = try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&scene);
+    const idle_stats = try @import("composition_software.zig").paint(&graphics.colors,&cache,&scene);
     try std.testing.expect(idle_stats.commands == 0 and idle_stats.pixels == 0);
     var tiny = composition_layers.Cache.init(std.testing.allocator,4);
     defer tiny.deinit();
     try tiny.start(scene.fullRect());
     try std.testing.expectError(error.OutOfMemory,tiny.begin(1,scene.fullRect(),scene.fullRect()));
     try std.testing.expect(tiny.reserved == 0 and tiny.command_count == 0);
+    // Independent optical anchor through the same retained owner used by
+    // fallback, secondary outputs and the remote mirror. Damage has a
+    // nonzero desktop origin; the three untouched pixels stay exact.
+    var cpu_owner: @import("composition_software.zig").Owner = .{};
+    defer cpu_owner.deinit();
+    var color_pixels = [_]u32{0x123456} ** 4;
+    var color_scene: scene_buffer.SceneBuffer = .{};
+    try std.testing.expect(color_scene.attach(std.mem.sliceAsBytes(&color_pixels), 2, 2));
+    color_scene.origin_x = -2; color_scene.origin_y = 9;
+    try cpu_owner.begin(std.testing.allocator, &color_scene);
+    const single: surface.Rect = .{ .x = -2, .y = 9, .w = 1, .h = 1 };
+    const base = (try cpu_owner.cache.?.begin(1, single, single)).?;
+    base.fillRect(single, 0); try cpu_owner.cache.?.end(1);
+    const translucent = (try cpu_owner.cache.?.begin(2, single, single)).?;
+    const white = [_]u32{0x80ffffff};
+    try std.testing.expect(translucent.blendArgb32(single, single.x, single.y, 1, 1, 1, std.mem.sliceAsBytes(&white)));
+    try cpu_owner.cache.?.end(2);
+    try cpu_owner.finish(&graphics.colors, &color_scene);
+    try std.testing.expectEqualSlices(u32, &.{ 0xbcbcbc, 0x123456, 0x123456, 0x123456 }, &color_pixels);
+    try std.testing.expect(cpu_owner.frames == 1 and color_scene.layer_hook == null);
     try @import("composition_gpu_test.zig").check();
 }
 

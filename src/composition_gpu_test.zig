@@ -15,7 +15,7 @@ const surface = @import("surface.zig");
 const Model = struct {
     const s = p.swapchain.lifecycle;
     const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined,
-        grids: [c.render_list_capacity]c.R4GfxLogicalGrid = @splat(std.mem.zeroes(c.R4GfxLogicalGrid)), count: usize = 0 };
+        grids: [c.render_list_capacity]c.R4GfxLogicalGrid = @splat(std.mem.zeroes(c.R4GfxLogicalGrid)), count: usize = 0, color_flags: ?u32 = null };
     const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
     const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
@@ -30,6 +30,9 @@ const Model = struct {
     var max_batch: usize = 0;
     var visible: [64]u32 = @splat(0);
     var chain_enabled = false;
+    var chain_format: u32 = c.format_xrgb8888;
+    var color_enabled = true;
+    var color_batches: usize = 0;
     var allow_visible = false;
     var staged: [64]u32 = @splat(0);
     var clock: u64 = 1;
@@ -48,10 +51,17 @@ const Model = struct {
         value.swapchain_present = chainPresent; value.swapchain_poll = chainPoll; value.swapchain_release = chainRelease; value.swapchain_close = chainClose;
         break :blk value;
     };
+    const colors: c.ColorV1 = blk: {
+        var value = p.color_api.table;
+        value.color_resource_create = createColor;
+        value.color_render_submit = renderColorList;
+        break :blk value;
+    };
     fn presentationInfo(_: *const c.R4GfxDevice, head: u32, out: *c.R4GfxPresentationInfo) callconv(.c) i32 {
         if (!chain_enabled or head != 0) return c.status_unsupported;
         out.* = std.mem.zeroes(c.R4GfxPresentationInfo);
         out.version = 1; out.size = @sizeOf(c.R4GfxPresentationInfo); out.width = 8; out.height = 8;
+        out.format = chain_format;
         out.flags = c.present_native | c.present_synchronized | c.present_visibility | c.present_active;
         out.device_generation = 1; out.reset_generation = 1;
         out.display_generation = 1; out.sequence = 1; out.policies = 3; out.buffer_count = 2; out.plane_count = 1; out.path = 1;
@@ -138,16 +148,33 @@ const Model = struct {
     }
     fn refresh(device: *const c.R4GfxDevice, out: *c.R4GfxDeviceInfo) callconv(.c) i32 {
         const rc = p.refresh(device, out);
-        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list | c.device_gpu_grid;
+        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list | c.device_gpu_grid |
+            @as(u32, if (color_enabled) c.device_gpu_color else 0);
         return rc;
     }
     fn create(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, out: *c.R4GfxResource) callconv(.c) i32 {
+        return createImage(device, input, null, out);
+    }
+    fn createColor(device: *const c.R4GfxDevice, input: *const c.R4GfxColorResourceDesc, out: *c.R4GfxResource) callconv(.c) i32 {
+        return createImage(device, &input.resource, input.description, out);
+    }
+    fn createImage(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, description: ?c.R4GfxColorDescription, out: *c.R4GfxResource) i32 {
+        if (input.source_kind == c.source_color_view) {
+            // This queue model uses borrowed host arrays for device storage.
+            // BO import/retention of the productive view has its owner check.
+            const source: *const c.R4GfxResource = @ptrFromInt(input.source_address);
+            var desc = input.*;
+            desc.source_kind = c.source_borrow_cpu; desc.source_address = 0; desc.source_generation = source.generation;
+            desc.image = image(device, source);
+            return p.color_api.table.color_resource_create(device, &.{ .version = 1, .size = @sizeOf(c.R4GfxColorResourceDesc),
+                .resource = desc, .description = description.? }, out);
+        }
         if (input.kind != c.resource_image or (input.source_kind != c.source_create_native and input.source_kind != c.source_create_system)) return p.createResource(device,input,out);
         var desc = input.*;
         var bytes: u64 = 0;
         if (input.source_kind == c.source_create_native) {
             const request: *const c.R4GfxNativeImage = @ptrFromInt(input.source_address);
-            const pitch = (@as(u64,request.width)*4 + 255) & ~@as(u64,255);
+            const pitch = (@as(u64,request.width) * @as(u64, if (request.format == c.format_abgr16161616f) 8 else 4) + 255) & ~@as(u64,255);
             bytes = pitch * request.height;
             desc.image = .{ .cpu_address=0, .byte_length=bytes, .pitch=pitch, .width=request.width, .height=request.height, .format=request.format, .reserved=0 };
         } else bytes = desc.image.byte_length;
@@ -155,7 +182,9 @@ const Model = struct {
         @memset(memory,0);
         desc.source_kind = c.source_borrow_cpu; desc.source_address = 0; desc.source_generation = 1;
         desc.image.cpu_address = @intFromPtr(memory.ptr);
-        const rc = p.createResource(device,&desc,out);
+        const rc = if (description) |value| p.color_api.table.color_resource_create(device,
+            &.{ .version = 1, .size = @sizeOf(c.R4GfxColorResourceDesc), .resource = desc, .description = value }, out)
+            else p.createResource(device,&desc,out);
         if (rc == 0) {
             buffers[out.slot-1] = memory;
             if (input.source_kind == c.source_create_native) native_allocations += 1;
@@ -203,6 +232,13 @@ const Model = struct {
         if (rc == 0) { batches += 1; max_batch = @max(max_batch, input.count); }
         return rc;
     }
+    fn renderColorList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderListRequest, flags: u32, out: *c.R4GfxJob) callconv(.c) i32 {
+        if (!color_enabled) return c.status_unsupported;
+        std.debug.assert(flags == c.color_transform_output | c.color_transform_relative_white | c.color_transform_dither);
+        const rc = renderList(device, input, out);
+        if (rc == 0) { jobs[out.slot - 1].?.operation.list.color_flags = flags; color_batches += 1; }
+        return rc;
+    }
     fn renderGridList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderGridListRequest, out: *c.R4GfxJob) callconv(.c) i32 {
         if (reject_draw) return c.status_unsupported;
         std.debug.assert(input.version == 1 and input.size == @sizeOf(c.R4GfxRenderGridListRequest) and input.count > 0 and input.count <= c.render_list_capacity);
@@ -238,7 +274,12 @@ const Model = struct {
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
         var value: c.R4GfxResourceInfo=undefined; std.debug.assert(p.resourceInfo(device,resource,&value)==0); return value.image;
     }
-    fn executeDraw(device: *const c.R4GfxDevice, value: c.R4GfxRenderRequest, grid: c.R4GfxLogicalGrid) void {
+    fn executeDraw(device: *const c.R4GfxDevice, value: c.R4GfxRenderRequest, grid: c.R4GfxLogicalGrid, color_flags: ?u32) void {
+                const state = p.get(device, false) catch unreachable;
+                const target_resource = state.resource(value.target, true) catch unreachable;
+                const source_resource = if (value.source.slot != 0) state.resource(value.source, true) catch unreachable else null;
+                const pipeline = state.resource(value.pipeline, true) catch unreachable;
+                if (color_flags == null) p.color_resource.nativeTransition(source_resource, target_resource, value.transfer, pipeline.operation, value.color) catch unreachable;
                 // The model executes each clipped sample through the real CPU
                 // provider. Target clipping never changes the source transform.
                 for (0..value.scissor.height) |row| for (0..value.scissor.width) |column| {
@@ -266,8 +307,27 @@ const Model = struct {
                         command.source_rect.x = @intCast(value.source_rect.x + @divFloor(lx * grid.guest_width, grid.viewport_width) - grid.source_x);
                         command.source_rect.y = @intCast(value.source_rect.y + @divFloor(ly * grid.guest_height, grid.viewport_height) - grid.source_y);
                     }
-                    var stats: c.R4GfxRenderStats = undefined;
-                    std.debug.assert(p.render(device, &.{ .commands = @intFromPtr(&command), .command_count = 1, .flags = 0, .pixel_budget = 1 }, &stats) == 0);
+                    if (target_resource.color) |description| {
+                        std.debug.assert(grid.enabled == 0);
+                        if (source_resource) |source| {
+                            const from: c.R4GfxColorImage = .{ .version = 1, .size = @sizeOf(c.R4GfxColorImage), .image = source.image,
+                                .description = source.color.?, .profile = std.mem.zeroes(c.R4GfxColorProfile) };
+                            const to: c.R4GfxColorImage = .{ .version = 1, .size = @sizeOf(c.R4GfxColorImage), .image = target,
+                                .description = description, .profile = std.mem.zeroes(c.R4GfxColorProfile) };
+                            var stats: c.R4GfxCpuStats = undefined;
+                            std.debug.assert(p.color_api.table.color_image_transform(&from, &to, &.{
+                                .version = 1, .size = @sizeOf(c.R4GfxColorTransform), .source_rect = command.source_rect, .target_rect = command.target_rect,
+                                .sampler = c.render_sampler_nearest, .operation = pipeline.operation, .opacity = value.opacity * 257,
+                                .flags = color_flags orelse 0, .pixel_budget = 1 }, &stats) == 0);
+                        } else {
+                            std.debug.assert(target.format == c.format_abgr16161616f and value.color == 0);
+                            const bytes: [*]u8 = @ptrFromInt(target.cpu_address);
+                            @memset(bytes[@as(usize, @intCast(y)) * target.pitch + @as(usize, @intCast(x)) * 8..][0..8], 0);
+                        }
+                    } else {
+                        var stats: c.R4GfxRenderStats = undefined;
+                        std.debug.assert(p.render(device, &.{ .commands = @intFromPtr(&command), .command_count = 1, .flags = 0, .pixel_budget = 1 }, &stats) == 0);
+                    }
                 };
     }
     fn complete(device: *const c.R4GfxDevice) void {
@@ -284,8 +344,8 @@ const Model = struct {
                 const from: [*]const u8=@ptrFromInt(src.cpu_address); const to: [*]u8=@ptrFromInt(dst.cpu_address);
                 for(0..value.row_count) |row| @memcpy(to[value.copy.target_offset+row*value.target_pitch..][0..value.copy.byte_length],from[value.copy.source_offset+row*value.source_pitch..][0..value.copy.byte_length]);
             },
-            .draw => |value| executeDraw(device, value, std.mem.zeroes(c.R4GfxLogicalGrid)),
-            .list => |*value| for (value.requests[0..value.count], value.grids[0..value.count]) |request, grid| executeDraw(device, request, grid),
+            .draw => |value| executeDraw(device, value, std.mem.zeroes(c.R4GfxLogicalGrid), null),
+            .list => |*value| for (value.requests[0..value.count], value.grids[0..value.count]) |request, grid| executeDraw(device, request, grid, value.color_flags),
             .present => |value| {
                 const src=image(device,&value.source); const from:[*]const u8=@ptrFromInt(src.cpu_address);
                 std.debug.assert(src.width==8 and src.height==8);
@@ -316,19 +376,19 @@ fn pump(engine:*gpu.Engine, cache:*layers.Cache, device:*const c.R4GfxDevice, ex
 }
 pub fn check() !void {
     Model.serial=0; Model.native_allocations=0; Model.presents=0; Model.busy_count=2; Model.reject_draw=false; Model.outcomes=@splat(0); Model.visible=@splat(0);
-    var source:fixture.Fixture=.{.table_override=&Model.table};
+    var source:fixture.Fixture=.{.table_override=&Model.table,.color_override=&Model.colors};
     const graphics=try source.open(); defer graphics.destroy();
     var cache=layers.Cache.init(t.allocator,1024*1024); defer cache.deinit();
-    var engine=gpu.Engine.init(&graphics.client,&graphics.device);
+    var engine=gpu.Engine.init(&graphics.client,&graphics.colors,&graphics.device);
     const device:*const c.R4GfxDevice=@ptrCast(&graphics.device);
     const full:surface.Rect=.{.x=0,.y=0,.w=8,.h=8}; const pixel:surface.Rect=.{.x=3,.y=3,.w=1,.h=1};
     try capture(&cache,full,0x882244);
     try engine.prepare(&cache,1000); try engine.begin(&cache,1000);
     try pump(&engine,&cache,device,.copied);
-    try t.expect(Model.presents==1 and Model.native_allocations==3 and engine.uploaded_bytes==320);
+    try t.expect(Model.presents==1 and Model.native_allocations==4 and engine.uploaded_bytes==320);
     var expected:[64]u32=undefined; var target:scene.SceneBuffer=.{};
     try t.expect(target.attach(std.mem.sliceAsBytes(&expected),8,8));
-    _=try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&target);
+    _=try @import("composition_software.zig").paint(&graphics.colors,&cache,&target);
     try t.expectEqualSlices(u32,&expected,&Model.visible);
     const serial=Model.serial;
     for(0..8) |_| try t.expectEqual(gpu.Progress.copied,engine.advance(&cache,1));
@@ -336,9 +396,9 @@ pub fn check() !void {
     try capture(&cache,pixel,0x445566);
     try t.expect(engine.prepared(&cache));
     try engine.begin(&cache,1000); try pump(&engine,&cache,device,.copied);
-    _=try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&target);
+    _=try @import("composition_software.zig").paint(&graphics.colors,&cache,&target);
     try t.expectEqualSlices(u32,&expected,&Model.visible);
-    try t.expect(Model.presents==2 and Model.native_allocations==3 and engine.uploaded_bytes==324);
+    try t.expect(Model.presents==2 and Model.native_allocations==4 and engine.uploaded_bytes==324);
     const last=Model.visible;
     try capture(&cache,pixel,0x998877); Model.reject_draw=true;
     try engine.begin(&cache,1000); try pump(&engine,&cache,device,.failed);
@@ -352,14 +412,81 @@ pub fn check() !void {
     try pump(&engine,&cache,device,.failed);
     try t.expect(Model.presents==2);
     try capture(&cache,full,0x998877); try engine.begin(&cache,1000); try pump(&engine,&cache,device,.copied);
-    _=try @import("composition_software.zig").paint(&graphics.client,&graphics.device,&cache,&target);
+    _=try @import("composition_software.zig").paint(&graphics.colors,&cache,&target);
     try t.expectEqualSlices(u32,&expected,&Model.visible);
+    try cache.start(full);
+    const black = (try cache.begin(1, full, full)).?; black.fillRect(full, 0); try cache.end(1);
+    const overlay = (try cache.begin(2, pixel, pixel)).?;
+    const white = [_]u32{0x80ffffff};
+    try t.expect(overlay.blendArgb32(pixel, pixel.x, pixel.y, 1, 1, 1, std.mem.sliceAsBytes(&white))); try cache.end(2);
+    _ = try cache.finish();
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expectEqual(@as(u32, 0xbcbcbc), Model.visible[3 * 8 + 3]);
+    try t.expectEqual(@as(u32, 0), Model.visible[0]);
     try engine.close();
     for(&Model.jobs) |*job| try t.expect(job.*==null);
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
     try checkPrimitives(graphics, device);
     try checkSwapchain(graphics, device);
+    try checkHdrOutput(graphics, device);
+}
+
+fn checkHdrOutput(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    Model.chain_enabled = true; defer Model.chain_enabled = false;
+    Model.chain_format = c.format_xrgb2101010; defer Model.chain_format = c.format_xrgb8888;
+    Model.allow_visible = true; Model.clock = 1; Model.chain = .{};
+    Model.serial = 0; Model.presents = 0; Model.outcomes = @splat(0); Model.color_batches = 0;
+    Model.chain_render = @splat(null); Model.chain_present = @splat(null);
+    var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit();
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    const encoding: a.GfxOutputColorState = .{ .flags = 7, .format = c.format_xrgb2101010,
+        .bpc = 10, .primaries = 3, .transfer = 3, .range = 2, .reference_white = 2030000, .peak = 10000000 };
+    try t.expectError(error.Unsupported, engine.configureOutput(null, c.format_xrgb2101010));
+    try t.expectError(error.Unsupported, engine.configureOutput(encoding, c.format_xrgb8888));
+    try engine.configureOutput(encoding, c.format_xrgb2101010);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const pixel: surface.Rect = .{ .x = 3, .y = 3, .w = 1, .h = 1 };
+    try cache.start(full);
+    const background = (try cache.begin(1, full, full)).?;
+    background.fillRect(full, 0); background.fillRect(.{ .x = 0, .y = 0, .w = 1, .h = 1 }, 0xffffff); try cache.end(1);
+    const overlay = (try cache.begin(2, pixel, pixel)).?;
+    const white = [_]u32{0x80ffffff};
+    try t.expect(overlay.blendArgb32(pixel, pixel.x, pixel.y, 1, 1, 1, std.mem.sliceAsBytes(&white))); try cache.end(2);
+    _ = try cache.finish();
+    Model.color_enabled = false;
+    try t.expectError(error.Unsupported, engine.prepare(&cache, 1000));
+    try t.expectEqual(@as(u64, 0), engine.reserved_bytes);
+    Model.color_enabled = true;
+    try engine.prepare(&cache, 1000);
+    try t.expectError(error.Busy, engine.configureOutput(null, c.format_xrgb8888));
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    var receipts: usize = 0;
+    for (0..32) |_| {
+        Model.complete(device); try engine.pollPresentation();
+        if (engine.completion()) |done| { try t.expect(done.status.result == 1); receipts += 1; }
+        if (!engine.pending()) break;
+    }
+    try t.expect(receipts == 1 and Model.color_batches == 1);
+    // Independent ST2084 anchors: SDR reference white maps to203cd/m2;
+    // half-alpha white to203*128/255cd/m2. Limited RGB10 uses64..940.
+    for ([_]u32{ 0, 10, 20 }) |shift| {
+        const white_code: i32 = @intCast((Model.visible[0] >> @intCast(shift)) & 1023);
+        const half_code: i32 = @intCast((Model.visible[3 * 8 + 3] >> @intCast(shift)) & 1023);
+        try t.expect(@abs(white_code - 573) <= 1);
+        try t.expect(@abs(half_code - 511) <= 1);
+        try t.expectEqual(@as(u32, 64), (Model.visible[7] >> @intCast(shift)) & 1023);
+    }
+    var capture_pixels: [64]u32 = undefined; var capture_target: scene.SceneBuffer = .{};
+    try t.expect(capture_target.attach(std.mem.sliceAsBytes(&capture_pixels), 8, 8));
+    _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &capture_target);
+    try t.expectEqual(@as(u32, 0xffffff), capture_pixels[0]);
+    try t.expectEqual(@as(u32, 0xbcbcbc), capture_pixels[3 * 8 + 3]);
+    try t.expectEqual(@as(u32, 0), capture_pixels[7]);
+    try engine.close();
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    try t.expectEqual(@as(u64, 0), engine.reserved_bytes);
 }
 
 fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
@@ -369,7 +496,7 @@ fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
     Model.chain_render = @splat(null); Model.chain_present = @splat(null);
     Model.visible = @splat(0xabcdef);
     var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit();
-    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
     const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
     try capture(&cache, full, 0x882244);
     try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
@@ -386,7 +513,7 @@ fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
     try t.expect(Model.presents == 1 and Model.chain.frames[1].phase == .queued);
     var expected: [64]u32 = undefined; var target: scene.SceneBuffer = .{};
     try t.expect(target.attach(std.mem.sliceAsBytes(&expected), 8, 8));
-    _ = try @import("composition_software.zig").paint(&graphics.client, &graphics.device, &cache, &target);
+    _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
     Model.allow_visible = true;
     var receipts: usize = 0;
     for (0..32) |_| {
@@ -434,7 +561,7 @@ fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *con
     var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit();
     frame.mirror = false;
     var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit(); cache.recording = &frame;
-    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
     const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
     var expected: [64]u32 = undefined; var target: scene.SceneBuffer = .{};
     try t.expect(target.attach(std.mem.sliceAsBytes(&expected), 8, 8)); try primitiveScene(&target);
@@ -452,7 +579,7 @@ fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *con
     try t.expect(engine.uploaded_bytes == uploads and frame.assets.converted_pixels == conversions and Model.native_allocations == allocations);
     frame.mirror = true; for (&cache.entries) |*entry| entry.initialized = false;
     try primitiveCapture(&cache, full);
-    _ = try @import("composition_software.zig").paint(&graphics.client, &graphics.device, &cache, &target);
+    _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
     try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
     const visible = Model.visible;
     try primitiveCapture(&cache, full); Model.reject_draw = true;
@@ -472,7 +599,7 @@ fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device
     const software = @import("output_cpu.zig");
     var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
     var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
-    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
     for ([_]u32{ 120, 240, 180 }) |scale| {
         for (0..4) |rotation| {
             const view: geometry.topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8, .scale = scale,
@@ -539,7 +666,7 @@ fn checkShapesAndLargeImage(graphics: *@import("gfx_renderer.zig").Renderer, dev
     try shapesAndLargeImage(painter, pixels);
     try cache.end(1); _ = try cache.finish();
     try t.expect(cache.reserved == 0);
-    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
     try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
     for (expected, Model.visible) |want, actual| inline for (.{ 0, 8, 16 }) |shift| {
         const difference = @as(i32,@intCast((want >> shift) & 255)) - @as(i32,@intCast((actual >> shift) & 255));

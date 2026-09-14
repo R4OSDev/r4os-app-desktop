@@ -14,6 +14,7 @@ const Raster = struct {
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
     client: gfx.DeviceV1Client,
+    colors: gfx.ColorV1Client,
     storage: []align(gfx.device_storage_alignment) u8,
     device: gfx.R4GfxDevice,
     fill_pipeline: gfx.R4GfxResource = empty_resource,
@@ -35,6 +36,7 @@ pub const Renderer = struct {
     }
     pub fn createForAdapter(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, adapter: u32) ?*Renderer {
         const client = gfx.DeviceV1Client.init(raw) catch return null;
+        const colors = gfx.ColorV1Client.init(raw) catch return null;
         const bytes = client.storage_size();
         if (bytes == 0 or bytes > std.math.maxInt(usize)) return null;
         const storage = allocator.alignedAlloc(u8, .fromByteUnits(gfx.device_storage_alignment), @intCast(bytes)) catch return null;
@@ -44,7 +46,7 @@ pub const Renderer = struct {
         if (client.device_open(&.{ .version = 1, .size = @sizeOf(gfx.R4GfxDeviceConfig), .storage_address = @intFromPtr(storage.ptr),
             .storage_bytes = storage.len, .start_context = @intFromPtr(raw), .preferred_adapter = adapter, .flags = 0 }, &device) != gfx.status_ok)
         { allocator.destroy(self); allocator.free(storage); return null; }
-        self.* = .{ .allocator = allocator, .client = client, .storage = storage, .device = device };
+        self.* = .{ .allocator = allocator, .client = client, .colors = colors, .storage = storage, .device = device };
         var descriptor = std.mem.zeroes(gfx.R4GfxResourceDesc);
         descriptor.version = 1; descriptor.size = @sizeOf(gfx.R4GfxResourceDesc);
         descriptor.kind = gfx.resource_pipeline; descriptor.operation = gfx.render_operation_fill;

@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
     r4gfx_provider.addImport("r4os", host_r4os);
     r4gfx_provider.addImport("r4l_contract", r4gfx_implementation);
     r4gfx_provider.addImport("r4nv_binding", r4nv_binding);
+    const color_provider = r4gfx_provider;
+    libraries_build.addR4gfxHostColor(b, color_provider, libraries_dep.path("R4GFX"));
     const r4std_abi = b.createModule(.{
         .root_source_file = libraries_dep.path("R4STD/Bindings/Zig/r4std_abi.zig"),
         .target = test_target,
@@ -62,6 +64,15 @@ pub fn build(b: *std.Build) void {
     });
     r4img.addImport("r4os", host_r4os);
     r4img.addImport("r4img_abi.zig", r4img_abi);
+    const image_contract = b.createModule(.{ .root_source_file = libraries_dep.path("R4IMG/Contract/Generated/implementation_abi.zig"), .target = test_target });
+    image_contract.addImport("r4os", host_r4os);
+    const image_provider = b.createModule(.{ .root_source_file = libraries_dep.path("R4IMG/Source/main.zig"), .target = test_target });
+    image_provider.addImport("r4os", host_r4os);
+    image_provider.addImport("r4l_contract", image_contract);
+    image_provider.addIncludePath(libraries_dep.path("R4IMG/ThirdParty/stb"));
+    image_provider.addCSourceFile(.{ .file = libraries_dep.path("R4IMG/ThirdParty/stb/r4img_stb.c"), .flags = &.{ "-std=c11", "-fno-builtin" } });
+    const png_fixture = b.createModule(.{ .root_source_file = libraries_dep.path("R4IMG/Tests/Decoder/png_fixture.zig"), .target = test_target });
+    const raster_fixture = b.createModule(.{ .root_source_file = libraries_dep.path("R4IMG/Tests/Decoder/raster_fixture.zig"), .target = test_target });
     const r4std_implementation = b.createModule(.{
         .root_source_file = libraries_dep.path("R4STD/Contract/Generated/implementation_abi.zig"),
         .target = test_target,
@@ -130,6 +141,10 @@ pub fn build(b: *std.Build) void {
     compositor_module.addImport("r4std", r4std);
     compositor_module.addImport("r4std_test", r4std_test);
     compositor_module.addImport("r4img", r4img);
+    compositor_module.addImport("color_provider", color_provider);
+    compositor_module.addImport("image_provider", image_provider);
+    compositor_module.addImport("png_fixture", png_fixture);
+    compositor_module.addImport("raster_fixture", raster_fixture);
     compositor_module.addImport("r4gfx", r4gfx);
     compositor_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const compositor_tests = b.addTest(.{ .root_module = compositor_module });
@@ -254,6 +269,14 @@ pub fn build(b: *std.Build) void {
     });
     wallpaper_module.addImport("r4os", host_r4os);
     wallpaper_module.addImport("r4img", r4img);
+    wallpaper_module.addImport("r4gfx", r4gfx);
+    wallpaper_module.addImport("color_provider", color_provider);
+    wallpaper_module.addImport("image_provider", image_provider);
+    wallpaper_module.addImport("png_fixture", png_fixture);
+    wallpaper_module.addImport("raster_fixture", raster_fixture);
+    wallpaper_module.addImport("profile_fixtures", b.createModule(.{
+        .root_source_file = libraries_dep.path("R4GFX/Tests/Color/fixtures.zig"), .target = test_target, .optimize = test_optimize,
+    }));
     const wallpaper_tests = b.addTest(.{
         .root_module = wallpaper_module,
     });
@@ -317,6 +340,7 @@ pub fn build(b: *std.Build) void {
     const run_physical_input_tests = b.addRunArtifact(physical_input_tests);
     const render_step = b.step("render-test", "Run the existing compositor and its imported painter checks");
     render_step.dependOn(&run_compositor_tests.step);
+    render_step.dependOn(&run_wallpaper_tests.step);
     const test_step = b.step("test", "Run Desktop Zig tests");
     test_step.dependOn(&run_model_tests.step);
     test_step.dependOn(&run_window_tests.step);

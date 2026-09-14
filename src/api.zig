@@ -382,6 +382,17 @@ pub const Context = struct {
         if (got != @sizeOf(r4os.abi.DisplayControlExchange)) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
         return r4os.abi.service_api_result_ok;
     }
+    pub fn displayColorExchange(self: *Context, request: *const r4os.abi.DisplayColorExchange, out: *r4os.abi.DisplayColorExchange) i32 {
+        const got = self.window_session.call(self, r4os.abi.display_control_op_color_exchange, std.mem.asBytes(request), std.mem.asBytes(out));
+        if (got == r4os.abi.service_api_result_bad_op) {
+            var legacy: r4os.abi.DisplayControlExchange = .{};
+            const rc = self.displayControlExchange(&request.base, &legacy);
+            if (rc == r4os.abi.service_api_result_ok) out.* = .{ .base = legacy };
+            return rc;
+        }
+        if (got != @sizeOf(r4os.abi.DisplayColorExchange)) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
+        return r4os.abi.service_api_result_ok;
+    }
 
     pub fn closeWindowService(self: *Context) void {
         self.window_session.close(self);
