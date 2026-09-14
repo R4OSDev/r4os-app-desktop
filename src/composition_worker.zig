@@ -7,7 +7,7 @@ const gpu = @import("composition_gpu.zig");
 const layers = @import("composition_layers.zig");
 const renderer = @import("gfx_renderer.zig");
 const primitives = @import("primitive_frame.zig");
-pub const Progress = enum { idle, pending, visible, failed };
+pub const Progress = enum { idle, pending, visible, discarded, failed };
 pub const Worker = struct {
     graphics: *renderer.Renderer,
     sys: r4os.r4sys.Context,
@@ -26,6 +26,8 @@ pub const Worker = struct {
     failure_reported: bool = false,
     prepared_threads: u64 = 0,
     frames_visible: u64 = 0,
+    completed_frame: u64 = 0,
+    completed_status: ?gfx.R4GfxSwapchainFrameStatus = null,
 
     pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context) ?*Worker {
         const graphics = renderer.Renderer.create(allocator, raw) orelse return null;
@@ -36,22 +38,27 @@ pub const Worker = struct {
         self.cache.recording = &self.primitives;
         return self;
     }
-    pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.awaiting_visible; }
-    pub fn blocksCapture(self: *const Worker) bool { return self.busy() and !self.failure_reported; }
+    pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.engine.pending() or self.awaiting_visible; }
+    pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible; }
+    pub fn blocksCapture(self: *const Worker) bool {
+        return !self.failure_reported and (self.thread != null or self.awaiting_visible or
+            self.engine.captureBlocked(self.sys.monotonicNanoseconds() orelse 0));
+    }
     pub fn available(self: *Worker, revision: u64) bool {
-        if (self.busy() or self.failed_revision == revision) return false;
+        if (self.blocksCapture() or self.failed_revision == revision) return false;
         const info = self.graphics.info() orelse return false;
         const required = gfx.device_gpu_copy_rows | gfx.device_gpu_render | gfx.device_gpu_present;
         if (info.gpu_operations & required != required) return false;
         if (self.device_generation != info.device_generation or self.reset_generation != info.reset_generation) {
-            self.engine.output.generation = 0;
+            self.engine.invalidate();
             self.device_generation = info.device_generation; self.reset_generation = info.reset_generation;
         }
         self.revision = revision;
+        self.engine.acquire(self.engine.input_ns) catch return false;
         return true;
     }
     pub fn start(self: *Worker) bool {
-        if (self.busy()) return false;
+        if (self.thread != null or self.engine.active() or self.awaiting_visible) return false;
         const now = self.sys.monotonicNanoseconds() orelse return false;
         self.deadline = std.math.add(u64, now, 5 * std.time.ns_per_s) catch return false;
         self.failure_reported = false; self.preparation_error = null;
@@ -93,7 +100,12 @@ pub const Worker = struct {
     fn fail(self: *Worker, reason: gpu.Error) void {
         self.failed_revision = self.revision;
         self.awaiting_visible = false;
-        if (self.engine.active()) self.engine.cancel(reason) else self.engine.output.generation = 0;
+        // Once retirement finished, reporting the fault must not start a
+        // fresh drain cycle. A live swapchain still needs its close path.
+        if (self.engine.active() or self.engine.chain.slot != 0)
+            self.engine.cancel(reason)
+        else
+            self.engine.invalidate();
     }
     pub fn rejectCapture(self: *Worker) void {
         self.fail(error.State); self.failure_reported = true;
@@ -108,7 +120,13 @@ pub const Worker = struct {
         if (self.engine.active()) {
             const result = self.engine.advance(&self.cache, now);
             if (self.engine.fault) |err| self.fail(err);
-            if (result == .copied) self.awaiting_visible = true;
+            if (result == .copied and self.engine.chain.slot == 0) self.awaiting_visible = true;
+        } else self.engine.pollPresentation() catch |err| self.fail(err);
+        if (self.engine.completion()) |done| {
+            self.completed_frame = done.frame; self.completed_status = done.status;
+            if (done.status.result == 1) { self.frames_visible +|= 1; return .visible; }
+            if (done.status.result == 2 or done.status.result == 3) return .discarded;
+            self.fail(error.Graphics);
         }
         if (self.awaiting_visible) {
             const fence = self.engine.present_fence orelse { self.fail(error.State); return .failed; };
@@ -116,10 +134,11 @@ pub const Worker = struct {
             // fence alone cannot confirm scanout, even after the source frees.
             for (0..8) |head| {
                 var info: r4os.abi.DisplayPresentationStats = .{};
-                if (draw.displayPresentationStats(@intCast(head), &info) != 0 or info.backend.adapter_id != fence.adapter_id or
+                if (draw.displayPresentationStats(@intCast(head), &info) != r4os.abi.gfx_output_ok or info.backend.adapter_id != fence.adapter_id or
                     info.backend.device_generation != fence.device_generation or info.backend.reset_generation != fence.reset_generation) continue;
                 if (info.flags & r4os.abi.display_presentation_flag_lost != 0) { self.fail(error.Graphics); break; }
                 if (info.visible_ns != 0 and info.source_timeline == fence.timeline and info.source_point == fence.point) {
+                    self.completed_frame = self.engine.frame; self.completed_status = null;
                     self.awaiting_visible = false; self.frames_visible +|= 1; return .visible;
                 }
             }
@@ -143,7 +162,13 @@ pub const Worker = struct {
             if ((self.sys.monotonicNanoseconds() orelse end) >= end) return;
             self.sys.sleepTicks(1);
         }
-        self.engine.close() catch return;
+        while (true) {
+            self.engine.close() catch |err| {
+                if (err != error.Busy or (self.sys.monotonicNanoseconds() orelse end) >= end) return;
+                self.sys.sleepTicks(1); continue;
+            };
+            break;
+        }
         const allocator = self.graphics.allocator;
         self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
     }

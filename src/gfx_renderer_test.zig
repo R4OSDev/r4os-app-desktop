@@ -25,6 +25,15 @@ pub const table: provider.c.DeviceV1 = .{
     .image_prepare = provider.prepareImage,
     .image_present = provider.presentImage,
     .render_submit_list = provider.submitRenderList,
+    .presentation_info = provider.swapchain.presentationInfo,
+    .swapchain_open = provider.swapchain.open,
+    .swapchain_acquire = provider.swapchain.acquire,
+    .swapchain_present = provider.swapchain.present,
+    .swapchain_poll = provider.swapchain.poll,
+    .swapchain_release = provider.swapchain.release,
+    .swapchain_resize = provider.swapchain.resize,
+    .swapchain_close = provider.swapchain.close,
+    .presentation_plan = provider.swapchain.plan,
 };
 pub const Fixture = struct {
     table_override: ?*const provider.c.DeviceV1 = null,

@@ -12,12 +12,24 @@ const Image = struct { resource: gfx.R4GfxResource = empty, info: gfx.R4GfxResou
 const Job = struct { handle: gfx.R4GfxJob, fence: gfx.R4GfxCopyFence, upload: ?usize = null, asset_upload: ?usize = null, generation: u64 = 0, bytes: u64 = 0, complete: bool = false };
 pub const Error = error{ Busy, Unsupported, Stale, Graphics, Limit, State, Deadline, Incomplete };
 pub const Progress = enum { pending, copied, failed };
+pub const Completion = struct { frame: u64, status: gfx.R4GfxSwapchainFrameStatus };
 pub const Engine = struct {
     client: *const gfx.DeviceV1Client,
     device: *const gfx.R4GfxDevice,
     images: [layers.capacity]Image = @splat(.{}),
     assets: [primitive_assets.texture_capacity]Image = @splat(.{}),
-    output: Image = .{},
+    outputs: [gfx.swapchain_image_capacity]Image = @splat(.{}),
+    output_index: usize = 0,
+    chain: gfx.R4GfxSwapchain = std.mem.zeroes(gfx.R4GfxSwapchain),
+    presentation: ?gfx.R4GfxPresentationInfo = null,
+    chain_status: ?gfx.R4GfxSwapchainStatus = null,
+    acquired: ?gfx.R4GfxSwapchainFrame = null,
+    chain_frames: [gfx.swapchain_image_capacity]u64 = @splat(0),
+    reported: [gfx.swapchain_image_capacity]bool = @splat(false),
+    chain_closing: bool = false,
+    input_ns: u64 = 0,
+    present_intent: u32 = 0,
+    present_blockers: u32 = 0,
     staging: Image = .{},
     over: gfx.R4GfxResource = empty,
     blit: gfx.R4GfxResource = empty,
@@ -47,13 +59,83 @@ pub const Engine = struct {
 
     pub fn init(client: *const gfx.DeviceV1Client, device: *const gfx.R4GfxDevice) Engine { return .{ .client = client, .device = device }; }
     pub fn active(self: *const Engine) bool { return self.phase != .idle; }
+    fn output(self: *Engine) *Image { return &self.outputs[self.output_index]; }
+    pub fn invalidate(self: *Engine) void { for (&self.outputs) |*value| value.generation = 0; }
+    pub fn pending(self: *const Engine) bool {
+        for (self.chain_frames) |key| if (key != 0) return true;
+        return false;
+    }
+    pub fn needsPolling(self: *const Engine) bool {
+        if (self.active() or self.chain_closing) return true;
+        const status = self.chain_status orelse return self.pending();
+        var fronts: usize = 0;
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, i| {
+            if (self.chain_frames[i] == 0) continue;
+            if (!self.reported[i] or value.phase != 4 or value.result != 1 or value.path != gfx.present_path_direct) return true;
+            fronts += 1;
+        }
+        // One static visible front remains owned but needs no short polling
+        // loop. New damage and ordinary desktop events resume its owner.
+        return fronts > 1;
+    }
+    pub fn captureBlocked(self: *const Engine, now: u64) bool {
+        if (self.active()) return true;
+        if (self.chain.slot == 0 or self.acquired != null) return false;
+        const status = self.chain_status orelse return false;
+        if (status.life >= 2) return false; // Let the owner rebuild/fall back.
+        if (status.life == 1 or now < status.next_start_ns) return true;
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }) |value| if (value.phase == 0) return false;
+        return true;
+    }
+    pub fn acquire(self: *Engine, input_ns: u64) Error!void {
+        if (self.chain.slot == 0 or self.acquired != null) return;
+        var frame: gfx.R4GfxSwapchainFrame = undefined;
+        try accepted(self.client.swapchain_acquire(self.device, &self.chain, input_ns, &frame));
+        if (frame.slot == 0 or frame.slot > self.outputs.len or !std.meta.eql(frame.image, self.outputs[frame.slot - 1].resource)) return error.Stale;
+        self.acquired = frame; self.output_index = frame.slot - 1;
+    }
+    pub fn pollPresentation(self: *Engine) Error!void {
+        if (self.chain.slot == 0) return;
+        if (self.chain_closing) {
+            self.closeChain() catch |err| { if (err != error.Busy) return err; };
+            return;
+        }
+        var status: gfx.R4GfxSwapchainStatus = undefined;
+        try accepted(self.client.swapchain_poll(self.device, &self.chain, &status));
+        self.chain_status = status;
+        if (status.life >= 2) return error.Stale;
+        // Reporting visibility and releasing storage are independent. A
+        // front buffer can already be visible while scanout still reads it.
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, i| {
+            if (value.phase != 4 or value.held_flags != 0 or !self.reported[i]) continue;
+            const rc = self.client.swapchain_release(self.device, &self.chain, &value.frame);
+            if (rc == gfx.status_busy) continue;
+            try accepted(rc);
+            self.chain_frames[i] = 0; self.reported[i] = false;
+            switch (i) { 0 => self.chain_status.?.frame0.phase = 0, 1 => self.chain_status.?.frame1.phase = 0, 2 => self.chain_status.?.frame2.phase = 0, else => unreachable }
+        }
+    }
+    pub fn completion(self: *Engine) ?Completion {
+        const status = self.chain_status orelse return null;
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, i| {
+            if (value.phase != 4 or self.chain_frames[i] == 0 or self.reported[i]) continue;
+            self.reported[i] = true;
+            return .{ .frame = self.chain_frames[i], .status = value };
+        }
+        return null;
+    }
     pub fn needsFull(self: *const Engine, width: i32, height: i32) bool {
-        return self.output.resource.slot == 0 or self.output.generation == 0 or
-            self.output.info.image.width != width or self.output.info.image.height != height;
+        const target = &self.outputs[self.output_index];
+        // Rotating targets may contain different earlier frames. Recompose
+        // the complete output from cached layers; unchanged layer pixels and
+        // primitive assets still need no upload or CPU reconstruction.
+        return self.chain.slot != 0 or target.resource.slot == 0 or target.generation == 0 or
+            target.info.image.width != width or target.info.image.height != height;
     }
     pub fn prepared(self: *Engine, cache: *const layers.Cache) bool {
+        if (self.chain_status) |status| if (status.life >= 2) return false;
         if (self.over.slot == 0 or self.blit.slot == 0 or self.sampler.slot == 0 or
-            !self.imageFits(&self.output, cache.screen.w, cache.screen.h, gfx.format_xrgb8888) or
+            !self.imageFits(self.output(), cache.screen.w, cache.screen.h, gfx.format_xrgb8888) or
             !self.imageFits(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
                 if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888)) return false;
         var visited: [layers.capacity]bool = @splat(false);
@@ -92,7 +174,38 @@ pub const Engine = struct {
         try self.stateResource(&self.over, gfx.resource_pipeline, gfx.render_operation_over);
         try self.stateResource(&self.blit, gfx.resource_pipeline, gfx.render_operation_blit);
         try self.stateResource(&self.sampler, gfx.resource_sampler, gfx.render_sampler_nearest);
-        try self.image(&self.output, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, deadline);
+        var presentation: ?gfx.R4GfxPresentationInfo = null;
+        for (0..8) |head| {
+            var value: gfx.R4GfxPresentationInfo = undefined;
+            if (self.client.presentation_info(self.device, @intCast(head), &value) != gfx.status_ok or
+                value.flags & gfx.present_native == 0 or value.adapter_id != device_info.adapter_id or
+                value.device_generation != device_info.device_generation or value.reset_generation != device_info.reset_generation or
+                value.width != cache.screen.w or value.height != cache.screen.h) continue;
+            presentation = value; break;
+        }
+        if (self.chain.slot != 0) {
+            if (presentation == null or self.presentation.?.display_generation != presentation.?.display_generation or
+                self.presentation.?.width != presentation.?.width or self.presentation.?.height != presentation.?.height) try self.closeChain();
+        }
+        const count: u32 = if (presentation) |value| value.buffer_count else 1;
+        if (count < 1 or count > self.outputs.len) return error.Unsupported;
+        const direct = presentation != null and presentation.?.flags & gfx.present_direct != 0 and device_info.gpu_operations & gfx.device_gpu_direct != 0;
+        for (self.outputs[0..count]) |*value| {
+            self.imageKind(value, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, direct, deadline) catch |err| {
+                // Contiguous scanout storage can be unavailable under VRAM
+                // pressure. The regular render/copy pool remains usable.
+                if (!direct or (err != error.Unsupported and err != error.Limit)) return err;
+                try self.image(value, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, deadline);
+            };
+        }
+        if (presentation) |value| if (self.chain.slot == 0) {
+            var handles: [gfx.swapchain_image_capacity]gfx.R4GfxResource = undefined;
+            for (0..count) |i| handles[i] = self.outputs[i].resource;
+            try accepted(self.client.swapchain_open(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxSwapchainDesc),
+                .head_id = value.head_id, .policy = gfx.present_policy_fifo, .flags = gfx.present_require_vsync,
+                .count = count, .display_generation = value.display_generation, .images = @intFromPtr(&handles) }, &self.chain));
+            self.presentation = value;
+        };
         try self.image(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
             if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888, false, deadline);
         var visited: [layers.capacity]bool = @splat(false);
@@ -119,6 +232,9 @@ pub const Engine = struct {
         try accepted(self.client.resource_create(self.device, &desc, handle));
     }
     fn image(self: *Engine, target: *Image, width: i32, height: i32, format: u32, native: bool, deadline: u64) Error!void {
+        return self.imageKind(target, width, height, format, native, false, deadline);
+    }
+    fn imageKind(self: *Engine, target: *Image, width: i32, height: i32, format: u32, native: bool, scanout: bool, deadline: u64) Error!void {
         if (width <= 0 or height <= 0) return error.State;
         if (target.resource.slot != 0) {
             if (self.imageFits(target, width, height, format)) return;
@@ -132,7 +248,7 @@ pub const Engine = struct {
         var desc = descriptor(gfx.resource_image); desc.flags = gfx.image_target;
         const request: gfx.R4GfxNativeImage = .{ .version = 1, .size = @sizeOf(gfx.R4GfxNativeImage), .deadline_ns = deadline,
             .width = @intCast(width), .height = @intCast(height), .format = format, .layout = 0 };
-        if (native) { desc.source_kind = gfx.source_create_native; desc.source_address = @intFromPtr(&request); } else {
+        if (native) { desc.source_kind = if (scanout) gfx.source_create_native_scanout else gfx.source_create_native; desc.source_address = @intFromPtr(&request); } else {
             desc.source_kind = gfx.source_create_system;
             desc.image = .{ .cpu_address = 0, .byte_length = size, .pitch = pitch, .width = @intCast(width), .height = @intCast(height), .format = format, .reserved = 0 };
         }
@@ -157,11 +273,13 @@ pub const Engine = struct {
     }
     pub fn begin(self: *Engine, cache: *const layers.Cache, deadline: u64) Error!void {
         if (self.active() or !self.drained()) return error.Busy;
-        if (cache.collecting or cache.failure != null or cache.command_count == 0 or self.output.resource.slot == 0 or self.staging.resource.slot == 0)
+        if (cache.collecting or cache.failure != null or cache.command_count == 0 or self.output().resource.slot == 0 or self.staging.resource.slot == 0)
             return error.State;
         // The first command of a complete desktop capture is its opaque
         // background (or fullscreen terminal). A new target must start there.
-        if (self.output.generation == 0 and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
+        if (self.needsFull(cache.screen.w, cache.screen.h) and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
+        try self.acquire(self.input_ns);
+        if (self.acquired) |value| { self.chain_frames[value.slot - 1] = cache.frame; self.reported[value.slot - 1] = false; }
         self.frame = cache.frame; self.deadline = deadline; self.phase = if (cache.recording != null) .asset_upload else .upload;
         self.next_image = 0; self.next_command = 0; self.fault = null; self.present_fence = null;
         self.last = null; self.stage_job = null;
@@ -170,19 +288,34 @@ pub const Engine = struct {
     pub fn cancel(self: *Engine, reason: Error) void {
         if (self.fault == null) self.fault = reason;
         self.phase = .drain;
-        self.output.generation = 0;
+        self.output().generation = 0;
+        if (self.acquired) |value| {
+            if (self.client.swapchain_release(self.device, &self.chain, &value) == gfx.status_ok) {
+                self.chain_frames[value.slot - 1] = 0; self.acquired = null;
+            }
+        }
         for (&self.jobs) |*slot| if (slot.*) |*job| { _ = self.client.job_cancel(self.device, &job.handle); };
+        if (self.chain.slot != 0) {
+            self.chain_closing = true;
+            self.closeChain() catch {};
+        }
     }
     pub fn advance(self: *Engine, cache: *layers.Cache, now: u64) Progress {
+        self.pollPresentation() catch |err| { if (self.active()) self.cancel(err); };
         if (!self.active()) return if (self.fault == null) .copied else .failed;
         if (cache.frame != self.frame or cache.collecting) self.cancel(error.State);
         if (now >= self.deadline and self.fault == null) self.cancel(error.Deadline);
         self.collect(cache) catch |err| self.cancel(err);
         if (self.phase == .drain) {
             if (!self.drained()) return .pending;
+            if (self.fault != null) if (self.acquired) |value| {
+                const rc = self.client.swapchain_release(self.device, &self.chain, &value);
+                if (rc == gfx.status_busy) return .pending;
+                self.acquired = null; self.chain_frames[value.slot - 1] = 0;
+            };
             self.phase = .idle;
             if (self.fault == null) {
-                self.output.generation = self.frame;
+                self.output().generation = self.frame;
                 if (cache.recording != null) for (&cache.entries, 0..) |*entry, index| {
                     if (entry.frame == cache.frame) self.images[index].generation = entry.generation;
                 };
@@ -224,7 +357,9 @@ pub const Engine = struct {
             // Keep the most recent receipt until the next job has copied its
             // explicit dependency; a failed predecessor must veto Present.
             if (self.last == index and self.phase != .drain) continue;
-            try accepted(self.client.job_release(self.device, &job.handle));
+            const released = self.client.job_release(self.device, &job.handle);
+            if (released == gfx.status_busy) continue;
+            try accepted(released);
             if (self.last == index) self.last = null;
             slot.* = null;
         };
@@ -337,7 +472,7 @@ pub const Engine = struct {
                 const bounds = entry.bounds; const clip = command.scissor;
                 var handle: gfx.R4GfxJob = undefined;
                 try accepted(self.client.render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
-                    .source = self.images[command.entry].resource, .target = self.output.resource, .pipeline = self.over, .sampler = self.sampler,
+                    .source = self.images[command.entry].resource, .target = self.output().resource, .pipeline = self.over, .sampler = self.sampler,
                     .source_rect = .{ .x = clip.x - bounds.x, .y = clip.y - bounds.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .target_rect = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .scissor = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
@@ -346,10 +481,18 @@ pub const Engine = struct {
                 self.next_command += 1; self.render_jobs +|= 1;
             },
             .present => {
+                if (self.chain.slot != 0) {
+                    const acquired = self.acquired orelse return error.State;
+                    try accepted(self.client.swapchain_present(self.device, &self.chain, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxSwapchainPresent),
+                        .frame = acquired, .render_job = if (self.last) |index| self.jobs[index].?.handle else std.mem.zeroes(gfx.R4GfxJob),
+                        .deadline_ns = self.deadline, .intent = self.present_intent, .blockers = self.present_blockers }));
+                    self.acquired = null; self.phase = .drain;
+                    return;
+                }
                 const slot = try self.reserve();
                 var handle: gfx.R4GfxJob = undefined;
                 try accepted(self.client.image_present(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxImagePresentRequest),
-                    .source = self.output.resource, .frame_key = self.frame, .deadline_ns = self.deadline,
+                    .source = self.output().resource, .frame_key = self.frame, .deadline_ns = self.deadline,
                     .dependency_count = @intCast(dependencies.len), .dependencies = pointer, .reserved = 0 }, &handle));
                 try self.track(slot, handle, null, 0, 0);
                 self.present_fence = self.jobs[slot].?.fence;
@@ -379,12 +522,21 @@ pub const Engine = struct {
     }
     pub fn close(self: *Engine) Error!void {
         if (self.active() or !self.drained()) return error.Busy;
+        try self.closeChain();
         for (&self.images) |*value| try self.releaseImage(value);
         for (&self.assets) |*value| try self.releaseImage(value);
-        try self.releaseImage(&self.output); try self.releaseImage(&self.staging);
+        for (&self.outputs) |*value| try self.releaseImage(value);
+        try self.releaseImage(&self.staging);
         for ([_]*gfx.R4GfxResource{ &self.over, &self.blit, &self.fill, &self.sampler }) |handle| if (handle.slot != 0) {
             try accepted(self.client.resource_release(self.device, handle)); handle.* = empty;
         };
+    }
+    fn closeChain(self: *Engine) Error!void {
+        if (self.chain.slot == 0) return;
+        try accepted(self.client.swapchain_close(self.device, &self.chain));
+        self.chain = std.mem.zeroes(gfx.R4GfxSwapchain); self.presentation = null; self.chain_status = null;
+        self.acquired = null; self.chain_frames = @splat(0); self.reported = @splat(false); self.output_index = 0;
+        self.chain_closing = false;
     }
 };
 fn rect(value: surface.Rect) gfx.R4GfxSignedRect { return .{ .x = value.x, .y = value.y, .width = @intCast(value.w), .height = @intCast(value.h) }; }
@@ -394,6 +546,7 @@ fn descriptor(kind: u32) gfx.R4GfxResourceDesc {
     return desc;
 }
 fn accepted(status: i32) Error!void {
-    return switch (status) { gfx.status_ok => {}, gfx.status_busy => error.Busy, gfx.status_stale => error.Stale,
+    return switch (status) { gfx.status_ok => {}, gfx.status_busy, gfx.status_occluded => error.Busy,
+        gfx.status_stale, gfx.status_suboptimal, gfx.status_lost => error.Stale,
         gfx.status_unsupported, gfx.status_unavailable => error.Unsupported, gfx.status_limit => error.Limit, else => error.Graphics };
 }

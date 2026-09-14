@@ -13,9 +13,10 @@ const scene = @import("scene_buffer.zig");
 const gpu = @import("composition_gpu.zig");
 const surface = @import("surface.zig");
 const Model = struct {
+    const s = p.swapchain.lifecycle;
     const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined, count: usize = 0 };
     const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
-    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false };
+    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
     var jobs: [c.device_job_capacity]?Job = @splat(null);
     var outcomes: [256]u32 = @splat(0);
@@ -27,14 +28,112 @@ const Model = struct {
     var batches: usize = 0;
     var max_batch: usize = 0;
     var visible: [64]u32 = @splat(0);
+    var chain_enabled = false;
+    var allow_visible = false;
+    var staged: [64]u32 = @splat(0);
+    var clock: u64 = 1;
+    var chain: s.Chain = .{};
+    var chain_images: [3]c.R4GfxResource = undefined;
+    var chain_render: [3]?c.R4GfxJob = @splat(null);
+    var chain_present: [3]?c.R4GfxJob = @splat(null);
     const table: c.DeviceV1 = blk: {
         var value = fixture.table;
         value.device_refresh = refresh; value.resource_create = create; value.resource_release = release;
         value.copy_submit_ex = copy; value.render_submit = render; value.image_present = present;
         value.render_submit_list = renderList;
         value.job_info = info; value.job_fence = fence; value.job_cancel = cancel; value.job_release = releaseJob;
+        value.presentation_info = presentationInfo; value.swapchain_open = chainOpen; value.swapchain_acquire = chainAcquire;
+        value.swapchain_present = chainPresent; value.swapchain_poll = chainPoll; value.swapchain_release = chainRelease; value.swapchain_close = chainClose;
         break :blk value;
     };
+    fn presentationInfo(_: *const c.R4GfxDevice, head: u32, out: *c.R4GfxPresentationInfo) callconv(.c) i32 {
+        if (!chain_enabled or head != 0) return c.status_unsupported;
+        out.* = std.mem.zeroes(c.R4GfxPresentationInfo);
+        out.version = 1; out.size = @sizeOf(c.R4GfxPresentationInfo); out.width = 8; out.height = 8;
+        out.flags = c.present_native | c.present_synchronized | c.present_visibility | c.present_active;
+        out.device_generation = 1; out.reset_generation = 1;
+        out.display_generation = 1; out.sequence = 1; out.policies = 3; out.buffer_count = 2; out.plane_count = 1; out.path = 1;
+        return c.status_ok;
+    }
+    fn chainOpen(device: *const c.R4GfxDevice, request: *const c.R4GfxSwapchainDesc, out: *c.R4GfxSwapchain) callconv(.c) i32 {
+        std.debug.assert(chain_enabled and request.count == 2 and chain_render[0] == null and request.policy == c.present_policy_fifo);
+        chain.configure(.{ .count = request.count, .require_vsync = true }, .{ .generation = 1, .width = 8, .height = 8,
+            .policies = 3, .synchronized = true, .visibility = true }) catch return c.status_busy;
+        @memcpy(chain_images[0..request.count], @as([*]const c.R4GfxResource, @ptrFromInt(request.images))[0..request.count]);
+        out.* = .{ .slot = 1, .reserved = 0, .generation = chain.generation, .device_generation = device.generation, .device_address = device.address };
+        return 0;
+    }
+    fn key(frame: c.R4GfxSwapchainFrame) s.Token { return .{ .slot = frame.slot, .generation = frame.generation, .serial = frame.serial }; }
+    fn chainFrameValue(token: s.Token) c.R4GfxSwapchainFrame {
+        return .{ .slot = token.slot, .reserved = 0, .generation = token.generation, .serial = token.serial,
+            .image = if (token.slot == 0) std.mem.zeroes(c.R4GfxResource) else chain_images[token.slot - 1] };
+    }
+    fn chainAcquire(_: *const c.R4GfxDevice, _: *const c.R4GfxSwapchain, input: u64, out: *c.R4GfxSwapchainFrame) callconv(.c) i32 {
+        clock += 1; out.* = chainFrameValue(chain.acquire(clock, input) catch return c.status_busy); return 0;
+    }
+    fn chainPresent(_: *const c.R4GfxDevice, _: *const c.R4GfxSwapchain, request: *const c.R4GfxSwapchainPresent) callconv(.c) i32 {
+        clock += 1;
+        chain.present(key(request.frame), clock, .composition, request.render_job.slot != 0) catch return c.status_invalid;
+        if (request.render_job.slot != 0) {
+            jobs[request.render_job.slot - 1].?.pins += 1;
+            chain_render[request.frame.slot - 1] = request.render_job;
+        }
+        return 0;
+    }
+    fn chainFrameStatus(index: usize) c.R4GfxSwapchainFrameStatus {
+        const frame = &chain.frames[index]; const stamp = frame.times;
+        return .{ .frame = chainFrameValue(frame.token), .phase = @intFromEnum(frame.phase), .result = @intFromEnum(frame.result), .path = @intFromEnum(frame.path),
+            .held_flags = @as(u32, @intFromBool(frame.render_held)) | (@as(u32, @intFromBool(frame.consumer_held)) << 1),
+            .input_ns = stamp.input_ns, .acquired_ns = stamp.acquired_ns, .queued_ns = stamp.queued_ns, .render_end_ns = stamp.render_end_ns,
+            .selected_ns = stamp.selected_ns, .submitted_ns = stamp.submitted_ns, .copied_ns = stamp.copied_ns,
+            .visible_ns = stamp.visible_ns, .released_ns = stamp.released_ns };
+    }
+    fn chainPoll(device: *const c.R4GfxDevice, _: *const c.R4GfxSwapchain, out: *c.R4GfxSwapchainStatus) callconv(.c) i32 {
+        clock += 1;
+        for (&chain.frames, 0..) |*frame, i| {
+            if (chain_render[i]) |handle| {
+                if (chain.life != .active) _ = cancel(device, &handle);
+                const job = &jobs[handle.slot - 1].?;
+                if (job.terminal) {
+                    chain.rendered(frame.token, clock, job.result == a.gfx_queue_result_complete) catch return c.status_invalid;
+                    job.pins -= 1; chain_render[i] = null;
+                }
+            }
+            if (chain_present[i]) |handle| {
+                if (chain.life != .active) _ = cancel(device, &handle);
+                const job = jobs[handle.slot - 1].?;
+                if (job.terminal) {
+                    chain.retired(frame.token, clock, job.result == a.gfx_queue_result_complete) catch return c.status_invalid;
+                    std.debug.assert(releaseJob(device, &handle) == 0); chain_present[i] = null;
+                }
+            }
+            if (allow_visible and frame.phase == .submitted and !frame.consumer_held) {
+                visible = staged;
+                chain.visible(frame.token, clock) catch return c.status_invalid;
+            }
+        }
+        if (chain.candidate()) |token| {
+            var job: c.R4GfxJob = undefined;
+            const rc = present(device, &.{ .version = 1, .size = @sizeOf(c.R4GfxImagePresentRequest), .source = chain_images[token.slot - 1],
+                .frame_key = token.serial, .deadline_ns = 1000, .dependency_count = 0, .dependencies = 0, .reserved = 0 }, &job);
+            if (rc == 0) { chain_present[token.slot - 1] = job; chain.submitted(token, clock) catch unreachable; }
+        }
+        out.* = .{ .version = 1, .size = @sizeOf(c.R4GfxSwapchainStatus), .life = @intFromEnum(chain.life), .policy = 0, .count = 2,
+            .queued_count = 0, .held_count = 0, .path = 1, .generation = chain.generation, .next_start_ns = chain.next_start_ns,
+            .frame0 = chainFrameStatus(0), .frame1 = chainFrameStatus(1), .frame2 = chainFrameStatus(2) };
+        for (&chain.frames) |*frame| { out.queued_count += @intFromBool(frame.phase == .queued); out.held_count += @intFromBool(frame.consumer_held or frame.render_held); }
+        return 0;
+    }
+    fn chainRelease(_: *const c.R4GfxDevice, _: *const c.R4GfxSwapchain, frame: *const c.R4GfxSwapchainFrame) callconv(.c) i32 {
+        chain.release(key(frame.*)) catch return c.status_busy; return 0;
+    }
+    fn chainClose(device: *const c.R4GfxDevice, handle: *const c.R4GfxSwapchain) callconv(.c) i32 {
+        chain.change(.closing);
+        var snapshot: c.R4GfxSwapchainStatus = undefined;
+        const rc = chainPoll(device, handle, &snapshot); if (rc != 0) return rc;
+        for (&chain.frames) |*frame| if (frame.phase != .free) { chain.release(frame.token) catch return c.status_busy; };
+        return 0;
+    }
     fn refresh(device: *const c.R4GfxDevice, out: *c.R4GfxDeviceInfo) callconv(.c) i32 {
         const rc = p.refresh(device, out);
         if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list;
@@ -119,7 +218,7 @@ const Model = struct {
     }
     fn cancel(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 { find(handle).cancelled=true; return 0; }
     fn releaseJob(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 {
-        if (!find(handle).terminal) return c.status_busy;
+        if (!find(handle).terminal or find(handle).pins != 0) return c.status_busy;
         jobs[handle.slot-1]=null; return 0;
     }
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
@@ -161,7 +260,8 @@ const Model = struct {
             .present => |value| {
                 const src=image(device,&value.source); const from:[*]const u8=@ptrFromInt(src.cpu_address);
                 std.debug.assert(src.width==8 and src.height==8);
-                for(0..8) |row| @memcpy(std.mem.sliceAsBytes(visible[row*8..][0..8]),from[row*src.pitch..][0..32]);
+                const target_pixels = if (chain_enabled) &staged else &visible;
+                for(0..8) |row| @memcpy(std.mem.sliceAsBytes(target_pixels[row*8..][0..8]),from[row*src.pitch..][0..32]);
                 presents+=1;
             },
         };
@@ -230,6 +330,55 @@ pub fn check() !void {
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
     try checkPrimitives(graphics, device);
+    try checkSwapchain(graphics, device);
+}
+
+fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    Model.chain_enabled = true; defer Model.chain_enabled = false;
+    Model.allow_visible = false; Model.clock = 1; Model.chain = .{};
+    Model.serial = 0; Model.presents = 0; Model.outcomes = @splat(0);
+    Model.chain_render = @splat(null); Model.chain_present = @splat(null);
+    Model.visible = @splat(0xabcdef);
+    var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit();
+    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try capture(&cache, full, 0x882244);
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+    try pump(&engine, &cache, device, .copied);
+    for (0..4) |_| { Model.complete(device); try engine.pollPresentation(); }
+    try t.expect(engine.chain.slot != 0 and engine.pending() and !engine.active() and engine.completion() == null);
+    try t.expect(Model.chain.frames[0].times.copied_ns != 0 and Model.chain.frames[0].times.visible_ns == 0);
+    try t.expect(std.mem.allEqual(u32, &Model.visible, 0xabcdef));
+    // Render a second complete desktop while the first awaits scanout. The
+    // bounded pool rejects further acquisition without serializing input.
+    try capture(&cache, full, 0x445566);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expectError(error.Busy, engine.acquire(0));
+    try t.expect(Model.presents == 1 and Model.chain.frames[1].phase == .queued);
+    var expected: [64]u32 = undefined; var target: scene.SceneBuffer = .{};
+    try t.expect(target.attach(std.mem.sliceAsBytes(&expected), 8, 8));
+    _ = try @import("composition_software.zig").paint(&graphics.client, &graphics.device, &cache, &target);
+    Model.allow_visible = true;
+    var receipts: usize = 0;
+    for (0..32) |_| {
+        Model.complete(device); try engine.pollPresentation();
+        if (engine.completion()) |done| {
+            receipts += 1;
+            try t.expect(done.frame == receipts and done.status.result == 1 and done.status.path == c.present_path_composition and
+                done.status.visible_ns >= done.status.copied_ns and done.status.copied_ns >= done.status.submitted_ns);
+        }
+        if (!engine.pending()) break;
+    }
+    try t.expect(receipts == 2 and Model.presents == 2 and !engine.pending());
+    try t.expectEqualSlices(u32, &expected, &Model.visible);
+    try capture(&cache, full, 0x998877); try engine.begin(&cache, 1000);
+    _ = engine.advance(&cache, 1); engine.cancel(error.Deadline);
+    try pump(&engine, &cache, device, .failed);
+    try engine.close();
+    try t.expectEqualSlices(u32, &expected, &Model.visible);
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    try t.expect(engine.reserved_bytes == 0);
 }
 
 fn primitiveScene(painter: *scene.SceneBuffer) !void {

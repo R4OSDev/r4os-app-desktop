@@ -1,5 +1,6 @@
 const std = @import("std");
 const r4os = @import("r4os");
+const gfx = @import("r4gfx");
 const r4img = @import("r4img");
 const r4std = @import("r4std");
 const appearance_signal = @import("appearance_signal.zig");
@@ -296,7 +297,7 @@ pub const App = struct {
     scene: scene_buffer.SceneBuffer = .{},
     composition: ?*composition_worker.Worker = null,
     cpu_scene_current: bool = false,
-    gpu_pending: ?GpuFrame = null,
+    gpu_pending: [3]?GpuFrame = @splat(null),
     cursor_controller: @import("cursor_controller.zig").Controller = .{},
     capture_cursor_damage: CursorDamage = .{},
     cursor_x: i32 = 0,
@@ -331,6 +332,7 @@ pub const App = struct {
     output_revision: u64 = 0,
     output_events_supported: bool = true,
     activity_wait_supported: bool = true,
+    last_input_ns: u64 = 0,
     activity_wait_wakes: u64 = 0,
     activity_wait_timeouts: u64 = 0,
     double_click_ticks: u64 = 25,
@@ -546,12 +548,21 @@ pub const App = struct {
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
                 if (self.dispatchEvent()) needs_redraw = true;
             }
             var physical_events: u32 = 0;
-            while (physical_events < physical_input_burst and self.pollPhysicalKeyEvent()) : (physical_events += 1) {}
-            if (self.pollKeyboardEvent() and self.dispatchEvent()) needs_redraw = true;
-            if (self.pollMouseEvent() and self.dispatchEvent()) needs_redraw = true;
+            while (physical_events < physical_input_burst and self.pollPhysicalKeyEvent()) : (physical_events += 1) {
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+            }
+            if (self.pollKeyboardEvent()) {
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                if (self.dispatchEvent()) needs_redraw = true;
+            }
+            if (self.pollMouseEvent()) {
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                if (self.dispatchEvent()) needs_redraw = true;
+            }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             self.flushWindowGeometry(false);
             if (self.syncCursor()) needs_redraw = true;
@@ -584,7 +595,7 @@ pub const App = struct {
     }
 
     fn idleWait(self: *App, active: bool) void {
-        if (self.composition) |worker| if (worker.busy()) {
+        if (self.composition) |worker| if (worker.needsPolling()) {
             // Damage coalesces while this immutable capture is in flight.
             // Input is still consumed every cycle without a busy-yield loop.
             self.ctx.sleepTicks(1);
@@ -1412,6 +1423,11 @@ pub const App = struct {
     }
 
     fn runWindowIdleSmokeAndPoweroff(self: *App) noreturn {
+        if (argsContain(self.ctx.argsRaw(), "/SWAPCHAIN")) {
+            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/SWAPCHAIN /TEST",
+                "DISPLAYD swapchain: OK", "cleanup=complete")) self.windowIdleSmokeFailed("swapchain");
+            self.invalidateFull(); self.redraw();
+        }
         if (argsContain(self.ctx.argsRaw(), "/CURSOR")) {
             var info: r4os.abi.DisplayCursorInfo = .{ .display_generation=79 };
             if (!self.ctx.draw.supportsDisplayCursor() or self.ctx.draw.displayCursorInfo(&info) != r4os.abi.gfx_output_error_unsupported or
@@ -2547,8 +2563,11 @@ pub const App = struct {
     }
 
     fn runRemoteFrameDiag(self: *App) bool {
+        return self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\RFDIAG.R4X", "/DESKTOP", "RFDIAG snapshot: OK", "RFDIAG result: OK");
+    }
+    fn runConsoleDiagnostic(self: *App, path: [*:0]const u8, args: [*:0]const u8, first: []const u8, second: []const u8) bool {
         var handle: r4os.abi.ProgramProcessHandle = .{};
-        const spawn_rc = self.ctx.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\RFDIAG.R4X", "/DESKTOP", .console, &handle);
+        const spawn_rc = self.ctx.programSpawnHandle(path, args, .console, &handle);
         if (spawn_rc != r4os.abi.program_handle_ok or !processHandleValid(handle)) {
             self.ctx.print("FAILED-diag-spawn=");
             self.ctx.printI32(spawn_rc);
@@ -2618,7 +2637,7 @@ pub const App = struct {
             self.ctx.println("");
             return false;
         }
-        if (!containsBytes(text, "RFDIAG snapshot: OK") or !containsBytes(text, "RFDIAG result: OK")) {
+        if (!containsBytes(text, first) or !containsBytes(text, second)) {
             self.ctx.println("FAILED-diag-output");
             return false;
         }
@@ -5266,6 +5285,7 @@ pub const App = struct {
     }
 
     const GpuFrame = struct {
+        capture_frame: u64 = 0,
         bounds: surface.Rect,
         pixels: u32,
         regions: u32,
@@ -5282,6 +5302,7 @@ pub const App = struct {
 
     fn captureGpuFrame(self: *App, regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) bool {
         const worker = self.composition orelse return false;
+        const pending_index = for (&self.gpu_pending, 0..) |*value, i| { if (value.* == null) break i; } else return false;
         if (!self.ensureSceneBuffer()) { worker.rejectCapture(); return false; }
         const start_tick = self.ctx.ticks();
         const start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
@@ -5320,8 +5341,20 @@ pub const App = struct {
             self.cpu_scene_current = true;
             frame.remote_result = self.publishRemoteScene(regions);
         } else self.cpu_scene_current = false;
+        worker.engine.present_intent = 1;
+        var blockers: u32 = 0;
+        var visible_windows: usize = 0;
+        for (&self.windows) |*entry| if (entry.visible and !entry.minimized) { visible_windows += 1; };
+        if (visible_windows > 1) blockers |= gfx.present_block_windows;
+        if (self.remote_frame_consumers != 0) blockers |= gfx.present_block_readers;
+        if (self.cursor_controller.software or !self.cursor_controller.acquired or self.cursor_controller.retryPending()) blockers |= gfx.present_block_cursor;
+        if (self.start_open or self.system_menu_open or self.time_menu_open or self.dialog != .none or self.menu_submenu_open or self.menu_nested_open)
+            blockers |= gfx.present_block_menus;
+        worker.engine.present_blockers = blockers;
         if (!worker.start()) { worker.rejectCapture(); self.cpu_scene_current = false; return false; }
-        self.gpu_pending = frame;
+        self.last_input_ns = 0;
+        frame.capture_frame = worker.cache.frame;
+        self.gpu_pending[pending_index] = frame;
         return true;
     }
 
@@ -5329,15 +5362,21 @@ pub const App = struct {
         const worker = self.composition orelse return;
         switch (worker.poll(&self.ctx.draw)) {
             .idle, .pending => {},
+            .discarded => {
+                for (&self.gpu_pending) |*entry| if (entry.*) |value| if (value.capture_frame == worker.completed_frame) { entry.* = null; break; };
+            },
             .failed => {
-                self.gpu_pending = null; self.cpu_scene_current = false;
+                self.gpu_pending = @splat(null); self.cpu_scene_current = false;
                 self.render_stats.present_backend_fallbacks +%= 1;
                 self.invalidateFull();
                 self.ctx.println("R4DESK composition: software fallback; complete scene reconstruction");
             },
             .visible => {
-                const frame = self.gpu_pending orelse return;
-                self.gpu_pending = null;
+                const index = for (&self.gpu_pending, 0..) |*entry, i| {
+                    if (entry.*) |value| if (value.capture_frame == worker.completed_frame) break i;
+                } else return;
+                const frame = self.gpu_pending[index].?;
+                self.gpu_pending[index] = null;
                 const now = self.ctx.ticks(); const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
                 self.last_display_revision = self.ctx.displayRevision();
                 self.cursor_controller.presented(true);
@@ -5371,6 +5410,7 @@ pub const App = struct {
             }
         }
         if (clipped_count == 0) return;
+        if (self.composition) |worker| worker.engine.input_ns = self.last_input_ns;
         const gpu_available = if (self.composition) |worker|
             self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision) else false;
         if (gpu_available) {
