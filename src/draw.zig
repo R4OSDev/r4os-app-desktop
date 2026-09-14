@@ -1912,7 +1912,11 @@ fn hostedFrameShape(ctx: *const desk_api.Context, bounds: surface.Rect, command:
     if (frameCommandRect(bounds, command) == null) return;
     const scene = ctx.scene orelse return;
     const resource = frameResource(resources, command) orelse return;
-    _ = gui_shape_renderer.replay(ctx.allocator(), scene, bounds, command, resource);
+    switch (gui_shape_renderer.replay(ctx.allocator(), scene, bounds, command, resource)) {
+        .drawn, .empty => {},
+        .invalid => scene.reject(error.Invalid),
+        .out_of_memory => scene.reject(error.OutOfMemory),
+    }
 }
 
 fn frameCommandRect(bounds: surface.Rect, command: r4os.abi.GuiFrameCommand) ?surface.Rect {

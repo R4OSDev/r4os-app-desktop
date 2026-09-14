@@ -6,32 +6,42 @@ const r4os = @import("r4os");
 const gfx = @import("r4gfx");
 const layers = @import("composition_layers.zig");
 const surface = @import("surface.zig");
+const primitive_assets = @import("primitive_assets.zig");
 const empty = std.mem.zeroes(gfx.R4GfxResource);
 const Image = struct { resource: gfx.R4GfxResource = empty, info: gfx.R4GfxResourceInfo = undefined, generation: u64 = 0, charge: u64 = 0 };
-const Job = struct { handle: gfx.R4GfxJob, fence: gfx.R4GfxCopyFence, upload: ?usize = null, generation: u64 = 0, bytes: u64 = 0, complete: bool = false };
+const Job = struct { handle: gfx.R4GfxJob, fence: gfx.R4GfxCopyFence, upload: ?usize = null, asset_upload: ?usize = null, generation: u64 = 0, bytes: u64 = 0, complete: bool = false };
 pub const Error = error{ Busy, Unsupported, Stale, Graphics, Limit, State, Deadline, Incomplete };
 pub const Progress = enum { pending, copied, failed };
 pub const Engine = struct {
     client: *const gfx.DeviceV1Client,
     device: *const gfx.R4GfxDevice,
     images: [layers.capacity]Image = @splat(.{}),
+    assets: [primitive_assets.texture_capacity]Image = @splat(.{}),
     output: Image = .{},
     staging: Image = .{},
     over: gfx.R4GfxResource = empty,
     blit: gfx.R4GfxResource = empty,
+    fill: gfx.R4GfxResource = empty,
     sampler: gfx.R4GfxResource = empty,
     jobs: [gfx.device_job_capacity]?Job = @splat(null),
     last: ?usize = null,
     stage_job: ?usize = null,
-    phase: enum { idle, upload, draw, present, drain } = .idle,
+    phase: enum { idle, upload, asset_upload, primitives, draw, present, drain } = .idle,
     frame: u64 = 0,
     next_image: usize = 0,
     next_command: usize = 0,
+    next_asset: usize = 0,
+    asset_x: i32 = 0,
+    asset_y: i32 = 0,
+    next_primitive: usize = 0,
     deadline: u64 = 0,
     fault: ?Error = null,
     present_fence: ?gfx.R4GfxCopyFence = null,
     uploaded_bytes: u64 = 0,
     render_jobs: u64 = 0,
+    primitive_jobs: u64 = 0,
+    primitive_draws: u64 = 0,
+    batch_enabled: bool = false,
     reserved_bytes: u64 = 0,
     budget_bytes: u64 = 256 * 1024 * 1024,
 
@@ -44,13 +54,21 @@ pub const Engine = struct {
     pub fn prepared(self: *Engine, cache: *const layers.Cache) bool {
         if (self.over.slot == 0 or self.blit.slot == 0 or self.sampler.slot == 0 or
             !self.imageFits(&self.output, cache.screen.w, cache.screen.h, gfx.format_xrgb8888) or
-            !self.imageFits(&self.staging, cache.screen.w, cache.screen.h, gfx.format_argb8888)) return false;
+            !self.imageFits(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
+                if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888)) return false;
         var visited: [layers.capacity]bool = @splat(false);
         for (cache.commands[0..cache.command_count]) |command| {
             if (visited[command.entry]) continue;
             visited[command.entry] = true;
             const entry = &cache.entries[command.entry];
             if (!self.imageFits(&self.images[command.entry], entry.bounds.w, entry.bounds.h, gfx.format_argb8888)) return false;
+        }
+        if (cache.recording) |recording| {
+            if (self.fill.slot == 0) return false;
+            for (&recording.assets.textures, 0..) |*texture, index| {
+                if (texture.pinned != cache.frame) continue;
+                if (!self.imageFits(&self.assets[index], @intCast(texture.width), @intCast(texture.height), gfx.format_argb8888)) return false;
+            }
         }
         return true;
     }
@@ -70,11 +88,13 @@ pub const Engine = struct {
         try accepted(self.client.device_refresh(self.device, &device_info));
         const operations = gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows;
         if (device_info.gpu_operations & operations != operations) return error.Unsupported;
+        self.batch_enabled = device_info.gpu_operations & gfx.device_gpu_render_list != 0;
         try self.stateResource(&self.over, gfx.resource_pipeline, gfx.render_operation_over);
         try self.stateResource(&self.blit, gfx.resource_pipeline, gfx.render_operation_blit);
         try self.stateResource(&self.sampler, gfx.resource_sampler, gfx.render_sampler_nearest);
         try self.image(&self.output, cache.screen.w, cache.screen.h, gfx.format_xrgb8888, true, deadline);
-        try self.image(&self.staging, cache.screen.w, cache.screen.h, gfx.format_argb8888, false, deadline);
+        try self.image(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
+            if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888, false, deadline);
         var visited: [layers.capacity]bool = @splat(false);
         for (cache.commands[0..cache.command_count]) |command| {
             const index = command.entry;
@@ -83,6 +103,13 @@ pub const Engine = struct {
             const entry = &cache.entries[index];
             if (!entry.initialized or entry.generation == 0) return error.State;
             try self.image(&self.images[index], entry.bounds.w, entry.bounds.h, gfx.format_argb8888, true, deadline);
+        }
+        if (cache.recording) |recording| {
+            try self.stateResource(&self.fill, gfx.resource_pipeline, gfx.render_operation_fill);
+            for (&recording.assets.textures, 0..) |*texture, index| {
+                if (texture.pinned != cache.frame) continue;
+                try self.image(&self.assets[index], @intCast(texture.width), @intCast(texture.height), gfx.format_argb8888, true, deadline);
+            }
         }
     }
     fn stateResource(self: *Engine, handle: *gfx.R4GfxResource, kind: u32, operation: u32) Error!void {
@@ -135,9 +162,10 @@ pub const Engine = struct {
         // The first command of a complete desktop capture is its opaque
         // background (or fullscreen terminal). A new target must start there.
         if (self.output.generation == 0 and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
-        self.frame = cache.frame; self.deadline = deadline; self.phase = .upload;
+        self.frame = cache.frame; self.deadline = deadline; self.phase = if (cache.recording != null) .asset_upload else .upload;
         self.next_image = 0; self.next_command = 0; self.fault = null; self.present_fence = null;
         self.last = null; self.stage_job = null;
+        self.next_asset = 0; self.asset_x = 0; self.asset_y = 0; self.next_primitive = 0;
     }
     pub fn cancel(self: *Engine, reason: Error) void {
         if (self.fault == null) self.fault = reason;
@@ -153,7 +181,12 @@ pub const Engine = struct {
         if (self.phase == .drain) {
             if (!self.drained()) return .pending;
             self.phase = .idle;
-            if (self.fault == null) self.output.generation = self.frame;
+            if (self.fault == null) {
+                self.output.generation = self.frame;
+                if (cache.recording != null) for (&cache.entries, 0..) |*entry, index| {
+                    if (entry.frame == cache.frame) self.images[index].generation = entry.generation;
+                };
+            }
             return if (self.fault == null) .copied else .failed;
         }
         // Admission is bounded independently of scene size. Returning Busy
@@ -177,8 +210,14 @@ pub const Engine = struct {
                 if (job.upload) |image_index| if (info.result == r4os.abi.gfx_queue_result_complete) {
                     self.images[image_index].generation = job.generation;
                     cache.uploaded(image_index, job.generation);
-                    self.uploaded_bytes +|= job.bytes;
                 };
+                if (info.result == r4os.abi.gfx_queue_result_complete) {
+                    self.uploaded_bytes +|= job.bytes;
+                    if (job.asset_upload) |asset_index| {
+                        self.assets[asset_index].generation = job.generation;
+                        if (cache.recording) |recording| recording.assets.uploaded(asset_index, job.generation);
+                    }
+                }
                 job.complete = true;
             }
             if (self.stage_job == index) self.stage_job = null;
@@ -201,12 +240,74 @@ pub const Engine = struct {
         self.jobs[index] = .{ .handle = handle, .fence = undefined, .upload = upload, .generation = generation, .bytes = bytes };
         try accepted(self.client.job_fence(self.device, &handle, &self.jobs[index].?.fence));
         self.last = index;
-        if (upload != null) self.stage_job = index;
+        if (bytes != 0) self.stage_job = index;
     }
     fn step(self: *Engine, cache: *layers.Cache) Error!void {
         const dependencies = self.dependency();
         const pointer: u64 = if (dependencies.len == 0) 0 else @intFromPtr(dependencies.ptr);
         switch (self.phase) {
+            .asset_upload => {
+                const recording = cache.recording orelse return error.State;
+                if (self.stage_job != null) return error.Busy;
+                while (self.next_asset < self.assets.len) : (self.next_asset += 1) {
+                    const index = self.next_asset; const texture = &recording.assets.textures[index]; const image_value = &self.assets[index];
+                    if (texture.pinned != cache.frame or image_value.generation == texture.generation) continue;
+                    if (image_value.resource.slot == 0) return error.State;
+                    const area = if (image_value.generation == 0) texture.rect() else texture.dirty orelse texture.rect();
+                    const tile: surface.Rect = .{ .x = area.x + self.asset_x, .y = area.y + self.asset_y,
+                        .w = @min(@as(i32, @intCast(self.staging.info.image.width)), area.w - self.asset_x),
+                        .h = @min(@as(i32, @intCast(self.staging.info.image.height)), area.h - self.asset_y) };
+                    const slot = try self.reserve();
+                    try self.stagePixels(texture.pixels, texture.width, texture.height, texture.generation, tile);
+                    var handle: gfx.R4GfxJob = undefined;
+                    try accepted(self.client.copy_submit_ex(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxCopyRequestEx),
+                        .copy = .{ .source = self.staging.resource, .target = image_value.resource, .source_offset = 0,
+                            .target_offset = @as(u64, @intCast(tile.y)) * image_value.info.image.pitch + @as(u64, @intCast(tile.x)) * 4,
+                            .byte_length = @as(u64, @intCast(tile.w)) * 4, .deadline_ns = self.deadline },
+                        .row_count = @intCast(tile.h), .source_pitch = self.staging.info.image.pitch, .target_pitch = image_value.info.image.pitch,
+                        .dependency_count = @intCast(dependencies.len), .dependencies = pointer }, &handle));
+                    try self.track(slot, handle, null, texture.generation, @as(u64, @intCast(tile.w)) * @as(u64, @intCast(tile.h)) * 4);
+                    self.asset_x += tile.w;
+                    if (self.asset_x == area.w) { self.asset_x = 0; self.asset_y += tile.h; }
+                    if (self.asset_y == area.h) {
+                        self.jobs[slot].?.asset_upload = index;
+                        self.asset_y = 0; self.next_asset += 1;
+                    }
+                    return;
+                }
+                self.phase = .primitives;
+            },
+            .primitives => {
+                const recording = cache.recording orelse return error.State;
+                if (self.next_primitive == recording.count) { self.phase = .draw; return; }
+                const first = recording.commands[self.next_primitive];
+                var requests: [gfx.render_list_capacity]gfx.R4GfxRenderRequest = undefined;
+                var count: usize = 0;
+                const limit: usize = if (self.batch_enabled) requests.len else 1;
+                // Preserve painter order. Only adjacent commands with the same
+                // resource/state owners share one all-or-nothing queue job.
+                while (count < limit and self.next_primitive + count < recording.count) : (count += 1) {
+                    const command = recording.commands[self.next_primitive + count];
+                    if (command.layer != first.layer or command.texture != first.texture or command.over != first.over) break;
+                    requests[count] = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
+                        .source = if (command.texture) |texture| self.assets[texture].resource else empty,
+                        .target = self.images[command.layer].resource,
+                        .pipeline = if (command.texture == null) self.fill else if (command.over) self.over else self.blit,
+                        .sampler = if (command.texture == null) empty else self.sampler,
+                        .source_rect = rect(command.source), .target_rect = rect(command.target), .scissor = rect(command.scissor),
+                        .color = command.color, .opacity = 255, .transfer = 0,
+                        .dependency_count = if (count == 0) @intCast(dependencies.len) else 0,
+                        .deadline_ns = self.deadline, .dependencies = if (count == 0) pointer else 0 };
+                }
+                const slot = try self.reserve();
+                var handle: gfx.R4GfxJob = undefined;
+                if (count == 1) try accepted(self.client.render_submit(self.device, &requests[0], &handle))
+                else try accepted(self.client.render_submit_list(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderListRequest),
+                    .commands = @intFromPtr(&requests), .count = @intCast(count), .reserved = 0 }, &handle));
+                try self.track(slot, handle, null, 0, 0);
+                self.next_primitive += count; self.render_jobs +|= 1;
+                self.primitive_jobs +|= 1; self.primitive_draws +|= count;
+            },
             .upload => {
                 if (self.stage_job != null) return error.Busy;
                 while (self.next_image < cache.entries.len) : (self.next_image += 1) {
@@ -258,14 +359,18 @@ pub const Engine = struct {
         }
     }
     fn stage(self: *Engine, entry: *const layers.Entry, area: surface.Rect) Error!void {
-        var desc = descriptor(gfx.resource_image); desc.source_kind = gfx.source_borrow_cpu; desc.source_generation = entry.generation;
-        desc.image = .{ .cpu_address = @intFromPtr(entry.pixels.ptr), .byte_length = entry.pixels.len * 4,
-            .pitch = @as(u64, @intCast(entry.bounds.w)) * 4, .width = @intCast(entry.bounds.w), .height = @intCast(entry.bounds.h), .format = gfx.format_argb8888, .reserved = 0 };
+        return self.stagePixels(entry.pixels, @intCast(entry.bounds.w), @intCast(entry.bounds.h), entry.generation,
+            .{ .x = area.x - entry.bounds.x, .y = area.y - entry.bounds.y, .w = area.w, .h = area.h });
+    }
+    fn stagePixels(self: *Engine, pixels_value: []const u32, width: u32, height: u32, generation: u64, area: surface.Rect) Error!void {
+        var desc = descriptor(gfx.resource_image); desc.source_kind = gfx.source_borrow_cpu; desc.source_generation = generation;
+        desc.image = .{ .cpu_address = @intFromPtr(pixels_value.ptr), .byte_length = pixels_value.len * 4,
+            .pitch = @as(u64, width) * 4, .width = width, .height = height, .format = gfx.format_argb8888, .reserved = 0 };
         var source: gfx.R4GfxResource = undefined;
         try accepted(self.client.resource_create(self.device, &desc, &source));
         defer _ = self.client.resource_release(self.device, &source);
         const command: gfx.R4GfxDraw = .{ .source = source, .target = self.staging.resource, .pipeline = self.blit, .sampler = self.sampler,
-            .source_rect = .{ .x = @intCast(area.x - entry.bounds.x), .y = @intCast(area.y - entry.bounds.y), .width = @intCast(area.w), .height = @intCast(area.h) },
+            .source_rect = .{ .x = @intCast(area.x), .y = @intCast(area.y), .width = @intCast(area.w), .height = @intCast(area.h) },
             .target_rect = .{ .x = 0, .y = 0, .width = @intCast(area.w), .height = @intCast(area.h) }, .color = 0, .opacity = 255 };
         var stats: gfx.R4GfxRenderStats = undefined;
         const pixels = @as(u64, @intCast(area.w)) * @as(u64, @intCast(area.h));
@@ -275,12 +380,14 @@ pub const Engine = struct {
     pub fn close(self: *Engine) Error!void {
         if (self.active() or !self.drained()) return error.Busy;
         for (&self.images) |*value| try self.releaseImage(value);
+        for (&self.assets) |*value| try self.releaseImage(value);
         try self.releaseImage(&self.output); try self.releaseImage(&self.staging);
-        for ([_]*gfx.R4GfxResource{ &self.over, &self.blit, &self.sampler }) |handle| if (handle.slot != 0) {
+        for ([_]*gfx.R4GfxResource{ &self.over, &self.blit, &self.fill, &self.sampler }) |handle| if (handle.slot != 0) {
             try accepted(self.client.resource_release(self.device, handle)); handle.* = empty;
         };
     }
 };
+fn rect(value: surface.Rect) gfx.R4GfxSignedRect { return .{ .x = value.x, .y = value.y, .width = @intCast(value.w), .height = @intCast(value.h) }; }
 fn descriptor(kind: u32) gfx.R4GfxResourceDesc {
     var desc = std.mem.zeroes(gfx.R4GfxResourceDesc);
     desc.version = 1; desc.size = @sizeOf(gfx.R4GfxResourceDesc); desc.kind = kind;

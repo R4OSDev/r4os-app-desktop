@@ -24,6 +24,7 @@ pub const table: provider.c.DeviceV1 = .{
     .render_submit = provider.submitRender,
     .image_prepare = provider.prepareImage,
     .image_present = provider.presentImage,
+    .render_submit_list = provider.submitRenderList,
 };
 pub const Fixture = struct {
     table_override: ?*const provider.c.DeviceV1 = null,

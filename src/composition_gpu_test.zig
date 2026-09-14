@@ -3,7 +3,8 @@
 //! NVIDIA packet execution and common BO retention have their owner tests.
 const std = @import("std");
 const t = std.testing;
-const a = @import("r4os").abi;
+const r4os = @import("r4os");
+const a = r4os.abi;
 const p = @import("r4gfx_device_provider");
 const c = p.c;
 const fixture = @import("gfx_renderer_test.zig");
@@ -12,7 +13,8 @@ const scene = @import("scene_buffer.zig");
 const gpu = @import("composition_gpu.zig");
 const surface = @import("surface.zig");
 const Model = struct {
-    const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, present: c.R4GfxImagePresentRequest };
+    const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined, count: usize = 0 };
+    const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
     const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
     var jobs: [c.device_job_capacity]?Job = @splat(null);
@@ -22,17 +24,20 @@ const Model = struct {
     var presents: u32 = 0;
     var busy_count: u32 = 0;
     var reject_draw = false;
+    var batches: usize = 0;
+    var max_batch: usize = 0;
     var visible: [64]u32 = @splat(0);
     const table: c.DeviceV1 = blk: {
         var value = fixture.table;
         value.device_refresh = refresh; value.resource_create = create; value.resource_release = release;
         value.copy_submit_ex = copy; value.render_submit = render; value.image_present = present;
+        value.render_submit_list = renderList;
         value.job_info = info; value.job_fence = fence; value.job_cancel = cancel; value.job_release = releaseJob;
         break :blk value;
     };
     fn refresh(device: *const c.R4GfxDevice, out: *c.R4GfxDeviceInfo) callconv(.c) i32 {
         const rc = p.refresh(device, out);
-        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present;
+        if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list;
         return rc;
     }
     fn create(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, out: *c.R4GfxResource) callconv(.c) i32 {
@@ -58,8 +63,8 @@ const Model = struct {
     }
     fn release(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) callconv(.c) i32 {
         for (&jobs) |*slot| if (slot.*) |job| if (!job.terminal) {
-            const source = switch (job.operation) { .copy => |v| v.copy.source, .draw => |v| v.source, .present => |v| v.source };
-            const target = switch (job.operation) { .copy => |v| v.copy.target, .draw => |v| v.target, .present => std.mem.zeroes(c.R4GfxResource) };
+            const source = switch (job.operation) { .copy => |v| v.copy.source, .draw => |v| v.source, .list => |v| v.requests[0].source, .present => |v| v.source };
+            const target = switch (job.operation) { .copy => |v| v.copy.target, .draw => |v| v.target, .list => |v| v.requests[0].target, .present => std.mem.zeroes(c.R4GfxResource) };
             std.debug.assert(!std.meta.eql(resource.*,source) and !std.meta.eql(resource.*,target));
         };
         const rc = p.releaseResource(device,resource);
@@ -82,6 +87,20 @@ const Model = struct {
     fn render(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderRequest, out: *c.R4GfxJob) callconv(.c) i32 {
         if (reject_draw) return c.status_unsupported;
         return submit(device,.{.draw=input.*},input.dependency_count,input.dependencies,out);
+    }
+    fn renderList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderListRequest, out: *c.R4GfxJob) callconv(.c) i32 {
+        if (reject_draw) return c.status_unsupported;
+        std.debug.assert(input.version == 1 and input.size == @sizeOf(c.R4GfxRenderListRequest) and input.reserved == 0 and input.count > 0 and input.count <= c.render_list_capacity);
+        const requests: [*]const c.R4GfxRenderRequest = @ptrFromInt(input.commands);
+        var list: List = .{ .count = input.count };
+        @memcpy(list.requests[0..input.count], requests[0..input.count]);
+        for (list.requests[1..input.count]) |request| std.debug.assert(std.meta.eql(request.source, requests[0].source) and
+            std.meta.eql(request.target, requests[0].target) and std.meta.eql(request.pipeline, requests[0].pipeline) and
+            std.meta.eql(request.sampler, requests[0].sampler) and request.transfer == requests[0].transfer and
+            request.deadline_ns == requests[0].deadline_ns and request.dependencies == 0 and request.dependency_count == 0);
+        const rc = submit(device, .{ .list = list }, requests[0].dependency_count, requests[0].dependencies, out);
+        if (rc == 0) { batches += 1; max_batch = @max(max_batch, input.count); }
+        return rc;
     }
     fn present(device: *const c.R4GfxDevice, input: *const c.R4GfxImagePresentRequest, out: *c.R4GfxJob) callconv(.c) i32 {
         return submit(device,.{.present=input.*},input.dependency_count,input.dependencies,out);
@@ -106,6 +125,23 @@ const Model = struct {
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
         var value: c.R4GfxResourceInfo=undefined; std.debug.assert(p.resourceInfo(device,resource,&value)==0); return value.image;
     }
+    fn executeDraw(device: *const c.R4GfxDevice, value: c.R4GfxRenderRequest) void {
+                // The model executes each clipped sample through the real CPU
+                // provider. Target clipping never changes the source transform.
+                for (0..value.scissor.height) |row| for (0..value.scissor.width) |column| {
+                    const x = @as(i64, value.scissor.x) + @as(i64, @intCast(column));
+                    const y = @as(i64, value.scissor.y) + @as(i64, @intCast(row));
+                    var command: c.R4GfxDraw = .{ .source = value.source, .target = value.target, .pipeline = value.pipeline, .sampler = value.sampler,
+                        .source_rect = std.mem.zeroes(c.R4GfxRect), .target_rect = .{ .x = @intCast(x), .y = @intCast(y), .width = 1, .height = 1 },
+                        .color = value.color, .opacity = if (value.source.slot == 0) 0 else value.opacity };
+                    if (value.source.slot != 0) command.source_rect = .{
+                        .x = @intCast(@as(i64, value.source_rect.x) + @divTrunc((x - value.target_rect.x) * value.source_rect.width, value.target_rect.width)),
+                        .y = @intCast(@as(i64, value.source_rect.y) + @divTrunc((y - value.target_rect.y) * value.source_rect.height, value.target_rect.height)),
+                        .width = 1, .height = 1 };
+                    var stats: c.R4GfxRenderStats = undefined;
+                    std.debug.assert(p.render(device, &.{ .commands = @intFromPtr(&command), .command_count = 1, .flags = 0, .pixel_budget = 1 }, &stats) == 0);
+                };
+    }
     fn complete(device: *const c.R4GfxDevice) void {
         var selected: ?*Job = null;
         for (&jobs) |*slot| if (slot.*) |*job| if (!job.terminal) {
@@ -120,14 +156,8 @@ const Model = struct {
                 const from: [*]const u8=@ptrFromInt(src.cpu_address); const to: [*]u8=@ptrFromInt(dst.cpu_address);
                 for(0..value.row_count) |row| @memcpy(to[value.copy.target_offset+row*value.target_pitch..][0..value.copy.byte_length],from[value.copy.source_offset+row*value.source_pitch..][0..value.copy.byte_length]);
             },
-            .draw => |value| {
-                std.debug.assert(value.scissor.x==value.target_rect.x and value.scissor.y==value.target_rect.y and value.scissor.width==value.target_rect.width and value.scissor.height==value.target_rect.height);
-                const command:c.R4GfxDraw=.{ .source=value.source,.target=value.target,.pipeline=value.pipeline,.sampler=value.sampler,
-                    .source_rect=.{.x=@intCast(value.source_rect.x),.y=@intCast(value.source_rect.y),.width=value.source_rect.width,.height=value.source_rect.height},
-                    .target_rect=.{.x=@intCast(value.target_rect.x),.y=@intCast(value.target_rect.y),.width=value.target_rect.width,.height=value.target_rect.height},.color=value.color,.opacity=value.opacity };
-                var stats:c.R4GfxRenderStats=undefined;
-                std.debug.assert(p.render(device,&.{.commands=@intFromPtr(&command),.command_count=1,.flags=0,.pixel_budget=64},&stats)==0);
-            },
+            .draw => |value| executeDraw(device, value),
+            .list => |*value| for (value.requests[0..value.count]) |request| executeDraw(device, request),
             .present => |value| {
                 const src=image(device,&value.source); const from:[*]const u8=@ptrFromInt(src.cpu_address);
                 std.debug.assert(src.width==8 and src.height==8);
@@ -199,4 +229,140 @@ pub fn check() !void {
     for(&Model.jobs) |*job| try t.expect(job.*==null);
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
+    try checkPrimitives(graphics, device);
+}
+
+fn primitiveScene(painter: *scene.SceneBuffer) !void {
+    const paint = @import("paint.zig");
+    painter.fillRect(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, 0x203040);
+    paint.textScene(painter, undefined, 0, 0, "A", 0xffffff, 0x203040);
+    const indices = [_]u8{ 0, 1, 1, 0 };
+    var palette: [256]u32 = @splat(0); palette[0] = 0x773311; palette[1] = 0x229955;
+    try t.expect(painter.blitIndexed8Nearest(.{ .x = 0, .y = 4, .w = 4, .h = 4 }, .{ .indices = &indices, .palette = &palette,
+        .source_x = 0, .source_y = 0, .source_w = 2, .source_h = 2, .source_stride = 2, .guest_w = 2, .guest_h = 2,
+        .viewport = .{ .x = 0, .y = 4, .w = 4, .h = 4 } }));
+    try t.expect(painter.blendAlpha8(4, 4, 2, 2, 2, 0x669933, &.{ 0, 128, 255, 64 }));
+    const argb = [_]u32{ 0x80ff0000, 0xff445566 };
+    try t.expect(painter.blendArgb32(painter.fullRect(), 5, 6, 2, 1, 1, std.mem.sliceAsBytes(&argb)));
+}
+fn primitiveCapture(cache: *layers.Cache, damage: surface.Rect) !void {
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try cache.start(full);
+    const painter = (try cache.begin(1, full, damage)).?;
+    try primitiveScene(painter);
+    try cache.end(1); _ = try cache.finish();
+}
+fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit();
+    frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit(); cache.recording = &frame;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    var expected: [64]u32 = undefined; var target: scene.SceneBuffer = .{};
+    try t.expect(target.attach(std.mem.sliceAsBytes(&expected), 8, 8)); try primitiveScene(&target);
+    try primitiveCapture(&cache, full);
+    try t.expect(cache.reserved == 0 and frame.count >= 5 and frame.assets.misses == 4 and frame.merged_fills != 0);
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    for (expected, Model.visible) |reference, actual| inline for (.{ 0, 8, 16 }) |shift| {
+        const difference = @as(i32, @intCast((reference >> shift) & 255)) - @as(i32, @intCast((actual >> shift) & 255));
+        try t.expect(@abs(difference) <= 1);
+    };
+    try t.expect(Model.batches > 0 and Model.max_batch >= 2 and engine.primitive_jobs < engine.primitive_draws);
+    const uploads = engine.uploaded_bytes; const conversions = frame.assets.converted_pixels; const allocations = Model.native_allocations;
+    try primitiveCapture(&cache, .{ .x = 3, .y = 3, .w = 1, .h = 1 });
+    try t.expect(engine.prepared(&cache)); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expect(engine.uploaded_bytes == uploads and frame.assets.converted_pixels == conversions and Model.native_allocations == allocations);
+    frame.mirror = true; for (&cache.entries) |*entry| entry.initialized = false;
+    try primitiveCapture(&cache, full);
+    _ = try @import("composition_software.zig").paint(&graphics.client, &graphics.device, &cache, &target);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    const visible = Model.visible;
+    try primitiveCapture(&cache, full); Model.reject_draw = true;
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .failed); Model.reject_draw = false;
+    try t.expectEqualSlices(u32, &visible, &Model.visible);
+    try engine.close();
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    try checkShapesAndLargeImage(graphics, device);
+    try checkAssets();
+    std.debug.print("[desktop-primitives] fill/glyph/indexed/alpha/ARGB: bounded GPU capture; no CPU layer pixels; warm upload=0; fallback remains complete\n", .{});
+}
+
+fn shapesAndLargeImage(painter: *scene.SceneBuffer, pixels: []const u32) !void {
+    const shapes = @import("gui_shape_renderer.zig");
+    try t.expect(painter.blitXrgb32Nearest(painter.fullRect(), .{ .pixels = pixels, .source_x = 0, .source_y = 0,
+        .source_w = 1024, .source_h = 512, .source_stride = 1024, .guest_w = 1024, .guest_h = 512,
+        .viewport = .{ .x = -300, .y = -200, .w = 1024, .h = 512 } }));
+    for (0..16) |index| painter.fillRect(.{ .x = @intCast(index % 8), .y = @intCast(index / 8), .w = 1, .h = 1 },
+        0x102030 + @as(u32, @intCast(index)) * 0x010101);
+    var bytes: [@sizeOf(a.GuiShapeResource) + 4 * @sizeOf(a.GuiPathSegment)]u8 = undefined;
+    const rounded = try r4os.gui_shapes.roundedRect(&bytes, .{ .x = 2, .y = 2, .w = 4, .h = 4,
+        .radii = .{ .top_left_x = 2, .top_left_y = 2, .bottom_right_x = 2, .bottom_right_y = 2 },
+        .fill_argb = 0x8070b010, .shadow = .{ .argb = 0x90000000, .offset_x = 1, .offset_y = 1, .blur = 1 } });
+    for ([_]u32{ a.gui_frame_command_kind_shadow, a.gui_frame_command_kind_rounded_rect }) |kind| {
+        const command = try r4os.gui_shapes.command(kind, 0, 0, 8, 8, 0, rounded.len);
+        try t.expect(shapes.replay(t.allocator, painter, painter.fullRect(), command, rounded) == .drawn);
+    }
+    var path = try r4os.gui_shapes.PathBuilder.init(&bytes, .{ .stroke_argb = 0xc0e030a0, .stroke_width = 1.5, .line_cap = .round });
+    try path.moveTo(.{ .x = 0, .y = 7 });
+    try path.cubicTo(.{ .x = 1, .y = 2 }, .{ .x = 6, .y = 2 }, .{ .x = 7, .y = 7 });
+    const curve = try path.finish();
+    const command = try r4os.gui_shapes.command(a.gui_frame_command_kind_path_stroke, 0, 0, 8, 8, 0, curve.len);
+    try t.expect(shapes.replay(t.allocator, painter, painter.fullRect(), command, curve) == .drawn);
+}
+fn checkShapesAndLargeImage(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    const pixels = try t.allocator.alloc(u32, 1024 * 512); defer t.allocator.free(pixels);
+    for (pixels, 0..) |*pixel, index| pixel.* = @as(u32, @intCast(index)) & 0xffffff;
+    var expected: [64]u32 = undefined; var reference: scene.SceneBuffer = .{};
+    try t.expect(reference.attach(std.mem.sliceAsBytes(&expected), 8, 8));
+    try shapesAndLargeImage(&reference, pixels);
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    const full = reference.fullRect();
+    try cache.start(full); const painter = (try cache.begin(1, full, full)).?;
+    try shapesAndLargeImage(painter, pixels);
+    try cache.end(1); _ = try cache.finish();
+    try t.expect(cache.reserved == 0);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.device);
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    for (expected, Model.visible) |want, actual| inline for (.{ 0, 8, 16 }) |shift| {
+        const difference = @as(i32,@intCast((want >> shift) & 255)) - @as(i32,@intCast((actual >> shift) & 255));
+        try t.expect(@abs(difference) <= 3); // Three separately rounded mask blends.
+    };
+    try t.expect(Model.max_batch == 16 and engine.staging.info.image.byte_length == 1024 * 1024 and
+        engine.uploaded_bytes == (1024 * 512 + 512 * 512) * 4 and frame.assets.reserved <= frame.assets.budget);
+    try engine.close();
+    std.debug.print("[desktop-primitives] 16 draws/batch; large source tiled through 1 MB staging; curves/AA/shadow max=3 LSB\n", .{});
+}
+
+fn checkAssets() !void {
+    const assets = @import("primitive_assets.zig"); const images = @import("primitive_image.zig");
+    const metadata = assets.entry_capacity * @sizeOf(assets.Entry);
+    var atlas = try assets.Cache.init(t.allocator, metadata + 512 * 512 * 4); defer atlas.deinit();
+    try atlas.start(1);
+    const rows = [_]u64{ 1, 2 };
+    var view: images.View = .{ .format = .glyph, .width = 2, .height = 2, .stride = 0, .rows = &rows,
+        .foreground = 0x123456, .background = 0x112233, .identity = .{ .font = 8, .revision = 1, .glyph = 65 } };
+    const first = try atlas.intern(view); const generation = atlas.textures[first.texture].generation;
+    _ = try atlas.intern(view); try t.expect(atlas.hits == 1 and atlas.converted_pixels == 4);
+    view.identity.revision = 2; _ = try atlas.intern(view);
+    view.identity.dpi_x = 144; view.identity.dpi_y = 144; _ = try atlas.intern(view);
+    try t.expect(atlas.misses == 3 and atlas.textures[first.texture].generation > generation);
+    atlas.uploaded(first.texture, generation); try t.expect(atlas.textures[first.texture].dirty != null);
+    var large: [129 * 129]u32 = @splat(0x123456);
+    const large_view: images.View = .{ .format = .xrgb, .width = 129, .height = 129, .stride = 129 * 4, .bytes = std.mem.sliceAsBytes(&large) };
+    try t.expectError(error.OutOfMemory, atlas.intern(large_view));
+    try t.expect(atlas.reserved <= atlas.budget and atlas.textures[first.texture].generation > generation);
+    try atlas.start(2); _ = try atlas.intern(large_view); try t.expect(atlas.evictions != 0 and atlas.reserved <= atlas.budget);
+    const conversions = atlas.converted_pixels; large[7] ^= 1; _ = try atlas.intern(large_view);
+    try t.expect(atlas.converted_pixels > conversions);
+
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 4); defer cache.deinit(); cache.recording = &frame;
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try cache.start(full); const painter = (try cache.begin(1, full, full)).?;
+    painter.reject(error.OutOfMemory);
+    try t.expectError(error.OutOfMemory, cache.end(1));
+    try t.expectError(error.OutOfMemory, cache.finish());
+    try t.expect(cache.command_count == 0 and cache.reserved == 0);
 }

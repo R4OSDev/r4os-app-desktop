@@ -5285,6 +5285,9 @@ pub const App = struct {
         if (!self.ensureSceneBuffer()) { worker.rejectCapture(); return false; }
         const start_tick = self.ctx.ticks();
         const start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+        const mirror = self.remote_frame_consumers != 0;
+        if (mirror and !worker.primitives.mirror) for (&worker.cache.entries) |*entry| { entry.initialized = false; };
+        worker.primitives.mirror = mirror;
         worker.cache.start(surface.desktop(self.screen_w, self.screen_h).rect) catch { worker.rejectCapture(); return false; };
         self.scene.layer_hook = worker.cache.hook();
         defer self.scene.layer_hook = null;
@@ -5405,6 +5408,7 @@ pub const App = struct {
         const compose_start = self.ctx.ticks();
         const compose_start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         var cull_stats = compositor.CullStats{};
+        if (scene_ready) self.scene.failure = null;
         for (clipped_regions) |damage_rect| {
             if (scene_ready) self.ctx.beginSceneClipped(&self.scene, damage_rect);
             const region_cull = self.composeDamageRect(damage_rect, console_scroll_offsets[0..], gui_frame_views[0..]);
@@ -5415,6 +5419,11 @@ pub const App = struct {
             }
         }
         self.cpu_scene_current = scene_ready;
+        if (scene_ready and self.scene.failure != null) {
+            self.cpu_scene_current = false;
+            self.invalidateFull();
+            return;
+        }
         const compose_ticks = elapsedTicks(compose_start, self.ctx.ticks());
         const compose_end_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const present_start = self.ctx.ticks();

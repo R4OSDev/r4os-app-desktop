@@ -1,7 +1,13 @@
 const std = @import("std");
 const surface = @import("surface.zig");
+const primitive_image = @import("primitive_image.zig");
 
 pub const SceneBuffer = struct {
+    pub const PrimitiveHook = struct {
+        context: usize,
+        paint: *const fn (usize, *SceneBuffer, primitive_image.Paint) void,
+        fail: *const fn (usize, anyerror) void,
+    };
     pub const RenderHook = struct {
         context: usize,
         fill: *const fn (usize, surface.Rect, u32) bool,
@@ -27,6 +33,13 @@ pub const SceneBuffer = struct {
     paint_clip: ?surface.Rect = null,
     render_hook: ?RenderHook = null,
     layer_hook: ?LayerHook = null,
+    primitive_hook: ?PrimitiveHook = null,
+    failure: ?anyerror = null,
+
+    pub fn reject(self: *SceneBuffer, reason: anyerror) void {
+        if (self.failure == null) self.failure = reason;
+        if (self.primitive_hook) |hook| hook.fail(hook.context, reason);
+    }
 
     pub fn flushPending(self: *const SceneBuffer) void {
         if (self.render_hook) |hook| hook.flush(hook.context);
@@ -72,6 +85,7 @@ pub const SceneBuffer = struct {
     pub fn clearLayer(self: *SceneBuffer, rect: surface.Rect) void {
         self.flushPending();
         const clipped = self.paintClipRect(rect) orelse return;
+        if (self.primitive_hook) |hook| { hook.paint(hook.context, self, .{ .clear = clipped }); return; }
         const pixels = self.pixels orelse return;
         var y = clipped.y;
         while (y < clipped.bottom()) : (y += 1) {
@@ -116,7 +130,7 @@ pub const SceneBuffer = struct {
     }
 
     pub fn clipRect(self: *const SceneBuffer, rect: surface.Rect) ?surface.Rect {
-        if (self.pixels == null or rect.isEmpty() or self.width <= 0 or self.height <= 0) return null;
+        if ((self.pixels == null and self.primitive_hook == null) or rect.isEmpty() or self.width <= 0 or self.height <= 0) return null;
         const left = @max(self.origin_x, rect.x);
         const top = @max(self.origin_y, rect.y);
         const right = @min(self.fullRect().right(), rect.right());
@@ -138,6 +152,7 @@ pub const SceneBuffer = struct {
 
     pub fn fillRect(self: *SceneBuffer, rect: surface.Rect, rgb: u32) void {
         const clipped = self.paintClipRect(rect) orelse return;
+        if (self.primitive_hook) |hook| { hook.paint(hook.context, self, .{ .fill = .{ .rect = clipped, .rgb = rgb & 0xffffff } }); return; }
         if (self.render_hook) |hook| if (hook.fill(hook.context, clipped, rgb & 0x00FF_FFFF)) return;
         const pixels = self.pixels orelse return;
         const color = self.xrgb(rgb & 0x00FF_FFFF);
@@ -160,6 +175,9 @@ pub const SceneBuffer = struct {
         if (source.len < needed) return;
 
         const clipped = self.paintClipRect(.{ .x = x, .y = y, .w = src_w, .h = src_h }) orelse return;
+        if (self.capturePicture(.{ .view = .{ .format = .xrgb, .width = w, .height = h, .stride = @as(usize, w) * 4,
+            .bytes = std.mem.sliceAsBytes(source[0..needed]) }, .viewport = .{ .x = x, .y = y, .w = src_w, .h = src_h },
+            .clip = clipped, .guest_w = w, .guest_h = h })) return;
         const pixels = self.pixels orelse return;
         const src_stride: usize = @intCast(w);
         const copy_count: usize = @intCast(clipped.w);
@@ -225,6 +243,10 @@ pub const SceneBuffer = struct {
         const bottom = @min(scene_clip.bottom(), image.viewport.bottom());
         if (right <= left or bottom <= top) return true;
 
+        if (self.capturePicture(.{ .view = .{ .format = .xrgb, .width = image.source_w, .height = image.source_h,
+            .stride = @as(usize, image.source_stride) * 4, .bytes = std.mem.sliceAsBytes(image.pixels[0..required]) },
+            .viewport = image.viewport, .clip = .{ .x = left, .y = top, .w = right - left, .h = bottom - top },
+            .source_x = image.source_x, .source_y = image.source_y, .guest_w = image.guest_w, .guest_h = image.guest_h })) return true;
         if (image.viewport.w == @as(i32, @intCast(image.guest_w)) and image.viewport.h == @as(i32, @intCast(image.guest_h))) {
             return self.blitXrgb32Identity(left, top, right, bottom, image);
         }
@@ -331,6 +353,10 @@ pub const SceneBuffer = struct {
 
         const viewport_width: u32 = @intCast(image.viewport.w);
         const viewport_height: u32 = @intCast(image.viewport.h);
+        if (self.capturePicture(.{ .view = .{ .format = .indexed, .width = image.source_w, .height = image.source_h,
+            .stride = image.source_stride, .bytes = image.indices[0..required], .palette = image.palette },
+            .viewport = image.viewport, .clip = .{ .x = left, .y = top, .w = right - left, .h = bottom - top },
+            .source_x = image.source_x, .source_y = image.source_y, .guest_w = image.guest_w, .guest_h = image.guest_h })) return true;
         if (viewport_width % image.guest_w == 0 and viewport_height % image.guest_h == 0) {
             const scale_x = viewport_width / image.guest_w;
             const scale_y = viewport_height / image.guest_h;
@@ -403,6 +429,9 @@ pub const SceneBuffer = struct {
         if (alpha.len < required) return false;
 
         const clipped = self.paintClipRect(.{ .x = x, .y = y, .w = @intCast(w), .h = @intCast(h) }) orelse return true;
+        if (self.capturePicture(.{ .view = .{ .format = .alpha, .width = w, .height = h, .stride = stride,
+            .bytes = alpha[0..required], .foreground = rgb }, .viewport = .{ .x = x, .y = y, .w = @intCast(w), .h = @intCast(h) },
+            .clip = clipped, .guest_w = w, .guest_h = h })) return true;
         const pixels = self.pixels orelse return false;
         const source_stride: usize = @intCast(stride);
         const source_x: usize = @intCast(clipped.x - x);
@@ -434,11 +463,11 @@ pub const SceneBuffer = struct {
         const pixel_count = std.math.mul(usize, @as(usize, w), @as(usize, h)) catch return false;
         const required = std.math.mul(usize, pixel_count, @sizeOf(u32)) catch return false;
         if (source.len != required) return false;
-        const pixels = self.pixels orelse return false;
         const scene_clip = self.paintClipRect(clip) orelse return true;
 
         const scaled_width = std.math.mul(i64, @as(i64, w), @as(i64, scale)) catch return false;
         const scaled_height = std.math.mul(i64, @as(i64, h), @as(i64, scale)) catch return false;
+        if (scaled_width > std.math.maxInt(i32) or scaled_height > std.math.maxInt(i32)) return false;
         const source_left: i64 = x;
         const source_top: i64 = y;
         const source_right = std.math.add(i64, source_left, scaled_width) catch return false;
@@ -449,6 +478,11 @@ pub const SceneBuffer = struct {
         const bottom = @min(@as(i64, scene_clip.bottom()), source_bottom);
         if (right <= left or bottom <= top) return true;
 
+        if (self.capturePicture(.{ .view = .{ .format = .argb, .width = w, .height = h, .stride = @as(usize, w) * 4,
+            .bytes = source }, .viewport = .{ .x = x, .y = y, .w = @intCast(scaled_width), .h = @intCast(scaled_height) },
+            .clip = .{ .x = @intCast(left), .y = @intCast(top), .w = @intCast(right - left), .h = @intCast(bottom - top) },
+            .guest_w = w, .guest_h = h })) return true;
+        const pixels = self.pixels orelse return false;
         var destination_y = top;
         while (destination_y < bottom) : (destination_y += 1) {
             const source_y: usize = @intCast(@divFloor(destination_y - source_top, @as(i64, scale)));
@@ -467,6 +501,14 @@ pub const SceneBuffer = struct {
                 pixels[destination_index] = self.blend(pixels[destination_index], argb, alpha);
             }
         }
+        return true;
+    }
+
+    pub fn capturePicture(self: *SceneBuffer, picture: primitive_image.Picture) bool {
+        const hook = self.primitive_hook orelse return false;
+        var clipped = picture;
+        clipped.clip = self.paintClipRect(picture.clip) orelse return true;
+        hook.paint(hook.context, self, .{ .picture = clipped });
         return true;
     }
 };

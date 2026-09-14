@@ -6,12 +6,14 @@ const gfx = @import("r4gfx");
 const gpu = @import("composition_gpu.zig");
 const layers = @import("composition_layers.zig");
 const renderer = @import("gfx_renderer.zig");
+const primitives = @import("primitive_frame.zig");
 pub const Progress = enum { idle, pending, visible, failed };
 pub const Worker = struct {
     graphics: *renderer.Renderer,
     sys: r4os.r4sys.Context,
     cache: layers.Cache,
     engine: gpu.Engine,
+    primitives: primitives.Frame,
     thread: ?r4os.JoinHandle = null,
     done: u32 = 0,
     preparation_error: ?gpu.Error = null,
@@ -28,8 +30,10 @@ pub const Worker = struct {
     pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context) ?*Worker {
         const graphics = renderer.Renderer.create(allocator, raw) orelse return null;
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
+        const primitive_frame = primitives.Frame.init(allocator) catch { allocator.destroy(self); graphics.destroy(); return null; };
         self.* = .{ .graphics = graphics, .sys = sys, .cache = layers.Cache.init(allocator, 128 * 1024 * 1024),
-            .engine = gpu.Engine.init(&graphics.client, &graphics.device) };
+            .engine = gpu.Engine.init(&graphics.client, &graphics.device), .primitives = primitive_frame };
+        self.cache.recording = &self.primitives;
         return self;
     }
     pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.awaiting_visible; }
@@ -141,6 +145,6 @@ pub const Worker = struct {
         }
         self.engine.close() catch return;
         const allocator = self.graphics.allocator;
-        self.cache.deinit(); self.graphics.destroy(); allocator.destroy(self);
+        self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
     }
 };

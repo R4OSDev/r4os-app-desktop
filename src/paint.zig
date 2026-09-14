@@ -419,6 +419,7 @@ fn glyph(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: 
 
 fn glyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32) void {
     if (x < 0 or y < 0) return;
+    if (captureGlyphScene(scene, draw, font_id, revision, layout, x, y, codepoint, fg, bg, scene.paintBounds())) return;
     const w = layout.cell_width;
     const h = layout.cell_height;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
@@ -443,10 +444,21 @@ fn glyphClipped(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, l
 fn glyphSceneClipped(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, bounds: surface.Rect) void {
     const layer_bounds = scene.clipRect(bounds) orelse return;
     const clipped = clipGlyphCell(layer_bounds, x, y, layout.cell_width, layout.cell_height, scene.fullRect().right(), scene.fullRect().bottom()) orelse return;
+    if (captureGlyphScene(scene, draw, font_id, revision, layout, x, y, codepoint, fg, bg, clipped)) return;
     var pixels: [glyph_max_w * glyph_max_h]u32 = undefined;
     const count = layout.cell_width * layout.cell_height;
     rasterizeGlyph(draw, font_id, revision, layout, codepoint, fg, bg, pixels[0..count]);
     blitClippedGlyphScene(scene, pixels[0..count], layout.cell_width, x, y, clipped);
+}
+
+fn captureGlyphScene(scene: *scene_buffer.SceneBuffer, draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, x: i32, y: i32, codepoint: u32, fg: u32, bg: u32, clip: surface.Rect) bool {
+    if (scene.primitive_hook == null) return false;
+    const coverage = glyphCoverage(draw, font_id, revision, layout, codepoint);
+    return scene.capturePicture(.{ .view = .{ .format = .glyph, .width = @intCast(layout.cell_width), .height = @intCast(layout.cell_height),
+        .stride = 0, .rows = &coverage.rows, .foreground = fg, .background = bg,
+        .identity = .{ .font = font_id, .revision = revision, .glyph = codepoint } },
+        .viewport = .{ .x = x, .y = y, .w = @intCast(layout.cell_width), .h = @intCast(layout.cell_height) },
+        .clip = clip, .guest_w = @intCast(layout.cell_width), .guest_h = @intCast(layout.cell_height) });
 }
 
 fn rasterizeGlyph(draw: *const r4os.r4draw.Context, font_id: u32, revision: u32, layout: FontLayout, codepoint: u32, fg: u32, bg: u32, pixels: []u32) void {
