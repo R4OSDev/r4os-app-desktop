@@ -890,6 +890,7 @@ pub const App = struct {
             .reason = switch (state.reason) {
                 r4os.abi.audio_output_reason_preferred => "Saved output selected",
                 r4os.abi.audio_output_reason_auto_hdmi => "Automatic: connected HDMI",
+                r4os.abi.audio_output_reason_auto_display_port => "Automatic: connected DisplayPort",
                 r4os.abi.audio_output_reason_auto_analog => "Automatic: analog output",
                 r4os.abi.audio_output_reason_preferred_unavailable => "Saved output unavailable; using fallback",
                 r4os.abi.audio_output_reason_none_available => "No available audio output",
