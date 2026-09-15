@@ -35,6 +35,10 @@ pub const table: provider.c.DeviceV1 = .{
     .swapchain_resize = provider.swapchain.resize,
     .swapchain_close = provider.swapchain.close,
     .presentation_plan = provider.swapchain.plan,
+    .memory_info = provider.memoryInfo,
+    .memory_trim = provider.memoryTrim,
+    .resource_resident = provider.resourceResident,
+    .resource_priority = provider.resourcePriority,
 };
 pub const Fixture = struct {
     table_override: ?*const provider.c.DeviceV1 = null,

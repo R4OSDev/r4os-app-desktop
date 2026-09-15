@@ -22,6 +22,17 @@ pub fn check(comptime decode: anytype) !void {
     const colors = try gfx.ColorV1Client.init(&raw);
     const scratch = try t.allocator.alignedAlloc(u8, .@"16", 2 * 1024 * 1024);
     defer t.allocator.free(scratch);
+    // The actual image decoder accepts screenshots with correct row order,
+    // channels and opaque XRGB; no second encoder/parser imitation is used.
+    var bitmap: [54 + 4 * 4]u8 = undefined;
+    const screenshot = @import("screenshot.zig");
+    @memcpy(bitmap[0..54], &(try screenshot.bitmapHeader(2, 2)));
+    const corners = [_]u32{ 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
+    @memcpy(bitmap[54..], std.mem.sliceAsBytes(&corners));
+    var decoded: [4]u32 = undefined;
+    _ = try images.decode(&bitmap, "image/bmp", &decoded, scratch);
+    try t.expectEqualSlices(u32, &.{ 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff }, &decoded);
+    try t.expectError(error.ImageSize, screenshot.bitmapHeader(0xffffffff, 0xffffffff));
     var profile: [2048]u8 = undefined;
     var profile_bytes: u64 = 0;
     const definition: gfx.R4GfxColorProfileDefinition = .{ .version = 1, .size = @sizeOf(gfx.R4GfxColorProfileDefinition), .color_model = gfx.color_model_rgb, .curve = gfx.color_curve_power, .white_x = 31270, .white_y = 32900, .red_x = 64000, .red_y = 33000, .green_x = 30000, .green_y = 60000, .blue_x = 15000, .blue_y = 6000, .gamma_red = 100000, .gamma_green = 100000, .gamma_blue = 100000, .reserved = 0 };

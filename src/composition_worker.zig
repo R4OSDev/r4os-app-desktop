@@ -7,6 +7,8 @@ const gpu = @import("composition_gpu.zig");
 const layers = @import("composition_layers.zig");
 const renderer = @import("gfx_renderer.zig");
 const primitives = @import("primitive_frame.zig");
+const remote = @import("remote_capture.zig");
+const geometry = @import("output_geometry.zig");
 pub const Progress = enum { idle, pending, visible, discarded, failed };
 pub const Worker = struct {
     graphics: *renderer.Renderer,
@@ -14,6 +16,12 @@ pub const Worker = struct {
     cache: layers.Cache,
     engine: gpu.Engine,
     primitives: primitives.Frame,
+    capture: remote.Capture,
+    capture_demand: bool = false,
+    capture_reset: bool = false,
+    prepare_capture: bool = false,
+    capture_cursor: remote.Cursor = .{},
+    capture_damage: ?@import("surface.zig").Rect = null,
     thread: ?r4os.JoinHandle = null,
     done: u32 = 0,
     preparation_error: ?gpu.Error = null,
@@ -43,24 +51,42 @@ pub const Worker = struct {
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
         const primitive_frame = primitives.Frame.init(allocator) catch { allocator.destroy(self); graphics.destroy(); return null; };
         self.* = .{ .graphics = graphics, .sys = sys, .cache = layers.Cache.init(allocator, 128 * 1024 * 1024),
-            .engine = engine, .primitives = primitive_frame };
+            .engine = engine, .primitives = primitive_frame,
+            .capture = remote.Capture.init(allocator, &graphics.client, &graphics.colors, &graphics.device) };
         self.cache.recording = &self.primitives;
         self.engine.head = head;
         return self;
     }
     pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.engine.pending() or self.awaiting_visible; }
-    pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible; }
+    pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible or self.capture.needsPolling(); }
+    fn captureView(self: *const Worker) geometry.topology.Viewport {
+        return self.cache.view orelse .{ .pixel_w = @intCast(self.cache.screen.w), .pixel_h = @intCast(self.cache.screen.h) };
+    }
+    fn recordCapture(self: *Worker) void {
+        const view = self.captureView();
+        self.capture.record(self.engine.output_index, self.cache.frame,
+            self.capture_damage orelse (geometry.logical(view) catch return), view, self.capture_cursor);
+    }
+    fn pollCapture(self: *Worker, now: u64) void {
+        if (self.capture_reset) { self.capture.invalidate(); self.capture_reset = false; }
+        self.capture.setDemand(self.capture_demand);
+        self.capture.poll(now);
+        self.engine.readback_pin = self.capture.reader.source;
+    }
     pub fn blocksCapture(self: *const Worker) bool {
         return !self.failure_reported and (self.thread != null or self.awaiting_visible or
             self.engine.captureBlocked(self.sys.monotonicNanoseconds() orelse 0));
     }
     pub fn available(self: *Worker, revision: u64) bool {
-        if (self.blocksCapture() or self.failed_revision == revision) return false;
+        if (self.thread != null or self.blocksCapture() or self.failed_revision == revision) return false;
         self.revision = revision;
         const info = self.graphics.info() orelse { if (self.engine.head != null) self.fail(error.Graphics); return false; };
         const required = self.engine.requiredOperations();
         if (info.gpu_operations & required != required) { if (self.engine.head != null) self.fail(error.Unsupported); return false; }
         if (self.device_generation != info.device_generation or self.reset_generation != info.reset_generation) {
+            self.capture.reader.cancel(error.Stale);
+            self.capture.reader.valid = false; self.capture.view = null;
+            self.pollCapture(self.sys.monotonicNanoseconds() orelse 0);
             self.engine.invalidate();
             self.device_generation = info.device_generation; self.reset_generation = info.reset_generation;
         }
@@ -76,8 +102,12 @@ pub const Worker = struct {
         const now = self.sys.monotonicNanoseconds() orelse return false;
         self.deadline = std.math.add(u64, now, 5 * std.time.ns_per_s) catch return false;
         self.failure_reported = false; self.preparation_error = null;
-        if (self.engine.prepared(&self.cache)) {
+        self.capture.setDemand(self.capture_demand);
+        self.prepare_capture = self.capture_demand and now >= self.capture.retry_ns;
+        if (self.engine.prepared(&self.cache) and (!self.prepare_capture or
+            self.capture.prepared(self.captureView(), self.engine.output_format, self.engine.output_color))) {
             self.engine.begin(&self.cache, self.deadline) catch |err| { self.fail(err); return false; };
+            self.recordCapture();
             return true;
         }
         @atomicStore(u32, &self.done, 0, .release);
@@ -92,10 +122,17 @@ pub const Worker = struct {
         const self: *Worker = @ptrFromInt(raw);
         defer @atomicStore(u32, &self.done, 1, .release);
         while (true) {
+            self.capture.poll(self.sys.monotonicNanoseconds() orelse self.deadline);
+            self.engine.readback_pin = self.capture.reader.source;
             self.engine.prepare(&self.cache, self.deadline) catch |err| {
                 const now = self.sys.monotonicNanoseconds() orelse self.deadline;
                 if (err == error.Busy and now < self.deadline) { self.sys.sleepTicks(1); continue; }
                 self.preparation_error = err; return -1;
+            };
+            if (self.prepare_capture) self.capture.prepare(self.captureView(), self.engine.output_format, self.engine.output_color) catch {
+                // Capture admission failure cannot fail the local compositor.
+                self.capture.redraw = true;
+                self.capture.retry_ns = (self.sys.monotonicNanoseconds() orelse self.deadline) +| std.time.ns_per_s;
             };
             return 0;
         }
@@ -112,6 +149,7 @@ pub const Worker = struct {
         return true;
     }
     fn fail(self: *Worker, reason: gpu.Error) void {
+        self.capture.reader.cancel(error.Stale);
         self.failed_revision = self.revision;
         self.awaiting_visible = false;
         // Once retirement finished, reporting the fault must not start a
@@ -127,10 +165,13 @@ pub const Worker = struct {
     pub fn poll(self: *Worker, draw: *const r4os.r4draw.Context) Progress {
         if (self.thread != null) {
             if (!self.collectThread()) return .pending;
-            if (self.preparation_error) |err| self.fail(err) else
-                self.engine.begin(&self.cache, self.deadline) catch |err| self.fail(err);
+            if (self.preparation_error) |err| self.fail(err) else {
+                self.engine.begin(&self.cache, self.deadline) catch |err| { self.fail(err); return .failed; };
+                self.recordCapture();
+            }
         }
         const now = self.sys.monotonicNanoseconds() orelse self.deadline;
+        self.pollCapture(now);
         if (self.engine.active()) {
             const result = self.engine.advance(&self.cache, now);
             if (self.engine.fault) |err| self.fail(err);
@@ -138,6 +179,10 @@ pub const Worker = struct {
         } else self.engine.pollPresentation() catch |err| self.fail(err);
         if (self.engine.completion()) |done| {
             self.completed_frame = done.frame; self.completed_status = done.status;
+            if (done.status.result == 1 or done.status.result == 2) {
+                self.capture.complete(done.status.frame.slot - 1, done.status.frame.image, now);
+                self.engine.readback_pin = self.capture.reader.source;
+            }
             if (done.status.result == 1) { self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible; }
             if (done.status.result == 2) { self.frames_completed +|= 1; return .discarded; }
             if (done.status.result == 3) return .discarded;
@@ -154,6 +199,8 @@ pub const Worker = struct {
                     info.backend.device_generation != fence.device_generation or info.backend.reset_generation != fence.reset_generation) continue;
                 if (info.flags & r4os.abi.display_presentation_flag_lost != 0) { self.fail(error.Graphics); break; }
                 if (info.visible_ns != 0 and info.source_timeline == fence.timeline and info.source_point == fence.point) {
+                    self.capture.complete(self.engine.output_index, self.engine.outputs[self.engine.output_index].resource, now);
+                    self.engine.readback_pin = self.capture.reader.source;
                     self.completed_frame = self.engine.frame; self.completed_status = null;
                     self.awaiting_visible = false; self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible;
                 }
@@ -168,17 +215,20 @@ pub const Worker = struct {
     }
     pub fn destroy(self: *Worker) void {
         while (!self.collectThread()) self.sys.sleepTicks(1);
+        self.capture_demand = false; self.capture.setDemand(false);
         if (self.engine.active()) self.engine.cancel(error.State);
         // A quarantined device may retain common BO jobs until physical
         // teardown. Its provider storage must outlive those receipts.
         const now = self.sys.monotonicNanoseconds() orelse 0;
         const end = now +| std.time.ns_per_s;
-        while (self.engine.active()) {
+        while (self.engine.active() or self.capture.reader.pending()) {
+            self.pollCapture(self.sys.monotonicNanoseconds() orelse end);
             _ = self.engine.advance(&self.cache, self.sys.monotonicNanoseconds() orelse end);
             if ((self.sys.monotonicNanoseconds() orelse end) >= end) return;
             self.sys.sleepTicks(1);
         }
         while (true) {
+            self.capture.close() catch return;
             self.engine.close() catch |err| {
                 if (err != error.Busy or (self.sys.monotonicNanoseconds() orelse end) >= end) return;
                 self.sys.sleepTicks(1); continue;
@@ -190,6 +240,9 @@ pub const Worker = struct {
     }
     pub fn tryDestroy(self: *Worker) bool {
         if (!self.collectThread()) return false;
+        self.capture_demand = false;
+        self.pollCapture(self.sys.monotonicNanoseconds() orelse self.deadline);
+        self.capture.close() catch return false;
         if (self.engine.active()) {
             if (self.engine.fault == null) self.engine.cancel(error.State);
             _ = self.engine.advance(&self.cache, self.sys.monotonicNanoseconds() orelse self.deadline);

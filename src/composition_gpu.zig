@@ -35,6 +35,9 @@ pub const Engine = struct {
     acquired: ?gfx.R4GfxSwapchainFrame = null,
     chain_frames: [gfx.swapchain_image_capacity]u64 = @splat(0),
     reported: [gfx.swapchain_image_capacity]bool = @splat(false),
+    // A completed readback copy releases this pin before CPU conversion.
+    // Resource retain alone does not prevent a swapchain image being reused.
+    readback_pin: gfx.R4GfxResource = empty,
     chain_closing: bool = false,
     input_ns: u64 = 0,
     present_intent: u32 = 0,
@@ -120,6 +123,7 @@ pub const Engine = struct {
     }
     pub fn captureBlocked(self: *const Engine, now: u64) bool {
         if (self.active()) return true;
+        if (self.chain.slot == 0 and self.readback_pin.slot != 0) return true;
         if (self.chain.slot == 0 or self.acquired != null) return false;
         const status = self.chain_status orelse return false;
         if (status.life >= 2) return false; // Let the owner rebuild/fall back.
@@ -147,7 +151,7 @@ pub const Engine = struct {
         // Reporting visibility and releasing storage are independent. A
         // front buffer can already be visible while scanout still reads it.
         for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, i| {
-            if (value.phase != 4 or value.held_flags != 0 or !self.reported[i]) continue;
+            if (value.phase != 4 or value.held_flags != 0 or !self.reported[i] or std.meta.eql(value.frame.image, self.readback_pin)) continue;
             const rc = self.client.swapchain_release(self.device, &self.chain, &value.frame);
             if (rc == gfx.status_busy) continue;
             try accepted(rc);
@@ -336,6 +340,7 @@ pub const Engine = struct {
     }
     pub fn begin(self: *Engine, cache: *const layers.Cache, deadline: u64) Error!void {
         if (self.active() or !self.drained()) return error.Busy;
+        if (self.chain.slot == 0 and self.readback_pin.slot != 0) return error.Busy;
         if (cache.collecting or cache.failure != null or cache.command_count == 0 or self.output().resource.slot == 0 or self.staging.resource.slot == 0)
             return error.State;
         // The first command of a complete desktop capture is its opaque
@@ -625,7 +630,7 @@ pub const Engine = struct {
         try accepted(self.client.render(self.device, &.{ .commands = @intFromPtr(&command), .command_count = 1, .flags = 0, .pixel_budget = pixels }, &stats));
     }
     pub fn close(self: *Engine) Error!void {
-        if (self.active() or !self.drained()) return error.Busy;
+        if (self.active() or !self.drained() or self.readback_pin.slot != 0) return error.Busy;
         try self.closeChain();
         for (&self.images) |*value| try self.releaseImage(value);
         for (&self.assets) |*value| try self.releaseImage(value);
@@ -637,6 +642,7 @@ pub const Engine = struct {
         };
     }
     fn closeChain(self: *Engine) Error!void {
+        if (self.readback_pin.slot != 0) return error.Busy;
         if (self.chain.slot == 0) return;
         try accepted(self.client.swapchain_close(self.device, &self.chain));
         self.chain = std.mem.zeroes(gfx.R4GfxSwapchain); self.presentation = null; self.chain_status = null;

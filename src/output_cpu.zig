@@ -11,9 +11,16 @@ const composition = @import("composition_software.zig");
 const catalog = @import("r4gfx_desktop_outputs");
 const Profile = catalog.profiles.Owner(gfx);
 const empty = std.mem.zeroes(gfx.R4GfxResource);
+const remote = @import("remote_capture.zig");
 pub const Output = struct {
     graphics: *renderer.Renderer,
     draw: r4os.r4draw.Context,
+    sys: r4os.r4sys.Context,
+    capture: remote.Capture,
+    capture_cursor: remote.Cursor = .{},
+    capture_damage: ?@import("surface.zig").Rect = null,
+    serial: u64 = 0,
+    reported: [3]bool = @splat(false),
     view: geometry.topology.Viewport,
     target: a.GfxOutputTarget,
     references: [3]a.GfxBufferReference = @splat(.{}),
@@ -43,12 +50,13 @@ pub const Output = struct {
         self.profile = try Profile.openFile(self.graphics.allocator, self.graphics.colors, sys, choice.profilePath(), choice.intent, choice.flags);
     }
 
-    pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, draw: r4os.r4draw.Context,
+    pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, draw: r4os.r4draw.Context, sys: r4os.r4sys.Context,
         view: geometry.topology.Viewport, target: a.GfxOutputTarget) ?*Output
     {
         const graphics = renderer.Renderer.createForAdapter(allocator, raw, target.adapter_id) orelse return null;
         const self = allocator.create(Output) catch { graphics.destroy(); return null; };
-        self.* = .{ .graphics = graphics, .draw = draw, .view = view, .target = target };
+        self.* = .{ .graphics = graphics, .draw = draw, .sys = sys, .view = view, .target = target,
+            .capture = remote.Capture.init(allocator, &graphics.client, &graphics.colors, &graphics.device) };
         // Keep partial resources addressable until cleanup succeeds.
         self.prepare() catch |err| { self.lost = true; self.prepare_error = err; };
         return self;
@@ -87,6 +95,8 @@ pub const Output = struct {
         if (status != success) return error.Graphics;
     }
     pub fn poll(self: *Output) void {
+        const now = self.sys.monotonicNanoseconds() orelse 0;
+        self.capture.poll(now);
         if (self.chain.slot == 0) return;
         var status: gfx.R4GfxSwapchainStatus = undefined;
         const client = &self.graphics.client; const device = &self.graphics.device;
@@ -94,20 +104,38 @@ pub const Output = struct {
         if (rc != gfx.status_ok) { if (rc != gfx.status_busy) self.lost = true; return; }
         if (status.life >= 2) self.lost = true;
         self.pending = false;
-        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }) |frame| {
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |frame, i| {
             if (frame.phase == 0 or frame.phase == 1) continue;
-            if (frame.phase != 4 or frame.held_flags != 0) { self.pending = true; continue; }
+            if (frame.phase != 4) { self.pending = true; continue; }
+            if (!self.reported[i]) {
+                self.reported[i] = true;
+                if (frame.result == 1 or frame.result == 2) {
+                    self.completed +|= 1;
+                    self.capture.complete(i, frame.frame.image, now);
+                } else {
+                    self.capture.discarded(i);
+                    if (frame.result == 3) self.discarded +|= 1
+                    else { self.failed +|= 1; self.lost = true; }
+                }
+                if (frame.result == 1 and frame.visible_ns != 0) self.visible +|= 1;
+            }
+            if (frame.held_flags != 0 or std.meta.eql(frame.frame.image, self.capture.reader.source)) { self.pending = true; continue; }
             if (client.swapchain_release(device, &self.chain, &frame.frame) != gfx.status_ok) { self.pending = true; continue; }
-            if (frame.result == 1 or frame.result == 2) self.completed +|= 1
-            else if (frame.result == 3) self.discarded +|= 1
-            else { self.failed +|= 1; self.lost = true; }
-            if (frame.result == 1 and frame.visible_ns != 0) self.visible +|= 1;
+            self.reported[i] = false;
         }
     }
     pub fn begin(self: *Output, input_ns: u64) ?*scene_buffer.SceneBuffer {
         if (!self.ready or self.lost or self.acquired != null or self.mapping.lease.id != 0) return null;
         self.poll();
         if (self.lost) return null;
+        if (self.capture.wanted and (self.sys.monotonicNanoseconds() orelse 0) >= self.capture.retry_ns) {
+            const prepared = if (self.profile != null) self.capture.prepareProfile(self.view)
+                else self.capture.prepare(self.view, gfx.format_xrgb8888, @import("r4gfx_readback").sdr());
+            prepared catch {
+                self.capture.redraw = true;
+                self.capture.retry_ns = (self.sys.monotonicNanoseconds() orelse 0) +| std.time.ns_per_s;
+            };
+        }
         var frame: gfx.R4GfxSwapchainFrame = undefined;
         const rc = self.graphics.client.swapchain_acquire(&self.graphics.device, &self.chain, input_ns, &frame);
         if (rc != gfx.status_ok) {
@@ -140,6 +168,9 @@ pub const Output = struct {
         const frame = self.acquired orelse return false;
         if (self.scene.failure != null or self.mapping.lease.id == 0) { self.abandon(); return false; }
         self.color_composition.finish(&self.graphics.colors, &self.scene) catch { self.abandon(); return false; };
+        self.serial +|= 1;
+        self.capture.record(frame.slot - 1, self.serial, self.capture_damage orelse (geometry.logical(self.view) catch unreachable), self.view, self.capture_cursor);
+        self.capture.stageProfile(frame.slot - 1, self.scene.pixels.?, self.sys.monotonicNanoseconds() orelse 0);
         if (self.profile != null or self.view.rotation != .normal or self.view.scale != 120) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
             transform(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]);
@@ -158,13 +189,15 @@ pub const Output = struct {
         self.mapping = .{}; self.scene.reset();
         const rc = self.graphics.client.swapchain_present(&self.graphics.device, &self.chain,
             &.{ .version = 1, .size = @sizeOf(gfx.R4GfxSwapchainPresent), .frame = frame,
-                .render_job = std.mem.zeroes(gfx.R4GfxJob), .deadline_ns = deadline, .intent = 0, .blockers = gfx.present_block_cursor });
+                .render_job = std.mem.zeroes(gfx.R4GfxJob), .deadline_ns = deadline, .intent = 0,
+                .blockers = gfx.present_block_cursor | @as(u32, if (self.capture.wanted) gfx.present_block_readers else 0) });
         if (rc != gfx.status_ok) {
             self.abandon();
             if (rc != gfx.status_busy and rc != gfx.status_occluded) self.lost = true;
             return false;
         }
         self.acquired = null; self.pending = true;
+        self.reported[frame.slot - 1] = false;
         self.last_submitted = frame.slot - 1;
         return true;
     }
@@ -176,12 +209,16 @@ pub const Output = struct {
         }
         self.scene.reset();
         if (self.acquired) |frame| {
+            self.capture.discarded(frame.slot - 1);
             if (self.graphics.client.swapchain_release(&self.graphics.device, &self.chain, &frame) != gfx.status_ok) { self.lost = true; return; }
             self.acquired = null;
         }
     }
     /// False leaves every retained owner in place for the next desktop cycle.
     pub fn destroy(self: *Output) bool {
+        self.capture.setDemand(false);
+        self.capture.poll(self.sys.monotonicNanoseconds() orelse 0);
+        self.capture.close() catch return false;
         self.abandon();
         if (self.mapping.lease.id != 0 or self.acquired != null) return false;
         if (self.chain.slot != 0) {

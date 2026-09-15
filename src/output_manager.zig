@@ -337,7 +337,7 @@ pub const Manager = struct {
             if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
             if (slot.gpu == null and entry.presentation.format == a.gfx_buffer_format_xrgb8888 and
                 (entry.color == null or profile_supported) and entry.presentation.flags & a.display_presentation_info_system_source != 0)
-                slot.software = cpu.Output.create(self.allocator, self.raw, self.draw, view, entry.target);
+                slot.software = cpu.Output.create(self.allocator, self.raw, self.draw, self.sys, view, entry.target);
             if (slot.software == null or slot.software.?.lost) {
                 if (!std.meta.eql(self.reported_failure, entry.target)) {
                     var bytes: [256]u8 = undefined;
@@ -422,7 +422,7 @@ pub const Manager = struct {
         for (&self.slots) |*slot| {
             if (slot.logical_index == null and (slot.gpu != null or slot.software != null)) return true;
             if (slot.gpu) |owner| if (owner.needsPolling()) return true;
-            if (slot.software) |owner| if (owner.pending) return true;
+            if (slot.software) |owner| if (owner.pending or owner.capture.needsPolling()) return true;
         }
         return false;
     }

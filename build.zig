@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
             libraries_dep.namedLazyPath("r4img_zig_binding"),
             libraries_dep.namedLazyPath("r4gfx_zig_binding"),
             libraries_dep.namedLazyPath("r4gfx_desktop_outputs"),
+            libraries_dep.namedLazyPath("r4gfx_readback"),
         },
     });
 
@@ -26,6 +27,9 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     r4gfx.addImport("r4os", host_r4os);
+    const readback = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4gfx_readback"), .target = test_target });
+    readback.addImport("r4os", host_r4os);
+    readback.addImport("r4gfx", r4gfx);
     const topology = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4gfx_desktop_outputs"), .target = test_target });
     topology.addImport("r4os", host_r4os);
     const r4nv_binding = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4nv_zig_binding"), .target = test_target });
@@ -146,6 +150,7 @@ pub fn build(b: *std.Build) void {
     compositor_module.addImport("png_fixture", png_fixture);
     compositor_module.addImport("raster_fixture", raster_fixture);
     compositor_module.addImport("r4gfx", r4gfx);
+    compositor_module.addImport("r4gfx_readback", readback);
     compositor_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const compositor_tests = b.addTest(.{ .root_module = compositor_module });
     const gui_shape_renderer_module = b.createModule(.{

@@ -343,6 +343,8 @@ pub const App = struct {
     activity_wait_supported: bool = true,
     last_input_ns: u64 = 0,
     screen_power: @import("screen_power.zig").Owner = .{},
+    screenshot_job: ?*@import("screenshot.zig").Job = null,
+    screenshot_last: ?@import("screenshot.zig").Result = null,
     activity_wait_wakes: u64 = 0,
     activity_wait_timeouts: u64 = 0,
     double_click_ticks: u64 = 25,
@@ -493,6 +495,8 @@ pub const App = struct {
     },
 
     pub fn run(self: *App) i32 {
+        defer if (self.screenshot_job) |job| job.close();
+        self.resetCaptureSource();
         self.screen_w = fallbackDimension(self.ctx.screenWidth(), 1280);
         self.screen_h = fallbackDimension(self.ctx.screenHeight(), 720);
         _ = self.syncOutputRevision();
@@ -635,6 +639,7 @@ pub const App = struct {
         } else false;
         if (snapshot.revision == self.output_revision and !topology_changed) return false;
         self.output_revision = snapshot.revision;
+        self.resetCaptureSource();
         // A mode receipt publishes public geometry before this revision.
         // Plain receiver changes keep the same scene allocation and bounds.
         self.syncScreenGeometry();
@@ -1082,8 +1087,131 @@ pub const App = struct {
         if (consumers == self.remote_frame_consumers) return false;
         const became_active = self.remote_frame_consumers == 0 and consumers != 0;
         self.remote_frame_consumers = consumers;
+        self.syncCaptureDemand();
         if (became_active) self.invalidateFull();
         return became_active;
+    }
+
+    fn syncCaptureDemand(self: *App) void {
+        const wanted = self.remote_frame_consumers != 0;
+        const managed = self.managedOutputs();
+        if (self.composition) |owner| owner.capture_demand = wanted and !managed;
+        if (self.outputs) |manager| for (&manager.slots) |*slot| {
+            const primary = wanted and managed and slot.logical_index != null and slot.logical_index.? == manager.layout.primary and
+                !slot.disabled and !slot.sleeping and !slot.failed and !slot.reconfiguring;
+            if (slot.gpu) |owner| owner.capture_demand = primary;
+            if (slot.software) |owner| owner.capture.setDemand(primary);
+        };
+    }
+
+    fn resetCaptureSource(self: *App) void {
+        _ = self.ctx.desk.remoteFrameSourceReset();
+        if (self.composition) |owner| owner.capture_reset = true;
+        if (self.outputs) |manager| for (&manager.slots) |*slot| {
+            if (slot.gpu) |owner| owner.capture_reset = true;
+            if (slot.software) |owner| owner.capture.invalidate();
+        };
+    }
+
+    fn captureCursor(self: *const App) @import("remote_capture.zig").Cursor {
+        return .{ .x = self.cursor_x, .y = self.cursor_y, .visible = !self.terminal_mode,
+            .separate = !self.cursor_controller.software and !self.managedOutputs() };
+    }
+
+    fn startScreenshot(self: *App) void {
+        if (self.screenshot_job != null) return;
+        self.screenshot_last = null;
+        self.screenshot_job = @import("screenshot.zig").Job.start(self.ctx.allocator(), self.ctx.sys, self.ctx.desk);
+        if (self.screenshot_job == null) self.ctx.println("Screenshot unavailable");
+    }
+
+    fn smokeCaptureContract(self: *App) void {
+        var stats: r4os.abi.RemoteFrameCaptureStats = .{};
+        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 0 or stats.leases != 0 or stats.live_bytes != 0)
+            self.windowIdleSmokeFailed("capture-no-demand");
+        if (self.ctx.remoteFrameAcquire() != 1) self.windowIdleSmokeFailed("capture-acquire");
+        _ = self.pollRemoteFrameDemand(); self.invalidateFull();
+        var info: r4os.abi.RemoteFrameInfo = .{};
+        const deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s;
+        while (self.ctx.remoteFrameInfo(&info) != 0) {
+            if ((self.ctx.sys.monotonicNanoseconds() orelse deadline) >= deadline) self.windowIdleSmokeFailed("capture-completion");
+            self.smokePumpFrames(1);
+        }
+        if (info.width != self.screen_w or info.height != self.screen_h) self.windowIdleSmokeFailed("capture-geometry");
+        var first: r4os.abi.RemoteFrameLease = .{};
+        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &first) != 0) self.windowIdleSmokeFailed("capture-first-lease");
+        const original: [*]const u32 = @ptrFromInt(first.pixels_addr);
+        const old_pixels = original[0..16].*;
+        const pixels = [_]u32{ 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
+        info = .{ .width = 2, .height = 2, .stride_pixels = 2, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
+        if (self.ctx.desk.remoteFramePublish(&info, &pixels) < 0) self.windowIdleSmokeFailed("capture-resize-publish");
+        var second: r4os.abi.RemoteFrameLease = .{};
+        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &second) != 0) self.windowIdleSmokeFailed("capture-resize-lease");
+        _ = self.ctx.desk.remoteFrameSourceReset();
+        info = .{ .width = 3, .height = 1, .stride_pixels = 3, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
+        if (self.ctx.desk.remoteFramePublish(&info, pixels[0..3]) < 0) self.windowIdleSmokeFailed("capture-reset-publish");
+        var third: r4os.abi.RemoteFrameLease = .{};
+        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &third) != 0 or third.epoch == second.epoch or
+            !std.mem.eql(u32, &old_pixels, original[0..16]) or !std.mem.eql(u32, &pixels, @as([*]const u32, @ptrFromInt(second.pixels_addr))[0..4]))
+            self.windowIdleSmokeFailed("capture-retained-snapshot");
+        info = .{ .width = 4, .height = 1, .stride_pixels = 4, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
+        if (self.ctx.desk.remoteFramePublish(&info, &pixels) < 0) self.windowIdleSmokeFailed("capture-bounded-publish");
+        var fourth: r4os.abi.RemoteFrameLease = .{};
+        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &fourth) != r4os.abi.remote_frame_error_unavailable or fourth.id != 0)
+            self.windowIdleSmokeFailed("capture-snapshot-limit");
+        if (self.ctx.desk.remoteFrameSnapshotRelease(&second) != 0 or self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &fourth) != 0)
+            self.windowIdleSmokeFailed("capture-snapshot-reuse");
+        if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\RFDIAG.R4X", "/EXITOWNED", "RFDIAG capture:", "RFDIAG result: OK"))
+            self.windowIdleSmokeFailed("capture-process-exit");
+        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 1 or stats.leases != 3 or stats.snapshots > 3)
+            self.windowIdleSmokeFailed("capture-process-retirement");
+        for ([_]r4os.abi.RemoteFrameLease{ first, third, fourth }) |lease| if (self.ctx.desk.remoteFrameSnapshotRelease(&lease) != 0)
+            self.windowIdleSmokeFailed("capture-release");
+        if (self.ctx.remoteFrameRelease() != 0) self.windowIdleSmokeFailed("capture-last-reader");
+        _ = self.pollRemoteFrameDemand(); self.pollComposition();
+        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.leases != 0 or stats.live_bytes != 0 or stats.snapshot_bytes != 0)
+            self.windowIdleSmokeFailed("capture-retirement");
+        self.invalidateFull(); self.startScreenshot();
+        const save_deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 15 * std.time.ns_per_s;
+        while (self.screenshot_job != null) {
+            if ((self.ctx.sys.monotonicNanoseconds() orelse save_deadline) >= save_deadline) self.windowIdleSmokeFailed("capture-screenshot-timeout");
+            self.smokePumpFrames(1);
+        }
+        const saved = self.screenshot_last orelse self.windowIdleSmokeFailed("capture-screenshot-start");
+        var header: [54]u8 = undefined;
+        if (saved.code != 0 or self.ctx.sys.fileReadAt(&saved.path, 0, &header) != header.len or header[0] != 'B' or header[1] != 'M' or
+            std.mem.readInt(u32, header[2..6], .little) != saved.bytes or saved.bytes != 54 + @as(u64, @intCast(self.screen_w)) * @as(u64, @intCast(self.screen_h)) * 4)
+            self.windowIdleSmokeFailed("capture-screenshot-file");
+        _ = self.pollRemoteFrameDemand(); self.pollComposition();
+        self.ctx.println("DESKTOP capture: OK bounded snapshots resize source-reset process-exit screenshot-BMP no-demand-retirement");
+        if (self.outputs) |manager| for (&manager.slots) |*slot| if (slot.logical_index == manager.layout.primary) {
+            const reader = if (slot.gpu) |owner| &owner.capture.reader else if (slot.software) |owner| &owner.capture.reader else continue;
+            self.ctx.write("DESKTOP readback: copy-bytes="); self.ctx.printU64(reader.stats.copy_bytes);
+            self.ctx.write(" cpu-read-bytes="); self.ctx.printU64(reader.stats.cpu_read_bytes);
+            self.ctx.write(" max-latency-ns="); self.ctx.printU64(reader.stats.max_latency_ns); self.ctx.println("");
+        };
+    }
+
+    fn publishCapture(self: *App, capture: *@import("remote_capture.zig").Capture) void {
+        const now = self.ctx.sys.monotonicNanoseconds() orelse 0;
+        if (capture.image()) |image| {
+            var captured = image;
+            if (self.remote_frame_consumers == 0 or !captured.matches(self.screen_w, self.screen_h)) {
+                capture.acknowledge(false);
+            } else {
+                const cursor = capture.cursor();
+                var pointer_overlay: @import("cursor_capture.zig").Overlay = .{};
+                if (cursor.separate and cursor.visible) pointer_overlay.apply(&captured, cursor.x, cursor.y);
+                defer pointer_overlay.restore(&captured);
+                // All pixels and metadata belong to this completed frame.
+                // The kernel copies into its CPU publisher; no GPU pointer
+                // or display buffer is lent to a remote/network consumer.
+                const rc = self.ctx.remoteFramePublishSceneRegionsCursor(&captured, &.{capture.logical_damage}, cursor.x, cursor.y, cursor.visible);
+                capture.acknowledge(rc >= 0);
+                if (rc >= 0) self.capture_cursor_damage.reset();
+            }
+        }
+        if (capture.takeRedraw(now)) self.invalidateFull();
     }
 
     fn runR4XSmokeAndPoweroff(self: *App) noreturn {
@@ -1607,6 +1735,7 @@ pub const App = struct {
         if (self.windows[index].instance_id != 0 or self.windows[timer_index].instance_id != 0) self.windowIdleSmokeFailed("close");
         self.ctx.println("DESKTOP window-idle result: OK");
         self.smokeGraphicsResources();
+        if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) self.smokeCaptureContract();
         self.ctx.systemPoweroff();
     }
 
@@ -2758,6 +2887,10 @@ pub const App = struct {
         };
 
         var info: r4os.abi.RemoteFrameInfo = .{};
+        const capture_deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s;
+        while (self.ctx.remoteFrameInfo(&info) != 0 and (self.ctx.sys.monotonicNanoseconds() orelse capture_deadline) < capture_deadline) {
+            self.smokePumpFrames(1);
+        }
         const info_rc = self.ctx.remoteFrameInfo(&info);
         if (info_rc != 0 or info.magic != r4os.abi.remote_frame_magic or info.version != r4os.abi.remote_frame_version) {
             self.ctx.println("Remote frame snapshot: FAILED-info");
@@ -3183,6 +3316,7 @@ pub const App = struct {
     fn smokeServiceFrame(self: *App) void {
         self.pollComposition();
         var changed = self.syncOutputRevision();
+        changed = self.pollRemoteFrameDemand() or changed;
         if (self.pollTimerEvent() and self.dispatchEvent()) changed = true;
         if (changed or self.hasDamage()) self.redraw();
     }
@@ -4387,6 +4521,12 @@ pub const App = struct {
         }
         self.last_physical_input_sequence = input.sequence;
         if (self.screen_power.input(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0)) return true;
+        if (input.key == @import("screenshot.zig").usage) {
+            if (input.kind == r4os.abi.physical_key_kind_down and input.flags & r4os.abi.physical_key_flag_repeat == 0 and self.screenshot_job == null) {
+                self.startScreenshot();
+            }
+            return true;
+        }
         if (self.forwardPhysicalKeyToActiveApp(input)) self.physical_input_forwarded +%= 1;
         return true;
     }
@@ -5539,6 +5679,7 @@ pub const App = struct {
     }
     fn presentOutputRegions(self: *App, regions: []const surface.Rect) void {
         const manager = self.outputs orelse return;
+        self.syncCaptureDemand();
         manager.invalidate(regions);
         self.refreshConsoleSnapshots();
         const offsets = self.consoleScrollOffsets(); const views = self.guiFrameViews();
@@ -5562,9 +5703,12 @@ pub const App = struct {
                 _ = owner.cache.finish() catch { owner.rejectCapture(); manager.fail(slot); continue; };
                 // Software cursor and output transforms require composition.
                 // Each head still owns its own measured scheduling phase.
-                owner.engine.present_intent = 0; owner.engine.present_blockers = gfx.present_block_cursor;
+                owner.engine.present_intent = 0; owner.engine.present_blockers = gfx.present_block_cursor |
+                    @as(u32, if (owner.capture_demand) gfx.present_block_readers else 0);
+                owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
                 captured = owner.start();
             } else if (slot.software) |owner| {
+                owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
                 const canvas = owner.begin(self.last_input_ns) orelse continue;
                 self.ctx.beginSceneClipped(canvas, bounds);
                 if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(bounds, &offsets, &views);
@@ -5577,18 +5721,7 @@ pub const App = struct {
             }
         }
         self.last_input_ns = 0;
-        // Remote clients continue to receive the primary logical desktop.
-        // Their explicit CPU mirror is independent of native output storage.
-        if (self.remote_frame_consumers != 0 and self.ensureSceneBuffer()) {
-            const bounds = surface.desktop(self.screen_w, self.screen_h).rect;
-            self.cpu_composition.begin(self.ctx.allocator(), &self.scene) catch { self.cpu_scene_current = false; return; };
-            self.ctx.beginSceneClipped(&self.scene, bounds);
-            _ = self.composeDamageRect(bounds, &offsets, &views);
-            self.ctx.endScene();
-            self.cpu_composition.finish(self.colors, &self.scene) catch { self.cpu_scene_current = false; return; };
-            self.cpu_scene_current = true;
-            if (self.cpu_scene_current) _ = self.publishRemoteScene(&.{bounds});
-        } else self.cpu_scene_current = false;
+        self.cpu_scene_current = false;
     }
 
     fn paintDisabledOutput(self: *App, bounds: surface.Rect) void {
@@ -5676,9 +5809,8 @@ pub const App = struct {
         if (!self.ensureSceneBuffer()) { worker.rejectCapture(); return false; }
         const start_tick = self.ctx.ticks();
         const start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
-        const mirror = self.remote_frame_consumers != 0;
-        if (mirror and !worker.primitives.mirror) for (&worker.cache.entries) |*entry| { entry.initialized = false; };
-        worker.primitives.mirror = mirror;
+        worker.primitives.mirror = false;
+        worker.capture_demand = self.remote_frame_consumers != 0;
         worker.cache.start(surface.desktop(self.screen_w, self.screen_h).rect) catch { worker.rejectCapture(); return false; };
         self.scene.layer_hook = worker.cache.hook();
         defer self.scene.layer_hook = null;
@@ -5701,16 +5833,8 @@ pub const App = struct {
             .composed_ns = self.ctx.sys.monotonicNanoseconds() orelse 0, .cursor_queued_tick = cursor_queued_tick,
             .cull = cull, .gui_generations = undefined };
         for (views, 0..) |view, index| frame.gui_generations[index] = view.info.committed_generation;
-        // Remote capture is an explicit CPU consumer. Ordinary local frames
-        // never reconstruct or copy a final CPU fullscreen image.
-        if (self.remote_frame_consumers != 0) {
-            const graphics = self.ctx.graphics orelse { worker.rejectCapture(); self.cpu_scene_current = false; return false; };
-            _ = composition_software.paint(&graphics.colors, &worker.cache, &self.scene) catch {
-                worker.rejectCapture(); self.cpu_scene_current = false; return false;
-            };
-            self.cpu_scene_current = true;
-            frame.remote_result = self.publishRemoteScene(regions);
-        } else self.cpu_scene_current = false;
+        self.cpu_scene_current = false;
+        worker.capture_damage = bounds; worker.capture_cursor = self.captureCursor();
         worker.engine.present_intent = 1;
         var blockers: u32 = 0;
         var visible_windows: usize = 0;
@@ -5729,9 +5853,21 @@ pub const App = struct {
     }
 
     fn pollComposition(self: *App) void {
+        if (self.screenshot_job) |job| if (job.collect()) |result| {
+            self.screenshot_job = null; self.screenshot_last = result;
+            if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
+                self.dialog = .message_window_info; self.dialog_focus = .message_ok;
+                if (result.code == 0) self.setMessageBox(.info, .ok, "Screenshot", "Saved in C:\\SCREENSHOTS.")
+                else self.setMessageBox(.@"error", .ok, "Screenshot", "The screenshot could not be saved.");
+                self.invalidateFull();
+            }
+        };
+        self.syncCaptureDemand();
         if (self.outputs) |manager| if (manager.active()) {
             manager.poll();
             for (&manager.slots) |*slot| {
+                if (slot.gpu) |owner| { if (owner.thread == null and owner.capture_demand) self.publishCapture(&owner.capture); }
+                else if (slot.software) |owner| { if (owner.capture.wanted) self.publishCapture(&owner.capture); }
                 const completed = if (slot.gpu) |owner| owner.frames_completed else if (slot.software) |owner| owner.completed else 0;
                 if (completed <= slot.reported) continue;
                 self.render_stats.present_successes +|= completed - slot.reported;
@@ -5745,7 +5881,9 @@ pub const App = struct {
             return;
         };
         const worker = self.composition orelse return;
-        switch (worker.poll(&self.ctx.draw)) {
+        const progress = worker.poll(&self.ctx.draw);
+        if (worker.thread == null and worker.capture_demand) self.publishCapture(&worker.capture);
+        switch (progress) {
             .idle, .pending => {},
             .discarded => {
                 for (&self.gpu_pending) |*entry| if (entry.*) |value| if (value.capture_frame == worker.completed_frame) { entry.* = null; break; };
@@ -8946,7 +9084,7 @@ pub const App = struct {
         self.cursor_x = next_x;
         self.cursor_y = next_y;
         const new_rect = self.cursorRect();
-        if (self.cursor_controller.software) self.queueCursorDamage(old_rect, new_rect);
+        if (self.cursor_controller.software or self.remote_frame_consumers != 0) self.queueCursorDamage(old_rect, new_rect);
         self.capture_cursor_damage.add(old_rect, new_rect);
         self.render_stats.cursor_moves +%= 1;
         return true;

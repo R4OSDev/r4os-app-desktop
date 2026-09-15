@@ -169,7 +169,10 @@ const Model = struct {
             return p.color_api.table.color_resource_create(device, &.{ .version = 1, .size = @sizeOf(c.R4GfxColorResourceDesc),
                 .resource = desc, .description = description.? }, out);
         }
-        if (input.kind != c.resource_image or (input.source_kind != c.source_create_native and input.source_kind != c.source_create_system)) return p.createResource(device,input,out);
+        if (input.kind != c.resource_image or (input.source_kind != c.source_create_native and input.source_kind != c.source_create_system))
+            return if (description) |value| p.color_api.table.color_resource_create(device,
+                &.{ .version = 1, .size = @sizeOf(c.R4GfxColorResourceDesc), .resource = input.*, .description = value }, out)
+                else p.createResource(device,input,out);
         var desc = input.*;
         var bytes: u64 = 0;
         if (input.source_kind == c.source_create_native) {
@@ -198,7 +201,9 @@ const Model = struct {
             std.debug.assert(!std.meta.eql(resource.*,source) and !std.meta.eql(resource.*,target));
         };
         const rc = p.releaseResource(device,resource);
-        if (rc == 0) if (buffers[resource.slot-1]) |memory| { t.allocator.free(memory); buffers[resource.slot-1] = null; };
+        var remaining: c.R4GfxResourceInfo = undefined;
+        if (rc == 0 and p.resourceInfo(device, resource, &remaining) != c.status_ok)
+            if (buffers[resource.slot-1]) |memory| { t.allocator.free(memory); buffers[resource.slot-1] = null; };
         return rc;
     }
     fn submit(device: *const c.R4GfxDevice, operation: Operation, count: u32, address: u64, out: *c.R4GfxJob) i32 {
@@ -260,6 +265,7 @@ const Model = struct {
     fn info(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob, out: *c.R4GfxJobInfo) callconv(.c) i32 {
         const job = find(handle); out.* = std.mem.zeroes(c.R4GfxJobInfo);
         out.version=1; out.size=@sizeOf(c.R4GfxJobInfo); out.point=handle.generation; out.timeline=123;
+        out.device_generation=1; out.reset_generation=1;
         out.phase=if(job.terminal) a.gfx_queue_phase_terminal else a.gfx_queue_phase_running;
         out.result=job.result; out.flags=if(job.terminal) 0 else 3; return 0;
     }
@@ -423,6 +429,7 @@ pub fn check() !void {
     try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
     try t.expectEqual(@as(u32, 0xbcbcbc), Model.visible[3 * 8 + 3]);
     try t.expectEqual(@as(u32, 0), Model.visible[0]);
+    try checkReadback(graphics, device, &engine, &cache);
     try engine.close();
     for(&Model.jobs) |*job| try t.expect(job.*==null);
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
@@ -483,10 +490,113 @@ fn checkHdrOutput(graphics: anytype, device: *const c.R4GfxDevice) !void {
     try t.expectEqual(@as(u32, 0xffffff), capture_pixels[0]);
     try t.expectEqual(@as(u32, 0xbcbcbc), capture_pixels[3 * 8 + 3]);
     try t.expectEqual(@as(u32, 0), capture_pixels[7]);
+    var readback = @import("r4gfx_readback").Owner.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
+    try readback.prepare(8, 8, engine.output_format, engine.output_color);
+    try readback.begin(.{ .source = engine.outputs[engine.output_index].resource, .epoch = 8, .frame = 1,
+        .regions = &.{.{ .x = 0, .y = 0, .width = 8, .height = 8 }}, .now_ns = 1, .deadline_ns = 1000 });
+    try pumpReadback(&readback, device);
+    // Capture applies the existing rational HDR shoulder: 1000-nit peak,
+    // 203-nit white ->100-nit SDR, knee75 nits. White maps to about88 nits
+    // (sRGB241); half-alpha white stays below the knee (sRGB188).
+    for ([_]usize{ 0, 3 * 8 + 3, 7 }, [_]i32{ 241, 188, 0 }) |index, expected| for ([_]u5{ 0, 8, 16 }) |shift| {
+        const actual: i32 = @intCast((readback.pixels[index] >> shift) & 255);
+        try t.expect(@abs(expected - actual) <= 2);
+    };
+    try readback.close();
     try engine.close();
     for (&Model.jobs) |*job| try t.expect(job.* == null);
     for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
     try t.expectEqual(@as(u64, 0), engine.reserved_bytes);
+}
+
+fn pumpReadback(owner: *@import("r4gfx_readback").Owner, device: *const c.R4GfxDevice) !void {
+    for (0..32) |_| {
+        Model.complete(device); owner.poll(2);
+        if (owner.phase == .ready) return;
+        if (owner.phase == .failed) return error.ReadbackFailed;
+    }
+    return error.ReadbackStalled;
+}
+fn checkReadback(graphics: anytype, device: *const c.R4GfxDevice, engine: *gpu.Engine, cache: *layers.Cache) !void {
+    const readback = @import("r4gfx_readback");
+    var owner = readback.Owner.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
+    const initial_serial = Model.serial;
+    owner.poll(1); try t.expect(Model.serial == initial_serial and owner.phase == .empty);
+    try owner.prepare(8, 8, c.format_xrgb8888, readback.sdr());
+    const staging = owner.staging;
+    const pixel = [_]@import("r4gfx").R4GfxRect{.{ .x = 3, .y = 3, .width = 1, .height = 1 }};
+    try owner.begin(.{ .source = engine.outputs[0].resource, .epoch = 1, .frame = 1, .regions = &pixel, .now_ns = 1, .deadline_ns = 1000 });
+    owner.poll(1);
+    try t.expect(owner.phase == .copying and owner.sourceHeld() and owner.stats.copy_bytes == 0 and owner.region_count == 1 and owner.regions[0].width == 8);
+    try t.expectError(error.Busy, owner.prepare(4, 4, c.format_xrgb8888, readback.sdr()));
+    try pumpReadback(&owner, device);
+    try t.expect(!owner.sourceHeld() and owner.stats.copy_bytes == 256);
+    try t.expectEqualSlices(u32, &Model.visible, owner.pixels);
+    try owner.acknowledge(true);
+    const point: surface.Rect = .{ .x = 3, .y = 3, .w = 1, .h = 1 };
+    // A real second composition changes one pixel; the staging image is reused.
+    try capture(cache, point, 0x445566); try engine.prepare(cache, 1000);
+    try engine.begin(cache, 1000); try pump(engine, cache, device, .copied);
+    try owner.begin(.{ .source = engine.outputs[0].resource, .epoch = 1, .frame = 2, .base_frame = 1,
+        .regions = &pixel, .now_ns = 1, .deadline_ns = 1000 });
+    try pumpReadback(&owner, device);
+    try t.expect(std.meta.eql(staging, owner.staging) and owner.stats.copy_bytes == 260);
+    try t.expectEqualSlices(u32, &Model.visible, owner.pixels);
+    try owner.acknowledge(true);
+    try owner.begin(.{ .source = engine.outputs[0].resource, .epoch = 1, .frame = 3, .base_frame = 2,
+        .regions = &pixel, .now_ns = 2, .deadline_ns = 3 });
+    owner.poll(3);
+    try t.expect(owner.phase == .draining and owner.sourceHeld());
+    try t.expectError(error.Busy, owner.close());
+    Model.complete(device); owner.poll(3);
+    try t.expect(owner.phase == .failed and !owner.sourceHeld() and !owner.valid);
+    try owner.acknowledge(false);
+    // Failure/epoch replacement requires a full new image despite tiny damage.
+    try owner.begin(.{ .source = engine.outputs[0].resource, .epoch = 2, .frame = 1,
+        .regions = &pixel, .now_ns = 1, .deadline_ns = 1000 });
+    try pumpReadback(&owner, device);
+    try t.expect(owner.regions[0].width == 8 and owner.stats.copy_bytes == 516);
+    try t.expectEqualSlices(u32, &Model.visible, owner.pixels);
+    try owner.close();
+    var desktop = @import("remote_capture.zig").Capture.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
+    desktop.setDemand(true);
+    const view: @import("output_geometry.zig").topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8 };
+    try desktop.prepare(view, c.format_xrgb8888, readback.sdr());
+    desktop.record(0, 1, point, view, .{ .x = 2, .y = 3, .visible = true, .separate = true });
+    desktop.complete(0, engine.outputs[0].resource, 1);
+    engine.readback_pin = desktop.reader.source;
+    try t.expect(engine.captureBlocked(1));
+    try t.expectError(error.Busy, engine.close());
+    // A later completed frame cannot overwrite the snapshot being copied.
+    desktop.record(1, 2, point, view, .{});
+    desktop.complete(1, engine.outputs[0].resource, 1);
+    try t.expect(desktop.skipped == 1 and desktop.redraw);
+    Model.complete(device); desktop.poll(2); engine.readback_pin = desktop.reader.source;
+    try t.expect(!engine.captureBlocked(2) and desktop.image() != null);
+    try t.expectEqualSlices(u32, &Model.visible, desktop.image().?.pixels.?);
+    try t.expect(desktop.cursor().x == 2 and desktop.cursor().visible and desktop.cursor().separate);
+    desktop.acknowledge(true);
+    try t.expect(desktop.takeRedraw(2));
+    // Last reader cancellation preserves a source until the real receipt.
+    desktop.record(0, 3, point, view, .{});
+    desktop.complete(0, engine.outputs[0].resource, 3);
+    desktop.setDemand(false); desktop.poll(3);
+    try t.expect(desktop.reader.sourceHeld());
+    Model.complete(device); desktop.poll(4);
+    try t.expect(desktop.reader.phase == .empty and desktop.logical_pixels.len == 0 and desktop.image() == null);
+    try desktop.close();
+    // Monitor ICC/calibration sees a mutable output, while remote capture
+    // retains the canonical completed sRGB scene before that wire transform.
+    desktop.setDemand(true); try desktop.prepareProfile(view);
+    var pre_profile = Model.visible;
+    desktop.record(0, 4, .{ .x = 0, .y = 0, .w = 8, .h = 8 }, view, .{});
+    desktop.stageProfile(0, &pre_profile, 4);
+    @memset(&pre_profile, 0x373737);
+    try t.expect(desktop.image() == null and !desktop.reader.sourceHeld());
+    desktop.complete(0, engine.outputs[0].resource, 5);
+    try t.expectEqualSlices(u32, &Model.visible, desktop.image().?.pixels.?);
+    desktop.acknowledge(true); desktop.setDemand(false); desktop.poll(6);
+    try desktop.close();
 }
 
 fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
@@ -621,6 +731,17 @@ fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device
                 try t.expect(cache.reserved == 0 and std.meta.eql(cache.commands[0].scissor, geometry.native(view)));
                 try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
                 try t.expectEqualSlices(u32, &expected, &Model.visible);
+                if (iteration == 1) {
+                    var remote = @import("remote_capture.zig").Capture.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
+                    remote.setDemand(true); try remote.prepare(view, c.format_xrgb8888, @import("r4gfx_readback").sdr());
+                    remote.record(0, 1, bounds, view, .{ .x = bounds.x + 1, .y = bounds.y + 2, .visible = true });
+                    remote.complete(0, engine.outputs[0].resource, 1);
+                    for (0..8) |_| { Model.complete(device); remote.poll(2); if (remote.ready) break; }
+                    const captured = remote.image() orelse return error.CaptureNotReady;
+                    try t.expectEqualSlices(u32, source, captured.pixels.?);
+                    try t.expect(remote.cursor().x == 1 and remote.cursor().y == 2);
+                    try remote.close();
+                }
                 if (iteration == 1) try t.expectEqual(converted, frame.assets.converted_pixels);
             }
         }
