@@ -76,7 +76,7 @@ pub const Engine = struct {
         if (self.active() or self.reserved_bytes != 0 or self.chain.slot != 0) return error.Busy;
         var description = color.description(false, true);
         if (state) |value| {
-            if (value.version != 1 or value.size < @sizeOf(r4os.abi.GfxOutputColorState) or value.flags & 7 != 7 or
+            if (value.version != 1 or value.size < 128 or value.flags & 7 != 7 or
                 value.format != format or value.reference_white == 0 or value.peak < value.reference_white or value.black >= value.reference_white or
                 (value.primaries != gfx.color_primaries_srgb and value.primaries != gfx.color_primaries_bt2020) or
                 (value.transfer != gfx.color_transfer_srgb and value.transfer != gfx.color_transfer_pq and value.transfer != gfx.color_transfer_hlg) or
