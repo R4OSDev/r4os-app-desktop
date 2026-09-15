@@ -21,6 +21,7 @@ pub const Slot = struct {
     logical_index: ?usize = null,
     disabled: bool = false,
     paused: bool = false,
+    sleeping: bool = false,
     gpu: ?*worker.Worker = null,
     software: ?*cpu.Output = null,
     damage: surface.Dirty = .{},
@@ -33,7 +34,7 @@ pub const Slot = struct {
     activity: catalog.refresh_client.Activity = .{},
     pub fn occupied(self: *const Slot) bool { return self.target.connector_id != 0; }
     pub fn bounds(self: *const Slot) surface.Rect { return geometry.logical(self.view) catch unreachable; }
-    pub fn dirty(self: *const Slot) bool { return self.logical_index != null and !self.failed and !self.paused and self.damage.active; }
+    pub fn dirty(self: *const Slot) bool { return self.logical_index != null and !self.failed and !self.paused and !self.sleeping and self.damage.active; }
     pub fn invalidate(self: *Slot) void { self.damage.invalidate(self.bounds()); }
 };
 pub const Manager = struct {
@@ -192,6 +193,24 @@ pub const Manager = struct {
         var x: i32 = 0;
         var primary: ?usize = null;
         for (next.entries[0..next.count]) |entry| {
+            if (entry.info.flags & a.gfx_output_flag_sleeping != 0) {
+                // Preserve placement while CPU/GPU workers retire normally.
+                // The new awake target will acquire fresh workers and images.
+                for (&self.slots) |*slot| {
+                    const previous_index = slot.logical_index orelse continue;
+                    if (slot.target.adapter_id != entry.info.identity.adapter_id or slot.target.connector_id != entry.info.identity.connector_id or
+                        slot.target.device_generation != entry.info.identity.device_generation or previous_index >= self.layout.count) continue;
+                    const previous = self.layout.outputs[previous_index];
+                    slot.sleeping = true;
+                    values[count] = previous; owners[count] = slot;
+                    if (previous.primary and previous.enabled) primary = count;
+                    const bounds = previous.view.logical() catch continue;
+                    x = @intCast(@min(std.math.maxInt(i32), @max(@as(i64, x), bounds.right())));
+                    count += 1;
+                    break;
+                }
+                continue;
+            }
             if (!entry.active() or entry.presentation.flags & a.display_presentation_info_native == 0) continue;
             // A failed target stays quarantined until its owners drain and
             // its retry deadline expires. Other outputs continue meanwhile.
@@ -286,10 +305,15 @@ pub const Manager = struct {
                 current.view.pixel_w == view.pixel_w and current.view.pixel_h == view.pixel_h) break current;
         } else for (&self.slots) |*current| { if (!current.occupied()) break current; } else return null;
         if (slot.occupied()) {
+            if (slot.sleeping) {
+                if (slot.gpu != null or slot.software != null) { slot.reconfiguring = true; return null; }
+                slot.* = .{};
+            } else {
             if (slot.software) |owner| if (owner.acquired != null or owner.mapping.lease.id != 0) {
                 self.fail(slot); return null;
             };
             return slot;
+            }
         }
         slot.target = entry.target; slot.view = view;
         slot.color_revision = if (entry.color) |value| value.revision else 0;
@@ -353,6 +377,17 @@ pub const Manager = struct {
         const now = self.sys.monotonicNanoseconds() orelse 0;
         for (&self.slots) |*slot| {
             if (!slot.occupied()) continue;
+            var power: a.GfxOutputPower = .{};
+            const identity: a.GfxOutputId = .{ .adapter_id = slot.target.adapter_id, .connector_id = slot.target.connector_id,
+                .device_generation = slot.target.device_generation, .connection_generation = slot.target.connection_generation };
+            if (self.draw.outputs().power(&identity, &power) == a.gfx_output_ok)
+                slot.sleeping = power.phase >= a.gfx_power_phase_stopping and power.phase <= a.gfx_power_phase_waking;
+            if (slot.sleeping and slot.logical_index != null) {
+                slot.refresh.release(&self.draw, slot.target);
+                if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
+                if (slot.software) |owner| if (owner.destroy()) { slot.software = null; };
+                continue;
+            }
             if (slot.logical_index == null or slot.failed or slot.reconfiguring) {
                 slot.refresh.release(&self.draw, slot.target);
                 if (slot.failed) self.fail(slot);

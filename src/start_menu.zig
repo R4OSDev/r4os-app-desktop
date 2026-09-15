@@ -185,6 +185,7 @@ pub const Menu = struct {
         menu.addKnown(.menu_restart, .action, "Restart", .action, "");
         menu.addKnown(.menu_poweroff, .action, "Poweroff", .action, "");
         menu.addKnown(.menu_halt, .action, "Halt", .action, "");
+        menu.addKnown(.menu_screen_off, .action, "Screen off", .action, "");
         return menu;
     }
 
@@ -467,7 +468,7 @@ pub const Menu = struct {
 
 fn groupForTarget(target: model.UiTarget) Group {
     return switch (target) {
-        .menu_restart, .menu_poweroff, .menu_halt => .power,
+        .menu_restart, .menu_poweroff, .menu_halt, .menu_screen_off => .power,
         .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks => .system,
         else => .programs,
     };
@@ -500,6 +501,7 @@ fn targetForAction(action: []const u8) model.UiTarget {
     if (equalsIgnoreCase(action, "restart")) return .menu_restart;
     if (equalsIgnoreCase(action, "poweroff")) return .menu_poweroff;
     if (equalsIgnoreCase(action, "halt")) return .menu_halt;
+    if (equalsIgnoreCase(action, "screen_off")) return .menu_screen_off;
     return .none;
 }
 
@@ -641,7 +643,7 @@ pub fn submenuItemY(rect: surface.Rect, index: usize) i32 {
 test "default menu keeps stable Desktop entries" {
     const menu = Menu.initDefault();
 
-    try std.testing.expectEqual(@as(usize, 9), menu.count);
+    try std.testing.expectEqual(@as(usize, 10), menu.count);
     try std.testing.expectEqual(@as(usize, 3), menu.submenu_count);
     try std.testing.expectEqual(model.UiTarget.menu_update, menu.target(0));
     try std.testing.expectEqualStrings("/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X", std.mem.span(menu.launch(0).?.path));
@@ -660,6 +662,7 @@ test "default menu keeps stable Desktop entries" {
     try std.testing.expectEqual(model.UiTarget.menu_settings, menu.target(4));
     try std.testing.expectEqual(model.UiTarget.menu_restart, menu.target(6));
     try std.testing.expectEqual(model.UiTarget.menu_halt, menu.target(8));
+    try std.testing.expectEqual(model.UiTarget.menu_screen_off, menu.target(9));
     try std.testing.expectEqual(model.UiTarget.menu_settings_appearance, menu.submenuTarget(4, 0));
     try std.testing.expectEqualStrings("/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X", std.mem.span(menu.submenuLaunch(4, 0).?.path));
     try std.testing.expectEqual(model.UiTarget.menu_settings_display, menu.submenuTarget(4, 7));
@@ -713,7 +716,7 @@ test "menu parser keeps defaults when no known entries are found" {
     );
 
     try std.testing.expect(!ok);
-    try std.testing.expectEqual(@as(usize, 9), menu.count);
+    try std.testing.expectEqual(@as(usize, 10), menu.count);
     try std.testing.expectEqual(model.UiTarget.menu_update, menu.target(0));
 }
 
@@ -732,6 +735,8 @@ test "menu layout groups programs system and power actions" {
     try std.testing.expectEqual(top + theme.menu_top_pad + theme.menu_group_h, menu.itemY(screen_h, 0));
     try std.testing.expectEqual(@as(?usize, 1), menu.hit(screen_h, 40, menu.itemY(screen_h, 1) + 3));
     try std.testing.expectEqual(@as(?usize, 0), menu.hit(screen_h, 40, menu.itemY(screen_h, 1) - 3));
+    try std.testing.expect(menu.itemY(screen_h, 9) + theme.menu_item_h <= top + theme.menu_h);
+    try std.testing.expectEqual(@as(?usize, 9), menu.hit(screen_h, 40, menu.itemY(screen_h, 9) + 3));
     const rect = menu.submenuRect(1280, screen_h, 1).?;
     try std.testing.expectEqual(@as(i32, theme.menu_w - 4), rect.x);
     try std.testing.expectEqual(@as(?usize, 7), menu.submenuHit(1280, screen_h, 1, rect.x + 8, submenuItemY(rect, 7) + 3));

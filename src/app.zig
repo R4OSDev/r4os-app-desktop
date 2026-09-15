@@ -342,6 +342,7 @@ pub const App = struct {
     output_events_supported: bool = true,
     activity_wait_supported: bool = true,
     last_input_ns: u64 = 0,
+    screen_power: @import("screen_power.zig").Owner = .{},
     activity_wait_wakes: u64 = 0,
     activity_wait_timeouts: u64 = 0,
     double_click_ticks: u64 = 25,
@@ -551,6 +552,7 @@ pub const App = struct {
                 continue;
             }
             self.pollComposition();
+            self.screen_power.tick(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.config.screen_off_seconds);
             var needs_redraw = self.syncDesktopFolder();
             if (self.syncOutputRevision()) needs_redraw = true;
             if (self.syncTrayBroker()) needs_redraw = true;
@@ -558,6 +560,7 @@ pub const App = struct {
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
                 self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                if (self.screen_power.input(&self.ctx.draw, self.last_input_ns)) continue;
                 if (self.dispatchEvent()) needs_redraw = true;
             }
             var physical_events: u32 = 0;
@@ -566,11 +569,11 @@ pub const App = struct {
             }
             if (self.pollKeyboardEvent()) {
                 self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
-                if (self.dispatchEvent()) needs_redraw = true;
+                if (!self.screen_power.input(&self.ctx.draw, self.last_input_ns) and self.dispatchEvent()) needs_redraw = true;
             }
             if (self.pollMouseEvent()) {
                 self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
-                if (self.dispatchEvent()) needs_redraw = true;
+                if (!self.screen_power.input(&self.ctx.draw, self.last_input_ns) and self.dispatchEvent()) needs_redraw = true;
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             self.flushWindowGeometry(false);
@@ -1471,6 +1474,19 @@ pub const App = struct {
     }
 
     fn runWindowIdleSmokeAndPoweroff(self: *App) noreturn {
+        if (argsContain(self.ctx.argsRaw(), "/SCREEN-POWER")) {
+            const now = self.ctx.sys.monotonicNanoseconds() orelse self.windowIdleSmokeFailed("screen-power-clock");
+            self.screen_power.sleep(&self.ctx.draw, now) catch |err| {
+                if (err != error.Unsupported) self.windowIdleSmokeFailed("screen-power-fallback-result");
+            };
+            if (self.screen_power.want_off or self.screen_power.wake_pending or self.screen_power.count != 0 or
+                self.screen_power.input(&self.ctx.draw, now)) self.windowIdleSmokeFailed("screen-power-fallback-owner");
+            self.screen_power.tick(&self.ctx.draw, now + std.time.ns_per_s, 0);
+            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/RECEIVERS",
+                "screen-power=unsupported", "DISPLAYD receivers: complete")) self.windowIdleSmokeFailed("screen-power-diagnostics");
+            self.invalidateFull(); self.redraw();
+            self.ctx.println("DESKTOP screen power fallback: OK unsupported input=preserved render=available system=running");
+        }
         if (argsContain(self.ctx.argsRaw(), "/OUTPUTS")) {
             _ = self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/VIRTIO", "VIRTGPU", "VIRTGPU");
             if (!self.managedOutputs() or self.outputs.?.layout.count < 2) self.windowIdleSmokeFailed("two-native-outputs-unavailable");
@@ -4370,6 +4386,7 @@ pub const App = struct {
             return true;
         }
         self.last_physical_input_sequence = input.sequence;
+        if (self.screen_power.input(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0)) return true;
         if (self.forwardPhysicalKeyToActiveApp(input)) self.physical_input_forwarded +%= 1;
         return true;
     }
@@ -4770,7 +4787,7 @@ pub const App = struct {
             switch (target) {
                 .run_input, .run_browse, .run_ok, .run_cancel => self.setDialogFocus(target),
                 .message_ok, .message_yes, .message_no, .task_overview_ok, .settings_ok, .settings_cancel => self.setDialogFocus(target),
-                .menu_update, .menu_programs, .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks, .menu_restart, .menu_poweroff, .menu_halt => {
+                .menu_update, .menu_programs, .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks, .menu_restart, .menu_poweroff, .menu_halt, .menu_screen_off => {
                     if (self.menuIndexForTarget(target)) |index| {
                         self.menu_selected = index;
                         self.menu_submenu_focus = false;
@@ -4870,7 +4887,7 @@ pub const App = struct {
                 self.message_box_result = message_box.targetResult(self.message_box_buttons, target);
                 self.confirmDialogAction();
             },
-            .menu_update, .menu_programs, .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks, .menu_restart, .menu_poweroff, .menu_halt => {
+            .menu_update, .menu_programs, .menu_terminal_mode, .menu_run, .menu_settings, .menu_tasks, .menu_restart, .menu_poweroff, .menu_halt, .menu_screen_off => {
                 if (self.menuIndexForTarget(target)) |index| self.activateMenu(index);
             },
             .menu_terminal, .menu_notepad, .menu_paint, .menu_calc, .menu_synth, .menu_devmgr, .menu_r4code, .menu_programs_internet, .menu_settings_appearance, .menu_settings_display, .menu_settings_default_apps, .menu_settings_registry, .menu_settings_network, .menu_settings_services, .menu_settings_log_center, .menu_settings_time => {
@@ -6110,6 +6127,12 @@ pub const App = struct {
             model.UiTarget.menu_restart => self.openDialog(.confirm_restart),
             model.UiTarget.menu_poweroff => self.openDialog(.confirm_poweroff),
             model.UiTarget.menu_halt => self.openDialog(.confirm_halt),
+            model.UiTarget.menu_screen_off => {
+                self.screen_power.sleep(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0) catch {
+                    self.openDialog(.message_run_failed);
+                    self.setMessageBox(.info, .ok, "Screen off", "Screen sleep is unavailable for the current display.");
+                };
+            },
             else => {},
         }
     }

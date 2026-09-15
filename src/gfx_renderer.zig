@@ -35,25 +35,34 @@ pub const Renderer = struct {
         return createForAdapter(allocator, raw, 0);
     }
     pub fn createForAdapter(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, adapter: u32) ?*Renderer {
-        const client = gfx.DeviceV1Client.init(raw) catch return null;
-        const colors = gfx.ColorV1Client.init(raw) catch return null;
+        const client = gfx.DeviceV1Client.init(raw) catch return failed(raw, "device-interface", 0);
+        const colors = gfx.ColorV1Client.init(raw) catch return failed(raw, "color-interface", 0);
         const bytes = client.storage_size();
-        if (bytes == 0 or bytes > std.math.maxInt(usize)) return null;
-        const storage = allocator.alignedAlloc(u8, .fromByteUnits(gfx.device_storage_alignment), @intCast(bytes)) catch return null;
+        if (bytes == 0 or bytes > std.math.maxInt(usize)) return failed(raw, "storage-size", 0);
+        const storage = allocator.alignedAlloc(u8, .fromByteUnits(gfx.device_storage_alignment), @intCast(bytes)) catch return failed(raw, "storage-allocation", 0);
         @memset(storage, 0);
-        const self = allocator.create(Renderer) catch { allocator.free(storage); return null; };
+        const self = allocator.create(Renderer) catch { allocator.free(storage); return failed(raw, "renderer-allocation", 0); };
         var device: gfx.R4GfxDevice = undefined;
-        if (client.device_open(&.{ .version = 1, .size = @sizeOf(gfx.R4GfxDeviceConfig), .storage_address = @intFromPtr(storage.ptr),
-            .storage_bytes = storage.len, .start_context = @intFromPtr(raw), .preferred_adapter = adapter, .flags = 0 }, &device) != gfx.status_ok)
-        { allocator.destroy(self); allocator.free(storage); return null; }
+        const open_rc = client.device_open(&.{ .version = 1, .size = @sizeOf(gfx.R4GfxDeviceConfig), .storage_address = @intFromPtr(storage.ptr),
+            .storage_bytes = storage.len, .start_context = @intFromPtr(raw), .preferred_adapter = adapter, .flags = 0 }, &device);
+        if (open_rc != gfx.status_ok)
+        { allocator.destroy(self); allocator.free(storage); return failed(raw, "device-open", open_rc); }
         self.* = .{ .allocator = allocator, .client = client, .colors = colors, .storage = storage, .device = device };
         var descriptor = std.mem.zeroes(gfx.R4GfxResourceDesc);
         descriptor.version = 1; descriptor.size = @sizeOf(gfx.R4GfxResourceDesc);
         descriptor.kind = gfx.resource_pipeline; descriptor.operation = gfx.render_operation_fill;
-        if (client.resource_create(&device, &descriptor, &self.fill_pipeline) != gfx.status_ok) {
-            self.destroy(); return null;
+        const pipeline_rc = client.resource_create(&device, &descriptor, &self.fill_pipeline);
+        if (pipeline_rc != gfx.status_ok) {
+            self.destroy(); return failed(raw, "fill-pipeline", pipeline_rc);
         }
         return self;
+    }
+    fn failed(raw: *const r4os.abi.R4XStartContext, stage: []const u8, result: i32) ?*Renderer {
+        const bundle = r4os.program.bundleValueFromR4XStart(raw) orelse return null;
+        const sys = r4os.r4sys.Context.init(&bundle);
+        sys.write("R4DESK gfx: initialization failed stage="); sys.write(stage);
+        sys.write(" result="); sys.printI32(result); sys.println("");
+        return null;
     }
     pub fn destroy(self: *Renderer) void {
         self.end();

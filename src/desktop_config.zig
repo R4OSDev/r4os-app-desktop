@@ -18,6 +18,7 @@ pub const Config = struct {
     desktop_icon_text: u32 = default_desktop_icon_text,
     wallpaper_path: [max_wallpaper_path + 1]u8 = .{0} ** (max_wallpaper_path + 1),
     taskbar_clock: bool = true,
+    screen_off_seconds: u32 = 0,
 
     pub fn uiFontPath(self: *const Config) [*:0]const u8 {
         return @ptrCast(&self.ui_font_path);
@@ -48,6 +49,7 @@ pub const Config = struct {
         writer.writePair("WALLPAPER", if (self.wallpaper_path[0] == 0) "NONE" else std.mem.span(self.wallpaperPath()));
         writer.writePair("WALLPAPER_MODE", "CENTER");
         writer.writePairBool("TASKBAR_CLOCK", self.taskbar_clock);
+        writer.writePairU32("SCREEN_OFF_SECONDS", self.screen_off_seconds);
         writer.writePair("UI_FONT", std.mem.span(self.uiFontPath()));
         writer.writePairU32("UI_FONT_SIZE", if (self.ui_font_size == 16) 16 else 8);
         writer.writePair("TERMINAL_FONT", std.mem.span(self.terminalFontPath()));
@@ -61,6 +63,12 @@ fn parseEntry(config: *Config, entry: settings.Entry) bool {
     const key = entry.key;
     const value = entry.value;
     if (value.len == 0) return false;
+    if (settings.equalsKey(key, "SCREEN_OFF_SECONDS")) {
+        const seconds = std.fmt.parseInt(u32, value, 10) catch return false;
+        if (seconds != 0 and (seconds < 30 or seconds > 86400)) return false;
+        config.screen_off_seconds = seconds;
+        return true;
+    }
 
     if (settings.equalsKey(key, "UI_FONT") or settings.equalsKey(key, "DESKTOP_FONT")) {
         copyZ(config.ui_font_path[0..], value);
@@ -190,6 +198,7 @@ test "desktop config parses appearance keys" {
 
 test "desktop config serializes safe defaults" {
     try @import("r4std_test").ensure();
+    try @import("screen_power_test.zig").check();
     var config = Config{};
     var out: [384]u8 = .{0} ** 384;
     const bytes = config.writeTo(out[0..]);
@@ -198,6 +207,7 @@ test "desktop config serializes safe defaults" {
     try std.testing.expect(std.mem.indexOf(u8, bytes, "WALLPAPER=NONE") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "WALLPAPER_MODE=CENTER") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "TASKBAR_CLOCK=ON") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "SCREEN_OFF_SECONDS=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "UI_FONT=C:\\R4OS\\FONTS\\TERMINAL8.R4F") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "UI_FONT_SIZE=8") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "TERMINAL_FONT=C:\\R4OS\\FONTS\\TERMINAL8.R4F") != null);
