@@ -421,6 +421,7 @@ pub const App = struct {
     volume_pending_muted: bool = false,
     volume_dragging: bool = false,
     window_service_mirrored: [4]bool = .{false} ** 4,
+    window_modes: [4]r4os.abi.WindowModeExchange = @splat(.{}),
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_exit_codes: [4]i32 = .{0} ** 4,
@@ -583,6 +584,7 @@ pub const App = struct {
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             self.flushWindowGeometry(false);
+            if (self.syncWindowModes()) needs_redraw = true;
             if (self.syncGraphicsWindows()) needs_redraw = true;
             if (self.syncCursor()) needs_redraw = true;
             if (self.hasDamage()) needs_redraw = true;
@@ -693,6 +695,59 @@ pub const App = struct {
             self.activity_wait_supported = false;
         }
         self.ctx.sleepTicks(self.loop_sleep_ticks);
+    }
+
+    fn syncWindowModes(self: *App) bool {
+        if (!self.win_service_gate.available or self.terminal_mode) return false;
+        var changed = false;
+        for (&self.windows, 0..) |*win, index| {
+            const owner = self.window_process_handles[index];
+            if (win.kind != .app or !processHandleValid(owner) or win.close_requested) continue;
+            const cached = &self.window_modes[index];
+            if (!sameProcessHandle(cached.identity.owner, owner)) cached.* = .{
+                .identity = .{ .desktop = self.ctx.self_handle, .owner = owner, .window_id = @intCast(index) } };
+            // One publication and, when needed, one immediate acknowledgement.
+            // A lost reply retains the exact identity and acknowledgement ID.
+            for (0..2) |_| {
+                cached.mode = @intFromBool(win.fullscreen);
+                var reply: r4os.abi.WindowModeReply = .{};
+                if (!self.ctx.windowModeExchange(cached, &reply)) {
+                    self.markWindowServiceUnavailable();
+                    break;
+                }
+                if (reply.identity.serial == 0 or
+                    !sameProcessHandle(reply.identity.owner, owner) or reply.identity.window_id != index or
+                    !sameProcessHandle(reply.identity.desktop, self.ctx.self_handle)) break;
+                if (!std.meta.eql(cached.identity, reply.identity)) {
+                    cached.identity = reply.identity;
+                    cached.ack_request_id = 0;
+                    cached.ack_result = 0;
+                }
+                if (reply.phase != 1) break;
+                if (cached.ack_request_id != reply.request_id) {
+                    changed = self.setWindowFullscreen(index, reply.requested_mode == 1) or changed;
+                    cached.ack_request_id = reply.request_id;
+                    cached.ack_result = 0;
+                }
+            }
+        }
+        return changed;
+    }
+
+    fn removeWindowMode(self: *App, index: usize) void {
+        const cached = &self.window_modes[index];
+        if (cached.identity.serial != 0) {
+            var request = cached.*;
+            request.flags = 1;
+            var reply: r4os.abi.WindowModeReply = .{};
+            if (!self.ctx.windowModeExchange(&request, &reply) or
+                (reply.result != 0 and reply.result != -3 and reply.result != -4)) {
+                // Unknown removal is resolved by the existing acknowledged
+                // service reset before publishing any replacement window.
+                self.markWindowServiceUnavailable();
+            }
+        }
+        cached.* = .{};
     }
 
     fn syncTrayBroker(self: *App) bool {
@@ -3326,6 +3381,8 @@ pub const App = struct {
     fn smokeServiceFrame(self: *App) void {
         self.pollComposition();
         var changed = self.syncOutputRevision();
+        changed = self.syncWindowModes() or changed;
+        changed = self.syncGraphicsWindows() or changed;
         changed = self.pollRemoteFrameDemand() or changed;
         if (self.pollTimerEvent() and self.dispatchEvent()) changed = true;
         if (changed or self.hasDamage()) self.redraw();
@@ -5141,6 +5198,11 @@ pub const App = struct {
             return if (self.startButtonHit(x, y)) .start_button else .start_menu_backdrop;
         }
 
+        if (self.active_window < self.windows.len) {
+            const active = &self.windows[self.active_window];
+            if (active.fullscreen and active.contains(x, y)) return self.windowTarget(self.active_window, x, y);
+        }
+
         if (self.startButtonHit(x, y)) return .start_button;
         if (self.quick_launch.hit(self.screen_h, x, y)) |index| return self.quick_launch.target(index);
         if (self.tray_registry.hit(x, y) != null) return .taskbar_tray_external;
@@ -5414,8 +5476,23 @@ pub const App = struct {
         self.invalidateTaskbar();
     }
 
+    fn setWindowFullscreen(self: *App, index: usize, enabled: bool) bool {
+        if (index >= self.windows.len) return false;
+        const win = &self.windows[index];
+        const previous = win.geometry();
+        if (!win.setFullscreen(enabled, self.outputBounds(index), self.outputWorkArea(index))) return false;
+        if (self.drag.active and self.drag.window_index == index) self.drag = .{};
+        if (self.resize.active and self.resize.window_index == index) self.resize = .{};
+        self.damage.invalidate(previous);
+        self.updateGuiWindowInfo(index);
+        self.mirrorWindowUpdate(index);
+        self.pushGuiEvent(index, .resize);
+        self.invalidateFull();
+        return true;
+    }
+
     fn toggleMaximizeWindow(self: *App, index: usize) void {
-        if (index >= self.windows.len) return;
+        if (index >= self.windows.len or self.windows[index].fullscreen) return;
         self.invalidateWindow(index);
         self.windows[index].toggleMaximizeIn(self.outputWorkArea(index));
         if (self.windows[index].maximized) self.mirrorWindowMaximize(index) else self.mirrorWindowRestore(index);
@@ -5653,6 +5730,14 @@ pub const App = struct {
         return if (self.managedOutputs()) .{ .x = self.cursor_x, .y = self.cursor_y, .w = surface.cursor_w, .h = surface.cursor_h }
             else surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
     }
+    fn outputBounds(self: *const App, index: usize) surface.Rect {
+        if (self.outputs) |manager| if (manager.active()) {
+            const win = &self.windows[index];
+            const best = manager.layout.dominant(.{ .x = win.x, .y = win.y, .w = @intCast(win.w), .h = @intCast(win.h) }) orelse manager.layout.primary;
+            return output_geometry.logical(manager.layout.outputs[best].view) catch surface.desktop(self.screen_w, self.screen_h).rect;
+        };
+        return surface.desktop(self.screen_w, self.screen_h).rect;
+    }
     fn outputWorkArea(self: *const App, index: usize) surface.Rect {
         if (self.outputs) |manager| if (manager.active()) {
             const win = &self.windows[index];
@@ -5673,7 +5758,9 @@ pub const App = struct {
             win.x -|= shift.x; win.y -|= shift.y;
             win.normal_x -|= shift.x; win.normal_y -|= shift.y;
             const restored = manager.layout.rescue(.{ .x = win.x, .y = win.y, .w = @intCast(win.w), .h = @intCast(win.h) }, theme.title_h) catch continue;
-            if (win.maximized) {
+            if (win.fullscreen) {
+                win.fitFullscreen(self.outputBounds(index), self.outputWorkArea(index));
+            } else if (win.maximized) {
                 const bounds = self.outputWorkArea(index);
                 win.x = bounds.x; win.y = bounds.y; win.w = bounds.w; win.h = bounds.h;
             } else win.setNormal(restored.x, restored.y, win.w, win.h);
@@ -6938,6 +7025,53 @@ pub const App = struct {
         }
     };
     fn graphicsWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
+        return self.graphicsGpuWindowSpec(index) orelse self.graphicsCpuWindowSpec(index);
+    }
+    fn graphicsCpuWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
+        if (!self.win_service_gate.available or !self.window_service_mirrored[index] or index == 0) return null;
+        const win = &self.windows[index]; const handle = self.window_process_handles[index];
+        if (win.kind != .app or win.close_requested or !processHandleValid(handle) or handle.instance_id != win.instance_id) return null;
+        const client = win.clientSurface().rect;
+        if (client.isEmpty() or client.w > 32768 or client.h > 32768) return null;
+        var target: r4os.abi.GfxOutputTarget = .{};
+        var ready = true;
+        if (self.managedOutputs()) {
+            const manager = self.outputs.?;
+            var chosen: ?*output_manager.Slot = null; var area: u64 = 0;
+            for (&manager.slots) |*slot| {
+                if (slot.logical_index == null or slot.disabled) continue;
+                const intersection = output_geometry.intersect(client, slot.bounds()) orelse continue;
+                if (slot.failed or slot.reconfiguring or slot.sleeping or slot.paused or slot.gpu != null) return null;
+                const owner = slot.software orelse return null;
+                if (!owner.ready or owner.lost) return null;
+                const pixels = @as(u64, @intCast(intersection.w)) * @as(u64, @intCast(intersection.h));
+                if (chosen == null or pixels > area) { chosen = slot; area = pixels; }
+            }
+            target = (chosen orelse return null).target;
+        } else {
+            // Firmware scanout has a real output identity too. Keep its
+            // software windows usable before native display takeover.
+            if (self.composition) |worker| {
+                if (self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision)) return null;
+                ready = !worker.blocksCapture();
+            }
+            if (self.ctx.draw.displayOutputTarget(0, 0, &target) != r4os.abi.gfx_output_ok) return null;
+        }
+        var backend: r4os.abi.GfxBackendInfo = .{};
+        if (self.ctx.draw.queues().backendInfo(0, &backend) != r4os.abi.gfx_queue_ok or backend.binding.adapter_id != 0 or
+            backend.binding.milestone != r4os.abi.gfx_queue_milestone_cpu_stores) return null;
+        // Software outputs compose in logical pixels before their shared
+        // scaling/rotation step. Every intersecting output reads the same BO.
+        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(client.w), .height = @intCast(client.h),
+            .flags = if (win.visible and !win.minimized and !self.terminal_mode) r4os.abi.window_graphics_visible else 0,
+            .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3,
+            .backend = backend, .output = .{ .adapter_id = target.adapter_id, .connector_id = target.connector_id,
+                .device_generation = target.device_generation, .connection_generation = target.connection_generation },
+            .display_generation = target.display_generation };
+        @import("window_color.zig").publishCpu(&config);
+        return .{ .owner = handle, .config = config, .consumer_ready = ready };
+    }
+    fn graphicsGpuWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
         if (!self.win_service_gate.available or !self.window_service_mirrored[index] or index == 0) return null;
         const win = &self.windows[index]; const handle = self.window_process_handles[index];
         if (win.kind != .app or win.close_requested or !processHandleValid(handle) or handle.instance_id != win.instance_id) return null;
@@ -6992,7 +7126,8 @@ pub const App = struct {
         var changed = false;
         for (&self.graphics_windows, 0..) |*owner, index| {
             const before = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
-            owner.poll(self.ctx.self_handle, @intCast(index), self.graphicsWindowSpec(index), GraphicsTransport{ .ctx = self.ctx }, self.ctx.draw.buffers());
+            owner.poll(self.ctx.self_handle, @intCast(index), self.graphicsWindowSpec(index), GraphicsTransport{ .ctx = self.ctx },
+                @import("window_image.zig").Memory{ .draw = self.ctx.draw });
             self.ctx.gpu_windows[index] = owner.front();
             const after = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
             if (!std.meta.eql(before, after)) { self.damage.invalidate(self.windows[index].frameSurface().rect); changed = true; }
@@ -7139,7 +7274,7 @@ pub const App = struct {
         if (win.maximized) flags |= r4os.abi.window_service_flag_maximized;
         if (self.active_window == index and win.visible and !win.minimized) flags |= r4os.abi.window_service_flag_focused;
         if (win.close_requested) flags |= r4os.abi.window_service_flag_closing;
-        if (self.terminal_mode and index == 0) flags |= r4os.abi.window_service_flag_fullscreen;
+        if (win.fullscreen or (self.terminal_mode and index == 0)) flags |= r4os.abi.window_service_flag_fullscreen;
 
         const kind: u16 = switch (win.kind) {
             .terminal => blk: {
@@ -7606,6 +7741,7 @@ pub const App = struct {
     }
 
     fn clearWindowInstanceBinding(self: *App, index: usize) void {
+        self.removeWindowMode(index);
         if (self.ctx.gpu_windows[index] != null) self.damage.invalidate(self.windows[index].frameSurface().rect);
         self.graphics_windows[index].disconnect();
         self.ctx.gpu_windows[index] = null;
@@ -7676,6 +7812,7 @@ pub const App = struct {
     fn activateWindow(self: *App, index: usize, announce_same: bool) void {
         if (index >= self.windows.len) return;
         const previous = self.active_window;
+        if (previous != index and (self.windows[index].fullscreen or (previous < self.windows.len and self.windows[previous].fullscreen))) self.invalidateFull();
         if (previous != index and self.isBoundGuiAppWindow(previous)) self.pushGuiEvent(previous, .focus_lost);
         self.active_window = index;
         if ((previous != index or announce_same) and self.isHostedAppWindow(index)) self.pushGuiEvent(index, .focus_gained);
@@ -8076,6 +8213,7 @@ pub const App = struct {
         if (win.minimized) flags |= r4os.abi.GuiWindowFlag.minimized;
         if (win.maximized) flags |= r4os.abi.GuiWindowFlag.maximized;
         if (win.close_requested) flags |= r4os.abi.GuiWindowFlag.close_requested;
+        if (win.fullscreen) flags |= r4os.abi.gui_window_flag_fullscreen;
         return .{
             .window_id = @intCast(index),
             .frame_x = frame.x,

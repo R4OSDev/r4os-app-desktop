@@ -1214,17 +1214,19 @@ pub fn appWindow(
     const frame = win.frameSurface();
     const title_surface = win.titleSurface();
     const client = win.clientSurface();
-    fillSurface(ctx, frame, theme.window_bg);
-    bevelRect(ctx, frame.rect, false);
-    const title = if (active) theme.title_active else theme.title_inactive;
-    const window_title = if (win.kind == .terminal and index == 0 and console_title[0] != 0) console_title else win.title();
-    fillSurface(ctx, title_surface, title);
-    ctx.paintRect(title_surface.rect.x, title_surface.rect.y, @intCast(title_surface.rect.w), 1, if (active) theme.title_light else theme.taskbar_light);
-    ctx.paintText(title_surface.rect.x + 5, title_surface.rect.y + 6, window_title, theme.title_text, title);
-    windowButton(ctx, win.x + win.w - 22, win.y + 5, .close, pressed_target == closeTarget(win, index));
-    windowButton(ctx, win.x + win.w - 40, win.y + 5, .maximize, pressed_target == maxTarget(win, index));
-    windowButton(ctx, win.x + win.w - 58, win.y + 5, .minimize, pressed_target == minTarget(win, index));
-    drawWindowButtonHover(ctx, win, index, hover_target, pressed_target);
+    if (!win.fullscreen) {
+        fillSurface(ctx, frame, theme.window_bg);
+        bevelRect(ctx, frame.rect, false);
+        const title = if (active) theme.title_active else theme.title_inactive;
+        const window_title = if (win.kind == .terminal and index == 0 and console_title[0] != 0) console_title else win.title();
+        fillSurface(ctx, title_surface, title);
+        ctx.paintRect(title_surface.rect.x, title_surface.rect.y, @intCast(title_surface.rect.w), 1, if (active) theme.title_light else theme.taskbar_light);
+        ctx.paintText(title_surface.rect.x + 5, title_surface.rect.y + 6, window_title, theme.title_text, title);
+        windowButton(ctx, win.x + win.w - 22, win.y + 5, .close, pressed_target == closeTarget(win, index));
+        windowButton(ctx, win.x + win.w - 40, win.y + 5, .maximize, pressed_target == maxTarget(win, index));
+        windowButton(ctx, win.x + win.w - 58, win.y + 5, .minimize, pressed_target == minTarget(win, index));
+        drawWindowButtonHover(ctx, win, index, hover_target, pressed_target);
+    }
     fillSurface(ctx, client, theme.client_bg);
     if (external_client) return .{};
 

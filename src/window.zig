@@ -55,6 +55,8 @@ pub const Window = struct {
     visible: bool = true,
     minimized: bool = false,
     maximized: bool = false,
+    fullscreen: bool = false,
+    fullscreen_restore: Geometry = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     instance_id: u32 = 0,
     close_requested: bool = false,
     close_requested_tick: u64 = 0,
@@ -68,6 +70,7 @@ pub const Window = struct {
     }
 
     pub fn setNormal(self: *Window, x: i32, y: i32, w: i32, h: i32) void {
+        self.fullscreen = false;
         self.normal_x = x;
         self.normal_y = y;
         self.normal_w = w;
@@ -89,6 +92,7 @@ pub const Window = struct {
     }
 
     pub fn close(self: *Window) void {
+        self.leaveFullscreen();
         self.visible = false;
         self.minimized = false;
         self.close_requested = false;
@@ -100,6 +104,7 @@ pub const Window = struct {
     }
 
     pub fn bindApp(self: *Window, instance_id: u32, title_text: [*:0]const u8) void {
+        self.leaveFullscreen();
         self.kind = .app;
         self.bindInstance(instance_id);
         self.setTitle(title_text);
@@ -111,6 +116,7 @@ pub const Window = struct {
     }
 
     pub fn bindConsole(self: *Window, instance_id: u32, title_text: [*:0]const u8) void {
+        self.leaveFullscreen();
         self.kind = .terminal;
         self.bindInstance(instance_id);
         self.setTitle(title_text);
@@ -122,6 +128,7 @@ pub const Window = struct {
     }
 
     pub fn unbindInstance(self: *Window) void {
+        self.leaveFullscreen();
         self.instance_id = 0;
         self.close_requested = false;
         self.close_requested_tick = 0;
@@ -169,7 +176,7 @@ pub const Window = struct {
 
         self.min_frame_w = next_w;
         self.min_frame_h = next_h;
-        if (!self.maximized) {
+        if (!self.maximized and !self.fullscreen) {
             const next = (surface.Rect{
                 .x = self.x,
                 .y = self.y,
@@ -185,6 +192,7 @@ pub const Window = struct {
         self.toggleMaximizeIn(surface.workArea(screen_w, screen_h, theme.taskbar_h));
     }
     pub fn toggleMaximizeIn(self: *Window, work_area: surface.Rect) void {
+        if (self.fullscreen) return;
         if (self.maximized) {
             const restored = self.normalRectIn(work_area);
             self.x = restored.x;
@@ -209,6 +217,11 @@ pub const Window = struct {
     }
 
     pub fn fitToWorkArea(self: *Window, screen_w: i32, screen_h: i32) void {
+        if (self.fullscreen) {
+            self.fitFullscreen(surface.desktop(screen_w, screen_h).rect,
+                surface.workArea(screen_w, screen_h, theme.taskbar_h));
+            return;
+        }
         const next = if (self.maximized)
             surface.workArea(screen_w, screen_h, theme.taskbar_h)
         else
@@ -227,7 +240,7 @@ pub const Window = struct {
     }
 
     pub fn moveTo(self: *Window, x: i32, y: i32, screen_w: i32, screen_h: i32) void {
-        if (!self.visible or self.minimized or self.maximized) return;
+        if (!self.visible or self.minimized or self.maximized or self.fullscreen) return;
 
         const work_area = surface.workArea(screen_w, screen_h, theme.taskbar_h);
         const moved = (surface.Rect{ .x = x, .y = y, .w = self.w, .h = self.h }).clampInside(work_area);
@@ -241,6 +254,39 @@ pub const Window = struct {
 
     pub fn geometry(self: *const Window) Geometry {
         return .{ .x = self.x, .y = self.y, .w = self.w, .h = self.h };
+    }
+
+    /// Borderless composition on one output. Fullscreen does not change the
+    /// saved normal rectangle or the preceding maximized state.
+    pub fn setFullscreen(self: *Window, enabled: bool, output: Geometry, work_area: Geometry) bool {
+        if (enabled == self.fullscreen) return false;
+        if (enabled) {
+            self.fullscreen = true;
+            self.fitFullscreen(output, work_area);
+        } else {
+            self.fullscreen_restore = if (self.maximized) work_area else self.normalRectIn(work_area);
+            self.leaveFullscreen();
+        }
+        return true;
+    }
+
+    pub fn fitFullscreen(self: *Window, output: Geometry, work_area: Geometry) void {
+        if (!self.fullscreen) return;
+        self.fullscreen_restore = if (self.maximized) work_area else self.normalRectIn(work_area);
+        self.x = output.x;
+        self.y = output.y;
+        self.w = output.w;
+        self.h = output.h;
+    }
+
+    fn leaveFullscreen(self: *Window) void {
+        if (!self.fullscreen) return;
+        const restored = self.fullscreen_restore;
+        self.fullscreen = false;
+        self.x = restored.x;
+        self.y = restored.y;
+        self.w = restored.w;
+        self.h = restored.h;
     }
 
     pub fn frameSurface(self: *const Window) surface.Surface {
@@ -266,6 +312,7 @@ pub const Window = struct {
     }
 
     pub fn clientSurface(self: *const Window) surface.Surface {
+        if (self.fullscreen) return surface.make(.window_client, self.geometry());
         return surface.make(.window_client, .{
             .x = self.x + 8,
             .y = self.y + theme.title_h + 10,
@@ -278,7 +325,7 @@ pub const Window = struct {
         self.resizeIn(start, handle, mouse_dx, mouse_dy, surface.workArea(screen_w, screen_h, theme.taskbar_h));
     }
     pub fn resizeIn(self: *Window, start: Geometry, handle: ResizeHandle, mouse_dx: i32, mouse_dy: i32, bounds: surface.Rect) void {
-        if (!self.visible or self.minimized or self.maximized) return;
+        if (!self.visible or self.minimized or self.maximized or self.fullscreen) return;
 
         const work_w = bounds.right();
         const work_h = bounds.bottom();
@@ -327,7 +374,7 @@ pub const Window = struct {
     }
 
     pub fn resizeHit(self: *const Window, x: i32, y: i32) ?ResizeHandle {
-        if (!self.contains(x, y) or self.maximized) return null;
+        if (!self.contains(x, y) or self.maximized or self.fullscreen) return null;
 
         const near_left = x < self.x + resize_margin;
         const near_right = x >= self.x + self.w - resize_margin;
@@ -346,7 +393,7 @@ pub const Window = struct {
     }
 
     pub fn titleHit(self: *const Window, x: i32, y: i32) bool {
-        return self.visible and !self.minimized and !self.maximized and
+        return self.visible and !self.minimized and !self.maximized and !self.fullscreen and
             self.titleDragRect().contains(x, y);
     }
 
@@ -363,7 +410,7 @@ pub const Window = struct {
     }
 
     fn buttonHit(self: *const Window, x: i32, y: i32, index_from_right: i32) bool {
-        if (!self.visible or self.minimized) return false;
+        if (!self.visible or self.minimized or self.fullscreen) return false;
         const bx = self.x + self.w - 4 - index_from_right * (theme.button + 2);
         return x >= bx and x < bx + theme.button and y >= self.y + 2 and y < self.y + 2 + theme.button;
     }
@@ -442,6 +489,13 @@ pub fn topmostAt(windows: []const Window, active_window: usize, x: i32, y: i32) 
         if (windows[i].contains(x, y)) return i;
     }
     return null;
+}
+
+pub fn fullscreenCovers(windows: []const Window, active: usize, rect: Geometry) bool {
+    if (active >= windows.len or rect.w <= 0 or rect.h <= 0) return false;
+    const win = &windows[active];
+    return win.fullscreen and win.contains(rect.x, rect.y) and
+        win.contains(rect.right() - 1, rect.bottom() - 1);
 }
 
 fn clamp(value: i32, min: i32, max: i32) i32 {
@@ -568,6 +622,37 @@ test "window maximize and restore stay inside work area" {
     try std.testing.expectEqual(@as(i32, 288), win.y);
     try std.testing.expectEqual(@as(i32, 300), win.w);
     try std.testing.expectEqual(@as(i32, 160), win.h);
+    const output: Geometry = .{ .x = 0, .y = 0, .w = 640, .h = 480 };
+    const work: Geometry = .{ .x = 0, .y = 0, .w = 640, .h = 448 };
+    const saved = win.geometry();
+    try std.testing.expect(win.setFullscreen(true, output, work));
+    try std.testing.expectEqualDeep(output, win.geometry());
+    try std.testing.expectEqualDeep(output, win.clientSurface().rect);
+    try std.testing.expect(!win.setFullscreen(true, output, work));
+    try std.testing.expect(win.resizeHit(0, 0) == null and !win.titleHit(10, 10));
+    win.toggleMaximizeIn(work);
+    try std.testing.expect(!win.maximized);
+    win.moveTo(30, 30, 640, 480);
+    try std.testing.expectEqualDeep(output, win.geometry());
+    try std.testing.expect(fullscreenCovers((&win)[0..1], 0, .{ .x = 0, .y = 448, .w = 640, .h = 32 }));
+    win.minimize();
+    try std.testing.expect(!fullscreenCovers((&win)[0..1], 0, output));
+    win.restore();
+    try std.testing.expect(win.setFullscreen(false, output, work));
+    try std.testing.expectEqualDeep(saved, win.geometry());
+    win.toggleMaximizeIn(work);
+    try std.testing.expect(win.setFullscreen(true, output, work));
+    const secondary: Geometry = .{ .x = 640, .y = -100, .w = 800, .h = 600 };
+    win.fitFullscreen(secondary, secondary);
+    try std.testing.expectEqualDeep(secondary, win.clientSurface().rect);
+    try std.testing.expect(!fullscreenCovers((&win)[0..1], 0, output));
+    try std.testing.expect(win.setFullscreen(false, secondary, secondary));
+    try std.testing.expect(win.maximized);
+    try std.testing.expectEqualDeep(secondary, win.geometry());
+    _ = win.setFullscreen(true, secondary, secondary);
+    win.unbindInstance();
+    try std.testing.expect(!win.fullscreen);
+
 }
 
 test "window fit normalizes startup geometry" {

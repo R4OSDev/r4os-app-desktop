@@ -44,3 +44,9 @@ pub fn publish(config: *abi.WindowGraphicsConfig) void {
     config.formats[6] = .{ .format = gfx.format_argb2101010, .color = @bitCast(pq(false)) };
     config.formats[7] = .{ .format = gfx.format_xrgb2101010, .color = @bitCast(pq(true)) };
 }
+pub fn publishCpu(config: *abi.WindowGraphicsConfig) void {
+    config.format_count = 2;
+    config.formats = @splat(.{});
+    config.formats[0] = .{ .format = gfx.format_xrgb8888, .color = @bitCast(sdr(false, true)) };
+    config.formats[1] = .{ .format = gfx.format_argb8888, .color = @bitCast(sdr(false, false)) };
+}

@@ -20,6 +20,28 @@ const WindowMemory = struct {
     var serial: u64 = 10;
     var generations: [32]u64 = @splat(0);
     var pixels: [128]u32 = @splat(0);
+    var cpu_ready = false;
+    var cpu_failed = false;
+    var map_busy = false;
+    var unmap_busy = false;
+    var mapped: usize = 0;
+    pub fn query(_: @This(), fence: *const a.GfxFence, out: *a.GfxFenceStatus) i32 {
+        out.* = .{ .fence = fence.*, .milestone = a.gfx_queue_milestone_cpu_stores,
+            .result = if (cpu_failed) a.gfx_queue_result_failed else if (cpu_ready) a.gfx_queue_result_complete else a.gfx_queue_result_pending };
+        return a.gfx_queue_ok;
+    }
+    pub fn map(_: @This(), _: *const a.GfxBufferHandle, bytes: u64, out: *a.GfxBufferMap) i32 {
+        if (map_busy) return a.gfx_buffer_error_busy;
+        std.debug.assert(bytes <= @sizeOf(@TypeOf(pixels)));
+        mapped += 1;
+        out.* = .{ .lease = .{ .id = 1, .generation = 1 }, .cpu_address = @intFromPtr(&pixels), .byte_length = bytes };
+        return a.gfx_buffer_result_ok;
+    }
+    pub fn unmap(_: @This(), _: *const a.GfxBufferHandle) i32 {
+        if (unmap_busy) return a.gfx_buffer_error_busy;
+        std.debug.assert(mapped != 0); mapped -= 1;
+        return a.gfx_buffer_result_ok;
+    }
     fn source() a.GfxBufferReference { return .{ .reference = .{ .id = 1, .generation = 1 }, .buffer = .{ .id = 44, .generation = 7 } }; }
     pub fn import(_: @This(), input: *const a.GfxBufferHandle, out: *a.GfxBufferReference) i32 {
         if (input.id == 0 or input.id > refs.len or !refs[input.id-1] or generations[input.id-1] != input.generation) return -1;
@@ -510,6 +532,7 @@ pub fn check() !void {
     try checkWindowImages(graphics, device);
     try checkHdrWindows(graphics, device);
     try checkWindowTransport(graphics, device);
+    try checkCpuWindow(graphics);
 }
 
 const WindowTransport = struct {
@@ -528,6 +551,10 @@ const WindowTransport = struct {
     takes: u32 = 0,
     returns: u32 = 0,
     borrowed: a.GfxFence = .{},
+    cpu: bool = false,
+    chain_closed: bool = false,
+    lose_inspect: bool = false,
+    revision: u64 = 1,
     pub fn invalidate(self: *@This()) void { self.invalidated = true; }
     pub fn serviceDead(self: *@This(), _: a.ProgramProcessHandle) bool { return self.dead; }
     pub fn publish(self: *@This(), request: *const a.WindowGraphicsPublication, out: *a.WindowGraphicsReply) bool {
@@ -544,21 +571,31 @@ const WindowTransport = struct {
         return true;
     }
     pub fn consumer(self: *@This(), request: *const a.WindowGraphicsConsumer, out: *a.WindowGraphicsReply) bool {
+        if (request.action == a.window_graphics_inspect) {
+            std.debug.assert(request.request_serial == 0 and request.result == 0 and std.meta.eql(request.fence, a.GfxFence{}));
+            out.* = .{ .result = if (self.chain_closed) a.window_graphics_closed else a.window_graphics_ok,
+                .surface = self.surface, .chain = request.chain, .image_slot = request.image_slot,
+                .acquire_token = request.acquire_token, .revision = self.revision };
+            if (self.lose_inspect) { self.lose_inspect = false; return false; }
+            return true;
+        }
         if (self.last) |last| if (last.request_serial == request.request_serial) {
             std.debug.assert(std.meta.eql(last, request.*)); out.* = self.reply; return true;
         };
-        out.* = .{ .result = a.window_graphics_ok, .surface = self.surface, .config = self.config,
+        out.* = .{ .result = a.window_graphics_ok, .surface = self.surface, .config = self.config, .revision = self.revision,
             .chain = request.chain, .image_slot = request.image_slot, .acquire_token = request.acquire_token };
         switch (request.action) {
             a.window_graphics_take => {
                 if (!self.available) { out.result = a.window_graphics_not_ready; return true; }
                 self.available = false; self.takes += 1;
                 out.frame = windowMessage(); out.frame.surface = self.surface; out.frame.config_revision = self.config.revision;
+                if (self.cpu) out.frame.ready.adapter_id = 0;
                 out.chain = out.frame.chain; out.image_slot = out.frame.image_slot; out.acquire_token = out.frame.acquire_token;
             },
             a.window_graphics_return => {
+                if (self.cpu) std.debug.assert(WindowMemory.mapped == 0);
                 self.returns += 1; self.borrowed = request.fence;
-                if (request.result != a.window_graphics_ok) { out.flags = a.window_graphics_fence_released; self.borrowed = .{}; }
+                if (request.result != a.window_graphics_ok or self.chain_closed) { out.flags = a.window_graphics_fence_released; self.borrowed = .{}; }
             },
             a.window_graphics_release_fence => {
                 std.debug.assert(std.meta.eql(self.borrowed, request.fence));
@@ -573,6 +610,93 @@ const WindowTransport = struct {
         return true;
     }
 };
+fn checkCpuWindow(graphics: anytype) !void {
+    const transport = @import("window_graphics.zig");
+    var owner: transport.Window = .{};
+    var server: WindowTransport = .{ .cpu = true, .lose_publish = false, .lose_take = false, .lose_return = true };
+    const desktop: a.ProgramProcessHandle = .{ .instance_id = 5, .generation = 7 };
+    var spec: transport.Spec = .{ .owner = .{ .instance_id = 17, .generation = 3 },
+        .config = .{ .width = 8, .height = 8, .flags = a.window_graphics_visible } };
+    WindowMemory.descriptor = .{ .byte_length = 256, .width = 8, .height = 8, .format = c.format_argb8888,
+        .plane_count = 1, .plane_pitches = .{32, 0, 0, 0}, .usage = 31 };
+    WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+    WindowMemory.cpu_ready = false; WindowMemory.cpu_failed = false;
+    @memset(&WindowMemory.pixels, 0x80808080);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == null and owner.needsPolling() and WindowMemory.mapped == 0);
+    WindowMemory.cpu_ready = true; WindowMemory.map_busy = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == null and WindowMemory.mapped == 0);
+    WindowMemory.map_busy = false;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const front = owner.front().?;
+    try t.expect(WindowMemory.mapped == 1 and !owner.needsPolling());
+    var cpu: @import("composition_software.zig").Owner = .{}; defer cpu.deinit();
+    var pixels: [64]u32 = @splat(0x123456);
+    var canvas: scene.SceneBuffer = .{};
+    try t.expect(canvas.attach(std.mem.sliceAsBytes(&pixels), 8, 8));
+    canvas.origin_x = -3; canvas.origin_y = 5;
+    try cpu.begin(t.allocator, &canvas);
+    const damage: surface.Rect = .{ .x = -2, .y = 6, .w = 2, .h = 2 };
+    const base = (try cpu.cache.?.begin(1, canvas.fullRect(), damage)).?;
+    base.fillRect(canvas.fullRect(), 0); try cpu.cache.?.end(1);
+    try cpu.cache.?.external(2, canvas.fullRect(), damage, front);
+    try t.expect(front.readers == 1 and !front.cpu_consumed);
+    try cpu.finish(&graphics.colors, &canvas);
+    for (pixels, 0..) |value, i| try t.expectEqual(@as(u32, if (i % 8 >= 1 and i % 8 <= 2 and i / 8 >= 1 and i / 8 <= 2) 0xbcbcbc else 0x123456), value);
+    try t.expect(front.readers == 0 and front.cpu_consumed and WindowMemory.mapped == 1);
+    // A pending replacement keeps the old front. A resize cancels preparation
+    // and releases the CPU map before sending even a retried Return.
+    server.available = true; WindowMemory.cpu_ready = false;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == front and WindowMemory.mapped == 1 and owner.needsPolling());
+    spec.config.width = 9;
+    WindowMemory.unmap_busy = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == null and server.returns == 0 and WindowMemory.mapped == 1);
+    WindowMemory.unmap_busy = false;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 1 and WindowMemory.mapped == 0 and owner.request != null);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 1 and owner.request == null);
+    // Exact service death ends remaining metadata loans; all local imports
+    // and mappings still run through the normal close owner.
+    server.dead = true;
+    owner.poll(desktop, 1, null, &server, WindowMemory{});
+    try t.expect(WindowMemory.count() == 1 and WindowMemory.mapped == 0);
+    try t.expectEqual(a.gfx_buffer_result_ok, WindowMemory.release(.{}, &WindowMemory.source().reference));
+    // A producer may close its chain while its window remains visible. Even
+    // an occluded, never-composited front must retire, without ending readers
+    // early or dropping an uncertain Return reply.
+    owner = .{};
+    server = .{ .cpu = true, .lose_publish = false, .lose_take = false, .lose_return = true };
+    spec.config.width = 8;
+    WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+    WindowMemory.cpu_ready = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const retained = owner.front().?;
+    retained.readers = 1;
+    server.chain_closed = true; server.revision += 1; server.lose_inspect = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == retained and owner.needsPolling() and server.returns == 0);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == null and retained.retired and !retained.failed and WindowMemory.mapped == 1);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 0);
+    retained.readers = 0;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 1 and owner.request != null and WindowMemory.mapped == 0);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 1 and WindowMemory.count() == 1 and !owner.needsPolling());
+    try t.expectEqual(a.gfx_buffer_result_ok, WindowMemory.release(.{}, &WindowMemory.source().reference));
+    std.debug.print("[desktop-cpu-window] producer fence, read lease, linear alpha, sparse damage, pending replacement, resize and lost Return: OK\n", .{});
+}
 fn checkWindowTransport(graphics: anytype, device: *const c.R4GfxDevice) !void {
     const transport = @import("window_graphics.zig");
     var owner: transport.Window = .{};
@@ -770,7 +894,7 @@ fn checkWindowImages(graphics: anytype, device: *const c.R4GfxDevice) !void {
         try t.expect(front.closeAcknowledged(WindowMemory{})); try engine.close();
         try t.expect(WindowMemory.count() == 0);
         var fallback = layers.Cache.init(t.allocator, 1024); defer fallback.deinit();
-        try t.expect(fallback.hook().external == null);
+        try t.expect(fallback.hook().external != null and fallback.hook().external_cpu);
         fallback.recording = &recording; recording.mirror = true;
         try t.expect(fallback.hook().external == null);
         recording.mirror = false;

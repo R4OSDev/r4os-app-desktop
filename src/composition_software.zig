@@ -29,6 +29,7 @@ pub const Owner = struct {
         canvas.layer_hook = null;
         canvas.clearPaintClip();
         const cache = self.cache orelse return error.State;
+        defer cache.releaseUnsubmitted();
         _ = try cache.finish();
         if (canvas.failure != null) return error.Graphics;
         const result = try paint(colors, cache, canvas);
@@ -43,6 +44,7 @@ pub const Owner = struct {
             cache.collecting = false;
             for (&cache.entries) |*entry| entry.initialized = false;
         };
+        if (self.cache) |cache| cache.releaseUnsubmitted();
     }
     pub fn deinit(self: *Owner) void {
         if (self.cache) |cache| {
@@ -110,8 +112,11 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
     for (cache.commands[0..cache.command_count]) |command| {
         if (command.entry >= cache.entries.len) return error.State;
         const entry = &cache.entries[command.entry];
-        if (!entry.initialized or entry.generation == 0 or entry.bounds.isEmpty() or command.scissor.isEmpty() or
-            @as(u64, @intCast(entry.bounds.w)) * @as(u32, @intCast(entry.bounds.h)) > entry.pixels.len) return error.State;
+        if (!entry.initialized or entry.generation == 0 or entry.bounds.isEmpty() or command.scissor.isEmpty()) return error.State;
+        if (entry.external) |frame| {
+            if (!entry.borrowed or frame.cpuImage() == null or frame.message.descriptor.width != entry.bounds.w or
+                frame.message.descriptor.height != entry.bounds.h) return error.State;
+        } else if (@as(u64, @intCast(entry.bounds.w)) * @as(u32, @intCast(entry.bounds.h)) > entry.pixels.len) return error.State;
         const clip = layers.intersect(entry.bounds, command.scissor) orelse return error.State;
         if (!std.meta.eql(clip, command.scissor) or !std.meta.eql(layers.intersect(cache.screen, clip) orelse return error.State, clip)) return error.State;
     }
@@ -137,7 +142,8 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
             for (cache.commands[0..cache.command_count]) |command| {
                 const clip = layers.intersect(tile, command.scissor) orelse continue;
                 const entry = &cache.entries[command.entry];
-                const source = image(@intFromPtr(entry.pixels.ptr), entry.pixels.len * 4, @as(u64, @intCast(entry.bounds.w)) * 4, @intCast(entry.bounds.w), @intCast(entry.bounds.h), false, false);
+                const source = if (entry.external) |frame| frame.cpuImage().? else
+                    image(@intFromPtr(entry.pixels.ptr), entry.pixels.len * 4, @as(u64, @intCast(entry.bounds.w)) * 4, @intCast(entry.bounds.w), @intCast(entry.bounds.h), false, false);
                 const dx = clip.x - tile.x;
                 const dy = clip.y - tile.y;
                 try transform(colors, &source, &working, rect(clip.x - entry.bounds.x, clip.y - entry.bounds.y, clip.w, clip.h), rect(dx, dy, clip.w, clip.h), true, false, &stats);
@@ -160,5 +166,6 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
             }
         }
     }
+    for (cache.commands[0..cache.command_count]) |command| if (cache.entries[command.entry].external) |frame| { frame.cpu_consumed = true; };
     return stats;
 }

@@ -4,8 +4,8 @@ const std = @import("std");
 const a = @import("r4os").abi;
 const image = @import("window_image.zig");
 pub const Spec = struct { owner: a.ProgramProcessHandle, config: a.WindowGraphicsConfig, consumer_ready: bool = true };
-const State = enum { empty, taking, live, returning, acknowledged };
-const Slot = struct { frame: image.Frame = .{}, state: State = .empty };
+const State = enum { empty, taking, preparing, live, returning, acknowledged };
+const Slot = struct { frame: image.Frame = .{}, state: State = .empty, inspected_revision: u64 = 0 };
 pub const Window = struct {
     owner: a.ProgramProcessHandle = .{},
     surface: a.WindowGraphicsSurface = .{},
@@ -20,6 +20,7 @@ pub const Window = struct {
     request_slot: usize = 0,
     slots: [3]Slot = @splat(.{}),
     current: ?usize = null,
+    inspect_slot: ?usize = null,
 
     pub fn front(self: *Window) ?*image.Frame {
         const index = self.current orelse return null;
@@ -28,6 +29,7 @@ pub const Window = struct {
     }
     pub fn retire(self: *Window) void {
         self.retry_take = false;
+        self.inspect_slot = null;
         self.current = null;
         for (&self.slots) |*slot| if (slot.state != .empty) { slot.frame.retired = true; };
     }
@@ -79,7 +81,9 @@ pub const Window = struct {
                 if (!valid) { slot.frame.failed = true; slot.frame.retired = true; self.disconnect(); }
                 else slot.frame.open(memory, reply.frame) catch { slot.frame.failed = true; slot.frame.retired = true; };
                 if (self.closing or self.removed or self.config.flags & a.window_graphics_visible == 0) slot.frame.retired = true;
-                if (!slot.frame.failed and !slot.frame.retired) {
+                if (!slot.frame.failed and !slot.frame.retired and slot.frame.isCpu()) {
+                    slot.state = .preparing;
+                } else if (!slot.frame.failed and !slot.frame.retired) {
                     if (self.current) |old| self.slots[old].frame.retired = true;
                     self.current = index;
                 }
@@ -94,7 +98,13 @@ pub const Window = struct {
         } else if (reply.result == a.window_graphics_not_ready or reply.result == a.window_graphics_busy or reply.result == a.window_graphics_capacity) {
             // Negative replies did not mutate the broker. Preserve the exact
             // request for retry, except an empty poll which needs no pin.
-            if (request.action == a.window_graphics_take) { slot.* = .{}; self.request = null; }
+            if (request.action == a.window_graphics_take) {
+                slot.* = .{}; self.request = null;
+                if (self.current) |current| if (reply.revision != self.slots[current].inspected_revision) {
+                    self.inspect_slot = current;
+                    self.inspect(request.desktop, transport);
+                };
+            }
         } else if (reply.result == a.window_graphics_closed or
             (reply.result == a.window_graphics_stale and reply.surface.serial == 0)) {
             // Closed chain / absent exact surface cannot borrow this fence.
@@ -111,6 +121,33 @@ pub const Window = struct {
         } else if (reply.result == a.window_graphics_device_lost and request.action == a.window_graphics_release_fence) {
             // retireConsumer invalidates the chain and ends its metadata loan.
             self.acknowledge(index); self.request = null;
+        } else { self.disconnect(); transport.invalidate(); }
+    }
+    fn inspect(self: *Window, desktop: a.ProgramProcessHandle, transport: anytype) void {
+        const index = self.inspect_slot orelse return;
+        const slot = &self.slots[index];
+        if (slot.frame.retired or (slot.state != .live and slot.state != .preparing)) { self.inspect_slot = null; return; }
+        const message = slot.frame.message;
+        const request: a.WindowGraphicsConsumer = .{ .desktop = desktop, .surface = self.surface,
+            .action = a.window_graphics_inspect, .chain = message.chain,
+            .image_slot = message.image_slot, .acquire_token = message.acquire_token };
+        var reply: a.WindowGraphicsReply = .{};
+        if (!transport.consumer(&request, &reply)) return;
+        self.inspect_slot = null;
+        if (!std.meta.eql(reply.surface, self.surface) or reply.chain != message.chain or
+            reply.image_slot != message.image_slot or reply.acquire_token != message.acquire_token) {
+            self.disconnect(); transport.invalidate(); return;
+        }
+        slot.inspected_revision = reply.revision;
+        if (reply.result == a.window_graphics_ok) return;
+        if (reply.result == a.window_graphics_closed or reply.result == a.window_graphics_device_lost or
+            reply.result == a.window_graphics_failed) {
+            // Closing a producer chain retires the retained last frame even
+            // while its app/window stays alive. Reads, mappings and receipts
+            // still end through the ordinary explicit Return path below.
+            slot.frame.retired = true;
+            slot.frame.failed = slot.frame.failed or reply.result != a.window_graphics_closed;
+            if (self.current == index) self.current = null;
         } else { self.disconnect(); transport.invalidate(); }
     }
     fn publish(self: *Window, transport: anytype) void {
@@ -163,10 +200,30 @@ pub const Window = struct {
         // Never overtake an RPC whose reply may have been lost.
         if (self.request != null) { self.consume(transport, memory); return; }
         if (self.publication != null) { self.publish(transport); return; }
+        if (self.inspect_slot != null) { self.inspect(desktop, transport); return; }
+        for (&self.slots, 0..) |*slot, index| if (slot.state == .preparing) {
+            if (!slot.frame.retired) {
+                const ready = slot.frame.prepareCpu(memory) catch {
+                    slot.frame.failed = true;
+                    slot.frame.retired = true;
+                    slot.state = .live;
+                    return;
+                };
+                if (!ready) {
+                    self.inspect_slot = index; self.inspect(desktop, transport); return;
+                }
+                if (self.current) |old| self.slots[old].frame.retired = true;
+                self.current = index;
+            }
+            slot.state = .live;
+        };
         // Return retired images before accepting more. The last real GPU
         // receipt stays resident until the broker's fence-release ack.
         for (&self.slots, 0..) |*slot, index| {
             if ((slot.state == .live and slot.frame.retired and slot.frame.readers == 0) or slot.state == .returning) {
+                // End CPU reads before Return permits the producer to reuse
+                // this image. A lost response retains only metadata/imports.
+                if (!slot.frame.releaseCpuMapping(memory)) return;
                 if (self.nextRequest(if (slot.state == .returning) a.window_graphics_release_fence else a.window_graphics_return, index, desktop))
                     self.consume(transport, memory);
                 return;
@@ -197,7 +254,11 @@ pub const Window = struct {
         if (self.config.flags & a.window_graphics_visible == 0) return;
         // FIFO frames cannot be replaced before the compositor has sampled
         // them. A fully occluded window naturally applies bounded backpressure.
-        if (self.current) |current| if (self.slots[current].frame.receipt == null) return;
+        if (self.current) |current| if (self.slots[current].frame.receipt == null and !self.slots[current].frame.cpu_consumed) {
+            // Occlusion must not turn producer Close into an infinite wait.
+            // This read is driven by the existing loop/wake, not a frame clock.
+            self.inspect_slot = current; self.inspect(desktop, transport); return;
+        };
         // A queued image may have woken us before the output's next frame
         // deadline. Retry admission when it opens, even without another IPC
         // revision; the following empty Take returns to ordinary idle waits.
@@ -207,8 +268,8 @@ pub const Window = struct {
         if (self.nextRequest(a.window_graphics_take, index, desktop)) self.consume(transport, memory);
     }
     pub fn needsPolling(self: *const Window) bool {
-        if (self.publication != null or self.request != null or self.closing or self.ended or self.retry_take) return true;
-        for (&self.slots) |*slot| if (slot.state == .returning or slot.state == .acknowledged or
+        if (self.publication != null or self.request != null or self.inspect_slot != null or self.closing or self.ended or self.retry_take) return true;
+        for (&self.slots) |*slot| if (slot.state == .preparing or slot.state == .returning or slot.state == .acknowledged or
             (slot.state == .live and slot.frame.retired)) return true;
         return false;
     }

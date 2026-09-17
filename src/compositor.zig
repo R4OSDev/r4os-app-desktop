@@ -181,28 +181,30 @@ pub fn compose(
         stats.items_culled +%= @intCast(items.count);
     }
 
-    if (layerVisible(&stats, damage, ctx.output_bounds orelse surface.workArea(screen_w, screen_h, theme.taskbar_h))) {
+    if (layerVisible(&stats, damage, desktop_rect)) {
         drawWindows(ctx, windows, gui_frames, active_window, console_title, console_path, console_args, console_scroll_offsets, console_snapshots, terminal_font_size, terminal_codepage, cursor_blink_on, hover_target, pressed_target, damage, &stats);
     } else {
         countCulledWindows(windows, &stats);
     }
 
     const taskbar_rect = surface.taskbar(screen_w, screen_h, theme.taskbar_h).rect;
-    if (layerVisible(&stats, damage, taskbar_rect)) {
+    const hide_taskbar = window.fullscreenCovers(windows, active_window, taskbar_rect) and
+        !start_open and !system_menu.open and !time_menu_open and !volume_view.popup_open and overlay == .none;
+    if (!hide_taskbar and layerVisible(&stats, damage, taskbar_rect)) {
         if (layer(ctx,.taskbar,taskbar_rect)) |target| {
             defer target.end(); draw.taskbar(&target.context, screen_w, screen_h, windows, quick_bar, active_window, if (config.taskbar_clock) clock else null, keyboard_layout, volume_view, tray_registry, tray_hover, tray_pressed, hover_target, pressed_target);
         }
     }
 
-    if (tray_registry.tooltipRect(tray_hover, screen_w, screen_h, theme.taskbar_h)) |tooltip_rect| {
+    if (!hide_taskbar) if (tray_registry.tooltipRect(tray_hover, screen_w, screen_h, theme.taskbar_h)) |tooltip_rect| {
         if (layerVisible(&stats, damage, tooltip_rect)) {
             if (layer(ctx,.tray_tooltip,tooltip_rect)) |target| {
                 defer target.end(); draw.trayTooltip(&target.context, tray_registry, tray_hover, screen_w, screen_h);
             }
         }
-    }
+    };
 
-    if (hover_target == .taskbar_volume and !volume_view.popup_open) {
+    if (!hide_taskbar and hover_target == .taskbar_volume and !volume_view.popup_open) {
         const tooltip_rect = draw.volumeTooltipRect(screen_w, screen_h, config.taskbar_clock);
         if (layerVisible(&stats, damage, tooltip_rect)) {
             if (layer(ctx,.volume_tooltip,tooltip_rect)) |target| {
@@ -505,6 +507,7 @@ test "occlusion composition matches complete painter order after move hide minim
                 .owner = .{ .instance_id = 17, .generation = 3 } } },
             .reference = .{ .reference = .{ .id = 1, .generation = 1 } },
         };
+        front.message.ready.adapter_id = 1;
         windows[1].instance_id = 17;
         ctx.gpu_windows[1] = &front;
         defer ctx.gpu_windows[1] = null;

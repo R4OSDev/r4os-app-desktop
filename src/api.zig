@@ -374,6 +374,11 @@ pub const Context = struct {
         return r4os.abi.service_api_result_ok;
     }
 
+    pub fn windowModeExchange(self: *Context, request: *const r4os.abi.WindowModeExchange, out: *r4os.abi.WindowModeReply) bool {
+        const got = self.window_session.call(self, r4os.abi.window_mode_op_exchange, std.mem.asBytes(request), std.mem.asBytes(out));
+        return got == @sizeOf(r4os.abi.WindowModeReply) and r4os.window_mode.validReply(out);
+    }
+
     pub fn openWindowService(self: *Context) bool {
         return self.window_session.open(self);
     }
@@ -698,6 +703,7 @@ pub const Context = struct {
         const scene = self.scene orelse return null;
         const hook = scene.layer_hook orelse return null;
         if (hook.external == null) return null;
+        if (hook.external_cpu != frame.isCpu() or (hook.external_cpu and frame.cpuImage() == null)) return null;
         return frame;
     }
     pub fn paintGpuWindow(self: *const Context, key: u32, bounds: surface.Rect, frame: *@import("window_image.zig").Frame) void {

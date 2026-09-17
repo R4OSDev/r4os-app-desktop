@@ -107,18 +107,21 @@ pub const Cache = struct {
     }
     pub fn hook(self: *Cache) scene.SceneBuffer.LayerHook {
         return .{ .context = @intFromPtr(self), .begin = beginHook, .end = endHook,
-            .external = if (self.recording) |recording| if (!recording.mirror) externalHook else null else null };
+            .external = if (self.recording) |recording| if (!recording.mirror) externalHook else null else externalHook,
+            .external_cpu = self.recording == null };
     }
     fn externalHook(raw: usize, key: u32, bounds: surface.Rect, damage: surface.Rect, frame: *anyopaque) void {
         const self: *Cache = @ptrFromInt(raw);
         self.external(key, bounds, damage, @ptrCast(@alignCast(frame))) catch |err| { self.failure = err; };
     }
-    /// A GPU window is its own ordered layer, sampled directly into the
-    /// output working image. It never passes through the CPU painter cache.
+    /// A window BO is its own ordered layer. CPU composition reads the
+    /// producer's read-only lease directly, without a second painter copy.
     pub fn external(self: *Cache, key: u32, bounds: surface.Rect, damage: surface.Rect, frame: *window_image.Frame) !void {
         if (!self.collecting or self.active != null) return error.State;
-        const recording = self.recording orelse return error.Unsupported;
-        if (recording.mirror) return error.Unsupported;
+        if (self.recording) |recording| {
+            if (recording.mirror or frame.isCpu()) return error.Unsupported;
+        } else if (frame.cpuImage() == null or frame.message.descriptor.width != bounds.w or
+            frame.message.descriptor.height != bounds.h) return error.Unsupported;
         if (self.failure != null) return error.State;
         if (key == 0 or self.command_count == self.commands.len) return error.Capacity;
         const logical_clip = intersect(intersect(self.logical_screen, bounds) orelse return, damage) orelse return;
