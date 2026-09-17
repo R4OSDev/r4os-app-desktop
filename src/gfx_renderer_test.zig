@@ -53,7 +53,7 @@ pub const Fixture = struct {
             .{ .group_id = @intFromEnum(a.R4LGroup.r4draw), .flags = a.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.draw) },
             .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("DEVICE_V1"), .min_version = provider.c.device_v1_header.abi_minor, .resolved_version = provider.c.device_v1_header.abi_minor, .table = @intFromPtr(self.table_override orelse &table) },
             .{ .module_name = @intFromPtr("R4NV"), .symbol_name = @intFromPtr("BACKEND_V1"), .min_version = 3 },
-            .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(self.color_override orelse &provider.color_api.table) },
+            .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = 2, .resolved_version = provider.c.color_v1_header.abi_minor, .table = @intFromPtr(self.color_override orelse &provider.color_api.table) },
         };
         self.raw = .{ .flags = a.r4xstart_flag_imports_valid, .imports = @intFromPtr(&self.imports), .import_count = self.imports.len, .instance_id = 9 };
         return renderer.Renderer.create(@import("std").testing.allocator, &self.raw) orelse error.RendererUnavailable;

@@ -13,7 +13,7 @@ pub fn check(comptime decode: anytype) !void {
         .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("API_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&image_provider.r4img_api_v1) },
         .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("PNG_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&image_provider.r4img_png_v1) },
         .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("RASTER_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&image_provider.r4img_raster_v1) },
-        .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&color_provider.color_api.table) },
+        .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = 2, .resolved_version = color_provider.c.color_v1_header.abi_minor, .table = @intFromPtr(&color_provider.color_api.table) },
     };
     var raw: r4os.abi.R4XStartContext = .{ .flags = r4os.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&imports), .import_count = imports.len };
     const images = img.Context.init(&raw) orelse return error.Images;
