@@ -39,7 +39,7 @@ pub const Layer = enum(u32) {
     background = 1, info, wallpaper, grid, taskbar, tray_tooltip,
     volume_tooltip, start_menu, system_menu, time_menu, volume_popup,
     overlay, cursor, terminal,
-    item_base = 32, window_base = 64,
+    item_base = 32, window_base = 64, gpu_window_base = 80,
 };
 fn layer(ctx: *const desk_api.Context, id: Layer, bounds: surface.Rect) ?desk_api.Context.LayerPaint {
     return ctx.beginLayer(@intFromEnum(id),bounds);
@@ -409,6 +409,7 @@ test "occlusion composition matches complete painter order after move hide minim
     var composed: [320 * 200]u32 = undefined;
     var scene = scene_buffer.SceneBuffer{};
     var ctx: desk_api.Context = undefined;
+    ctx.gpu_windows = @splat(null);
     ctx.scene = &scene;
     for (0..6) |scenario| {
         var active: usize = 3;
@@ -496,6 +497,37 @@ test "occlusion composition matches complete painter order after move hide minim
     try cpu_owner.finish(&graphics.colors, &color_scene);
     try std.testing.expectEqualSlices(u32, &.{ 0xbcbcbc, 0x123456, 0x123456, 0x123456 }, &color_pixels);
     try std.testing.expect(cpu_owner.frames == 1 and color_scene.layer_hook == null);
+    {
+        // Exercise the actual window painter hook, including its CPU fallback.
+        // This capture-only fixture owns no kernel BO and submits no GPU job.
+        var front: @import("window_image.zig").Frame = .{
+            .message = .{ .surface = .{ .serial = 1, .window_id = 1,
+                .owner = .{ .instance_id = 17, .generation = 3 } } },
+            .reference = .{ .reference = .{ .id = 1, .generation = 1 } },
+        };
+        windows[1].instance_id = 17;
+        ctx.gpu_windows[1] = &front;
+        defer ctx.gpu_windows[1] = null;
+        var primitives = try @import("primitive_frame.zig").Frame.init(std.testing.allocator);
+        defer primitives.deinit(); primitives.mirror = false;
+        var gpu_cache = composition_layers.Cache.init(std.testing.allocator, 1024);
+        defer gpu_cache.deinit(); gpu_cache.recording = &primitives;
+        const bounds = scene.fullRect();
+        try gpu_cache.start(bounds); scene.layer_hook = gpu_cache.hook();
+        var stats: CullStats = .{};
+        drawWindow(&ctx, &windows[1], &frames, 1, false, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, bounds, &stats);
+        drawWindow(&ctx, &windows[2], &frames, 2, true, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, bounds, &stats);
+        scene.layer_hook = null;
+        const ordered = try gpu_cache.finish();
+        try std.testing.expect(ordered.len == 3 and front.readers == 1 and stats.gui_frame_commands == 1);
+        for (ordered, [_]u32{ 65, 81, 66 }) |command, key| try std.testing.expectEqual(key, gpu_cache.entries[command.entry].key);
+        gpu_cache.releaseUnsubmitted();
+        try std.testing.expect(front.readers == 0);
+        try cache.start(bounds); scene.layer_hook = cache.hook(); stats = .{};
+        drawWindow(&ctx, &windows[1], &frames, 1, false, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, bounds, &stats);
+        scene.layer_hook = null; _ = try cache.finish();
+        try std.testing.expect(stats.gui_frame_commands == 1 and front.readers == 0);
+    }
     try @import("composition_gpu_test.zig").check();
 }
 
@@ -526,13 +558,15 @@ fn drawWindow(
     }
     const scroll_offset = if (index < console_scroll_offsets.len) console_scroll_offsets[index] else 0;
     const console_snapshot = if (index < console_snapshots.len) &console_snapshots[index] else null;
-    const gui_frame = if (index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
+    const gpu_frame = ctx.gpuWindow(index, win.instance_id);
+    const gui_frame = if (gpu_frame == null and index < gui_frames.len) gui_frames[index] else gui_frame_snapshot.View{};
     const target = ctx.beginLayer(@intFromEnum(Layer.window_base)+@as(u32,@intCast(index)),win.frameSurface().rect) orelse {
         if (gui_frame.valid and index < 8) stats.rendered_gui_windows |= @as(u8,1) << @intCast(index);
         return;
     };
-    defer target.end();
-    const replay = draw.appWindow(&target.context, win, gui_frame, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    const replay = draw.appWindow(&target.context, win, gui_frame, gpu_frame != null, index, active, console_title, console_path, console_args, console_snapshot, terminal_font_size, terminal_codepage, scroll_offset, cursor_blink_on, hover_target, pressed_target);
+    target.end();
+    if (gpu_frame) |frame| ctx.paintGpuWindow(@intFromEnum(Layer.gpu_window_base) + @as(u32, @intCast(index)), win.clientSurface().rect, frame);
     stats.gui_frame_commands +%= replay.commands;
     stats.gui_resource_bytes +%= replay.resource_bytes;
     if (gui_frame.valid and replay.commands != 0 and index < 8) stats.rendered_gui_windows |= @as(u8, 1) << @intCast(index);

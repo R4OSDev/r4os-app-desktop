@@ -1194,6 +1194,7 @@ pub fn appWindow(
     ctx: *const desk_api.Context,
     win: *const window.Window,
     gui_frame: gui_frame_snapshot.View,
+    external_client: bool,
     index: usize,
     active: bool,
     console_title: [*:0]const u8,
@@ -1225,6 +1226,7 @@ pub fn appWindow(
     windowButton(ctx, win.x + win.w - 58, win.y + 5, .minimize, pressed_target == minTarget(win, index));
     drawWindowButtonHover(ctx, win, index, hover_target, pressed_target);
     fillSurface(ctx, client, theme.client_bg);
+    if (external_client) return .{};
 
     switch (win.kind) {
         .terminal => {

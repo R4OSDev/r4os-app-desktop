@@ -58,7 +58,7 @@ pub const Worker = struct {
         return self;
     }
     pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.engine.pending() or self.awaiting_visible; }
-    pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible or self.capture.needsPolling(); }
+    pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible or self.capture.needsPolling() or self.cache.hasBorrowed(); }
     fn captureView(self: *const Worker) geometry.topology.Viewport {
         return self.cache.view orelse .{ .pixel_w = @intCast(self.cache.screen.w), .pixel_h = @intCast(self.cache.screen.h) };
     }
@@ -161,6 +161,7 @@ pub const Worker = struct {
     }
     pub fn rejectCapture(self: *Worker) void {
         self.fail(error.State); self.failure_reported = true;
+        if (self.thread == null) _ = self.engine.discardCapture(&self.cache);
     }
     pub fn poll(self: *Worker, draw: *const r4os.r4draw.Context) Progress {
         if (self.thread != null) {
@@ -177,6 +178,7 @@ pub const Worker = struct {
             if (self.engine.fault) |err| self.fail(err);
             if (result == .copied and self.engine.chain.slot == 0) self.awaiting_visible = true;
         } else self.engine.pollPresentation() catch |err| self.fail(err);
+        if (!self.engine.active()) _ = self.engine.discardCapture(&self.cache);
         if (self.engine.completion()) |done| {
             self.completed_frame = done.frame; self.completed_status = done.status;
             if (done.status.result == 1 or done.status.result == 2) {
@@ -228,6 +230,7 @@ pub const Worker = struct {
             self.sys.sleepTicks(1);
         }
         while (true) {
+            if (!self.engine.discardCapture(&self.cache)) return;
             self.capture.close() catch return;
             self.engine.close() catch |err| {
                 if (err != error.Busy or (self.sys.monotonicNanoseconds() orelse end) >= end) return;
@@ -248,6 +251,7 @@ pub const Worker = struct {
             _ = self.engine.advance(&self.cache, self.sys.monotonicNanoseconds() orelse self.deadline);
             if (self.engine.active()) return false;
         }
+        if (!self.engine.discardCapture(&self.cache)) return false;
         self.engine.close() catch return false;
         const allocator = self.graphics.allocator;
         self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);

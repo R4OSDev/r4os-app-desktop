@@ -17,6 +17,7 @@ pub const SceneBuffer = struct {
         context: usize,
         begin: *const fn (usize, u32, surface.Rect, surface.Rect) ?*SceneBuffer,
         end: *const fn (usize, u32) void,
+        external: ?*const fn (usize, u32, surface.Rect, surface.Rect, *anyopaque) void = null,
     };
     memory: ?[]u8 = null,
     pixels: ?[]u32 = null,

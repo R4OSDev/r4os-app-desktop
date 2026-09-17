@@ -5,6 +5,7 @@ const scene = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
 const primitives = @import("primitive_frame.zig");
 const geometry = @import("output_geometry.zig");
+const window_image = @import("window_image.zig");
 pub const capacity = 64;
 pub const command_capacity = capacity * surface.max_damage_regions;
 pub const Entry = struct {
@@ -16,6 +17,8 @@ pub const Entry = struct {
     frame: u64 = 0,
     dirty: ?surface.Rect = null,
     initialized: bool = false,
+    external: ?*window_image.Frame = null,
+    borrowed: bool = false,
 };
 pub const Command = struct { entry: u8, scissor: surface.Rect };
 pub const ColorScratch = struct {
@@ -47,6 +50,7 @@ pub const Cache = struct {
 
     pub fn init(allocator: std.mem.Allocator, budget: usize) Cache { return .{ .allocator = allocator, .budget = budget }; }
     pub fn deinit(self: *Cache) void {
+        self.releaseUnsubmitted();
         for (&self.entries) |*entry| { self.allocator.free(entry.pixels); entry.* = .{}; }
         self.allocator.free(self.scratch);
         if (self.color_scratch) |storage| self.allocator.destroy(storage);
@@ -87,6 +91,7 @@ pub const Cache = struct {
     }
     fn startInternal(self: *Cache, bounds: surface.Rect, logical_bounds: surface.Rect) !void {
         if (self.collecting or self.active != null) return error.Busy;
+        for (&self.entries) |*entry| if (entry.borrowed) return error.Busy;
         if (bounds.isEmpty()) return error.Invalid;
         self.frame = try std.math.add(u64,self.frame,1);
         if (self.recording) |recording| try recording.start(self.frame);
@@ -100,7 +105,50 @@ pub const Cache = struct {
         if (self.recording) |recording| if (recording.failure) |failure| return failure;
         return self.commands[0..self.command_count];
     }
-    pub fn hook(self: *Cache) scene.SceneBuffer.LayerHook { return .{ .context = @intFromPtr(self), .begin = beginHook, .end = endHook }; }
+    pub fn hook(self: *Cache) scene.SceneBuffer.LayerHook {
+        return .{ .context = @intFromPtr(self), .begin = beginHook, .end = endHook,
+            .external = if (self.recording) |recording| if (!recording.mirror) externalHook else null else null };
+    }
+    fn externalHook(raw: usize, key: u32, bounds: surface.Rect, damage: surface.Rect, frame: *anyopaque) void {
+        const self: *Cache = @ptrFromInt(raw);
+        self.external(key, bounds, damage, @ptrCast(@alignCast(frame))) catch |err| { self.failure = err; };
+    }
+    /// A GPU window is its own ordered layer, sampled directly into the
+    /// output working image. It never passes through the CPU painter cache.
+    pub fn external(self: *Cache, key: u32, bounds: surface.Rect, damage: surface.Rect, frame: *window_image.Frame) !void {
+        if (!self.collecting or self.active != null) return error.State;
+        const recording = self.recording orelse return error.Unsupported;
+        if (recording.mirror) return error.Unsupported;
+        if (self.failure != null) return error.State;
+        if (key == 0 or self.command_count == self.commands.len) return error.Capacity;
+        const logical_clip = intersect(intersect(self.logical_screen, bounds) orelse return, damage) orelse return;
+        const raster = if (self.view) |view| try geometry.rasterRect(view, bounds) else bounds;
+        const clip = if (self.view) |view| intersect(try geometry.rasterRect(view, logical_clip), self.screen) orelse return else logical_clip;
+        const index = for (&self.entries, 0..) |*entry, i| { if (entry.key == key) break i; } else
+            for (&self.entries, 0..) |*entry, i| { if (entry.key == 0) break i; } else return error.Capacity;
+        const entry = &self.entries[index];
+        if (entry.frame == self.frame and entry.borrowed and (entry.external != frame or !std.meta.eql(entry.capture_bounds, bounds))) return error.State;
+        if (!entry.borrowed) {
+            try frame.borrow();
+            self.reserved -= entry.pixels.len * 4;
+            self.allocator.free(entry.pixels);
+            entry.* = .{ .key = key, .external = frame, .borrowed = true, .bounds = raster, .capture_bounds = bounds,
+                .frame = self.frame, .generation = self.frame, .initialized = true };
+        }
+        self.commands[self.command_count] = .{ .entry = @intCast(index), .scissor = clip };
+        self.command_count += 1;
+    }
+    /// Used only before GPU admission, or after Engine has drained every job.
+    pub fn releaseUnsubmitted(self: *Cache) void {
+        for (&self.entries) |*entry| if (entry.borrowed) {
+            std.debug.assert(entry.external.?.finish(null, false));
+            entry.borrowed = false;
+        };
+    }
+    pub fn hasBorrowed(self: *const Cache) bool {
+        for (&self.entries) |*entry| if (entry.borrowed) return true;
+        return false;
+    }
     fn beginHook(raw: usize, key: u32, bounds: surface.Rect, damage: surface.Rect) ?*scene.SceneBuffer {
         const self: *Cache = @ptrFromInt(raw);
         return self.begin(key,bounds,damage) catch |err| { self.failure = err; return null; };
@@ -131,6 +179,7 @@ pub const Cache = struct {
         const index = for (&self.entries,0..) |*entry,i| { if (entry.key == key) break i; } else
             for (&self.entries,0..) |*entry,i| { if (entry.key == 0) break i; } else return error.Capacity;
         const entry = &self.entries[index];
+        if (entry.external != null) return error.State;
         const mirror = if (self.recording) |recording| recording.mirror else true;
         if (!std.meta.eql(entry.bounds,raster) or !std.meta.eql(entry.capture_bounds,clipped)) {
             if (entry.frame == self.frame) return error.State;

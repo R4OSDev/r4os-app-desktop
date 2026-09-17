@@ -12,13 +12,43 @@ const layers = @import("composition_layers.zig");
 const scene = @import("scene_buffer.zig");
 const gpu = @import("composition_gpu.zig");
 const surface = @import("surface.zig");
+const window_image = @import("window_image.zig");
+const WindowMemory = struct {
+    var descriptor: a.GfxBufferDescriptor = .{ .byte_length = 256, .width = 8, .height = 8, .format = c.format_argb8888,
+        .plane_count = 1, .plane_pitches = .{32,0,0,0}, .usage = 31 };
+    var refs: [32]bool = @splat(false);
+    var serial: u64 = 10;
+    var generations: [32]u64 = @splat(0);
+    var pixels: [128]u32 = @splat(0);
+    fn source() a.GfxBufferReference { return .{ .reference = .{ .id = 1, .generation = 1 }, .buffer = .{ .id = 44, .generation = 7 } }; }
+    pub fn import(_: @This(), input: *const a.GfxBufferHandle, out: *a.GfxBufferReference) i32 {
+        if (input.id == 0 or input.id > refs.len or !refs[input.id-1] or generations[input.id-1] != input.generation) return -1;
+        const slot = for (refs, 0..) |live, i| { if (!live) break i; } else return -1;
+        serial += 1; refs[slot] = true; generations[slot] = serial;
+        out.* = .{ .reference = .{ .id = @intCast(slot+1), .generation = serial }, .buffer = source().buffer };
+        return 1;
+    }
+    pub fn describe(_: @This(), input: *const a.GfxBufferHandle, out: *a.GfxBufferDescriptor) i32 {
+        if (input.id == 0 or input.id > refs.len or !refs[input.id-1] or generations[input.id-1] != input.generation) return -1;
+        out.* = descriptor; return 1;
+    }
+    pub fn release(_: @This(), input: *const a.GfxBufferHandle) i32 {
+        if (input.id == 0 or input.id > refs.len or !refs[input.id-1] or generations[input.id-1] != input.generation) return -1;
+        refs[input.id-1] = false; return 1;
+    }
+    fn count() usize { var n: usize = 0; for (refs) |live| { n += @intFromBool(live); } return n; }
+};
 const Model = struct {
     const s = p.swapchain.lifecycle;
     const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined,
         grids: [c.render_list_capacity]c.R4GfxLogicalGrid = @splat(std.mem.zeroes(c.R4GfxLogicalGrid)), count: usize = 0, color_flags: ?u32 = null };
     const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
-    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
+    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, external_wait: bool = false, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
+    var imported: [c.device_resource_capacity]a.GfxBufferReference = @splat(.{});
+    var producer_ready = true;
+    var hold_terminal = false;
+    var combined_enabled = true;
     var jobs: [c.device_job_capacity]?Job = @splat(null);
     var outcomes: [256]u32 = @splat(0);
     var serial: u64 = 0;
@@ -44,6 +74,7 @@ const Model = struct {
         var value = fixture.table;
         value.device_refresh = refresh; value.resource_create = create; value.resource_release = release;
         value.copy_submit_ex = copy; value.render_submit = render; value.image_present = present;
+        value.resource_info = resourceInfo;
         value.render_submit_list = renderList;
         value.render_submit_grid_list = renderGridList;
         value.job_info = info; value.job_fence = fence; value.job_cancel = cancel; value.job_release = releaseJob;
@@ -55,6 +86,7 @@ const Model = struct {
         var value = p.color_api.table;
         value.color_resource_create = createColor;
         value.color_render_submit = renderColorList;
+        value.color_render_submit_grid = renderColorGridList;
         break :blk value;
     };
     fn presentationInfo(_: *const c.R4GfxDevice, head: u32, out: *c.R4GfxPresentationInfo) callconv(.c) i32 {
@@ -149,7 +181,7 @@ const Model = struct {
     fn refresh(device: *const c.R4GfxDevice, out: *c.R4GfxDeviceInfo) callconv(.c) i32 {
         const rc = p.refresh(device, out);
         if (rc == 0) out.gpu_operations = c.device_gpu_copy_rows | c.device_gpu_render | c.device_gpu_present | c.device_gpu_render_list | c.device_gpu_grid |
-            @as(u32, if (color_enabled) c.device_gpu_color else 0);
+            @as(u32, if (color_enabled) c.device_gpu_color else 0) | @as(u32, if (combined_enabled) c.device_gpu_color_grid else 0);
         return rc;
     }
     fn create(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, out: *c.R4GfxResource) callconv(.c) i32 {
@@ -159,6 +191,19 @@ const Model = struct {
         return createImage(device, &input.resource, input.description, out);
     }
     fn createImage(device: *const c.R4GfxDevice, input: *const c.R4GfxResourceDesc, description: ?c.R4GfxColorDescription, out: *c.R4GfxResource) i32 {
+        if (input.source_kind == c.source_import_buffer) {
+            var ref: a.GfxBufferReference = .{};
+            if (WindowMemory.import(.{}, @ptrFromInt(input.source_address), &ref) != 1) return c.status_stale;
+            var desc = input.*;
+            desc.source_kind = c.source_borrow_cpu; desc.source_address = 0; desc.source_generation = ref.reference.generation;
+            const source = WindowMemory.descriptor;
+            desc.image = .{ .cpu_address = @intFromPtr(&WindowMemory.pixels), .byte_length = source.byte_length,
+                .pitch = source.plane_pitches[0], .width = source.width, .height = source.height, .format = source.format, .reserved = 0 };
+            const rc = p.color_api.table.color_resource_create(device, &.{ .version = 1, .size = @sizeOf(c.R4GfxColorResourceDesc),
+                .resource = desc, .description = description.? }, out);
+            if (rc == c.status_ok) imported[out.slot-1] = ref else _ = WindowMemory.release(.{}, &ref.reference);
+            return rc;
+        }
         if (input.source_kind == c.source_color_view) {
             // This queue model uses borrowed host arrays for device storage.
             // BO import/retention of the productive view has its owner check.
@@ -202,18 +247,34 @@ const Model = struct {
         };
         const rc = p.releaseResource(device,resource);
         var remaining: c.R4GfxResourceInfo = undefined;
-        if (rc == 0 and p.resourceInfo(device, resource, &remaining) != c.status_ok)
-            if (buffers[resource.slot-1]) |memory| { t.allocator.free(memory); buffers[resource.slot-1] = null; };
+        if (rc == 0 and p.resourceInfo(device, resource, &remaining) != c.status_ok) {
+            if (buffers[resource.slot-1]) |memory| { t.allocator.free(memory); buffers[resource.slot-1] = null; }
+            if (imported[resource.slot-1].reference.id != 0) {
+                std.debug.assert(WindowMemory.release(.{}, &imported[resource.slot-1].reference) == 1);
+                imported[resource.slot-1] = .{};
+            }
+        }
+        return rc;
+    }
+    fn resourceInfo(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource, out: *c.R4GfxResourceInfo) callconv(.c) i32 {
+        const rc = p.resourceInfo(device, resource, out);
+        if (rc == 0 and imported[resource.slot-1].reference.id != 0) {
+            out.buffer_id = imported[resource.slot-1].buffer.id; out.buffer_generation = imported[resource.slot-1].buffer.generation;
+        }
         return rc;
     }
     fn submit(device: *const c.R4GfxDevice, operation: Operation, count: u32, address: u64, out: *c.R4GfxJob) i32 {
         if (busy_count != 0) { busy_count -= 1; return c.status_busy; }
         const index = for (&jobs,0..) |*slot,i| { if (slot.* == null) break i; } else return c.status_busy;
-        std.debug.assert(count <= 1 and serial+1 < outcomes.len);
-        const dependency = if (count == 0) 0 else @as(*const c.R4GfxCopyFence,@ptrFromInt(address)).point;
+        std.debug.assert(count <= 2 and serial+1 < outcomes.len);
+        var dependency: u64 = 0; var external_wait = false;
+        if (count != 0) for (@as([*]const c.R4GfxCopyFence, @ptrFromInt(address))[0..count]) |value| {
+            if (value.timeline == 456) { std.debug.assert(value.point == 1); external_wait = true; }
+            else { std.debug.assert(value.timeline == 123); dependency = value.point; }
+        };
         serial += 1;
         const handle: c.R4GfxJob = .{ .slot=@intCast(index+1), .reserved=0, .generation=serial, .device_generation=device.generation, .device_address=device.address };
-        jobs[index] = .{ .handle=handle, .operation=operation, .dependency=dependency }; out.*=handle;
+        jobs[index] = .{ .handle=handle, .operation=operation, .dependency=dependency, .external_wait=external_wait }; out.*=handle;
         return 0;
     }
     fn copy(device: *const c.R4GfxDevice, input: *const c.R4GfxCopyRequestEx, out: *c.R4GfxJob) callconv(.c) i32 {
@@ -256,6 +317,13 @@ const Model = struct {
         if (rc == 0) { batches += 1; max_batch = @max(max_batch, input.count); }
         return rc;
     }
+    fn renderColorGridList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderGridListRequest, flags: u32, out: *c.R4GfxJob) callconv(.c) i32 {
+        if (!combined_enabled) return c.status_unsupported;
+        std.debug.assert(flags == c.color_transform_relative_white);
+        const rc = renderGridList(device, input, out);
+        if (rc == 0) { jobs[out.slot-1].?.operation.list.color_flags = flags; color_batches += 1; }
+        return rc;
+    }
     fn present(device: *const c.R4GfxDevice, input: *const c.R4GfxImagePresentRequest, out: *c.R4GfxJob) callconv(.c) i32 {
         return submit(device,.{.present=input.*},input.dependency_count,input.dependencies,out);
     }
@@ -267,14 +335,14 @@ const Model = struct {
         out.version=1; out.size=@sizeOf(c.R4GfxJobInfo); out.point=handle.generation; out.timeline=123;
         out.device_generation=1; out.reset_generation=1;
         out.phase=if(job.terminal) a.gfx_queue_phase_terminal else a.gfx_queue_phase_running;
-        out.result=job.result; out.flags=if(job.terminal) 0 else 3; return 0;
+        out.result=job.result; out.flags=if(job.terminal and !hold_terminal) 0 else 3; return 0;
     }
     fn fence(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob, out: *c.R4GfxCopyFence) callconv(.c) i32 {
         _=find(handle); out.*=.{ .slot=handle.slot, .adapter_id=9, .timeline=123, .point=handle.generation, .device_generation=1, .reset_generation=1 }; return 0;
     }
     fn cancel(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 { find(handle).cancelled=true; return 0; }
     fn releaseJob(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 {
-        if (!find(handle).terminal or find(handle).pins != 0) return c.status_busy;
+        if (!find(handle).terminal or find(handle).pins != 0 or hold_terminal) return c.status_busy;
         jobs[handle.slot-1]=null; return 0;
     }
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
@@ -314,7 +382,7 @@ const Model = struct {
                         command.source_rect.y = @intCast(value.source_rect.y + @divFloor(ly * grid.guest_height, grid.viewport_height) - grid.source_y);
                     }
                     if (target_resource.color) |description| {
-                        std.debug.assert(grid.enabled == 0);
+                        std.debug.assert(grid.enabled == 0 or color_flags != null);
                         if (source_resource) |source| {
                             const from: c.R4GfxColorImage = .{ .version = 1, .size = @sizeOf(c.R4GfxColorImage), .image = source.image,
                                 .description = source.color.?, .profile = std.mem.zeroes(c.R4GfxColorProfile) };
@@ -342,6 +410,7 @@ const Model = struct {
             if (selected == null or job.handle.generation < selected.?.handle.generation) selected=job;
         };
         const job = selected orelse return;
+        if (job.external_wait and !producer_ready and !job.cancelled) return;
         if (job.dependency != 0 and outcomes[job.dependency]==0) return;
         job.result = if (job.cancelled or (job.dependency!=0 and outcomes[job.dependency]!=a.gfx_queue_result_complete)) a.gfx_queue_result_cancelled else a.gfx_queue_result_complete;
         if (job.result==a.gfx_queue_result_complete) switch(job.operation) {
@@ -437,6 +506,137 @@ pub fn check() !void {
     try checkPrimitives(graphics, device);
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
+    try checkWindowImages(graphics, device);
+}
+
+fn windowCapture(cache: *layers.Cache, frame: *window_image.Frame, view: @import("output_geometry.zig").topology.Viewport) !void {
+    const geometry = @import("output_geometry.zig");
+    const bounds = try geometry.logical(view);
+    try cache.startOutput(view);
+    const background = (try cache.begin(1, bounds, bounds)).?;
+    background.fillRect(bounds, 0); try cache.end(1);
+    // Two disjoint damage pieces retain this front once, preserving sampling
+    // against the full client bounds rather than stretching each clipped quad.
+    const left: surface.Rect = .{ .x = bounds.x, .y = bounds.y, .w = 2, .h = bounds.h };
+    try cache.external(80, bounds, left, frame);
+    try cache.external(80, bounds, .{ .x = bounds.x+2, .y = bounds.y, .w = bounds.w-2, .h = bounds.h }, frame);
+    const corner: surface.Rect = .{ .x = bounds.x, .y = bounds.y, .w = 1, .h = 1 };
+    const overlay = (try cache.begin(2, corner, corner)).?;
+    overlay.fillRect(corner, 0x007f00); try cache.end(2);
+    _ = try cache.finish();
+}
+fn windowMessage() a.WindowGraphicsFrame {
+    return .{ .surface = .{ .serial = 1, .window_id = 1, .owner = .{ .instance_id = 17, .generation = 3 } },
+        .chain = 1, .acquire_token = 1, .present_serial = 1, .source = WindowMemory.source(), .descriptor = WindowMemory.descriptor,
+        .format = .{ .format = WindowMemory.descriptor.format, .color = @bitCast(@import("composition_software.zig").description(false, false)) },
+        .ready = .{ .slot = 1, .adapter_id = 9, .timeline = 456, .point = 1, .device_generation = 1, .reset_generation = 1 } };
+}
+fn checkWindowImages(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    const geometry = @import("output_geometry.zig");
+    for (0..4) |rotation| {
+        Model.serial = 0; Model.outcomes = @splat(0); Model.producer_ready = false;
+        WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+        for (&WindowMemory.pixels, 0..) |*pixel, i| pixel.* = if (i % 2 == 0) 0x80808080 else 0xff800000;
+        var front: window_image.Frame = .{};
+        try front.open(WindowMemory{}, windowMessage());
+        try t.expectEqual(@as(i32,1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+        var recording = try @import("primitive_frame.zig").Frame.init(t.allocator); defer recording.deinit(); recording.mirror = false;
+        var recording2 = try @import("primitive_frame.zig").Frame.init(t.allocator); defer recording2.deinit(); recording2.mirror = false;
+        var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &recording;
+        var cache2 = layers.Cache.init(t.allocator, 1024); defer cache2.deinit(); cache2.recording = &recording2;
+        var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        var second = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        const view: geometry.topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8, .scale = 150,
+            .origin = .{ .x = -19, .y = 7 }, .rotation = @enumFromInt(rotation) };
+        try windowCapture(&cache, &front, view); try windowCapture(&cache2, &front, view);
+        try t.expect(front.readers == 2 and cache.reserved == 0 and cache2.reserved == 0);
+        Model.combined_enabled = false;
+        try t.expectError(error.Unsupported, engine.prepare(&cache, 1000));
+        Model.combined_enabled = true;
+        try engine.prepare(&cache, 1000); try second.prepare(&cache2, 1000);
+        try t.expect(WindowMemory.count() == 3);
+        try engine.begin(&cache, 1000);
+        for (0..32) |_| { _ = engine.advance(&cache, 1); Model.complete(device); }
+        try t.expect(engine.active() and front.readers == 2 and front.receipt == null);
+        Model.producer_ready = true;
+        try pump(&engine, &cache, device, .copied);
+        try t.expect(front.readers == 1 and engine.external_receipts == 1);
+        try t.expectError(error.Busy, engine.close());
+        try t.expect(!front.closeAcknowledged(WindowMemory{}));
+        for (0..8) |y| for (0..8) |x| {
+            const oriented: [2]usize = switch (rotation) { 0 => .{x,y}, 1 => .{7-y,x}, 2 => .{7-x,7-y}, 3 => .{y,7-x}, else => unreachable };
+            const lx = ((2 * oriented[0] + 1) * 120) / 300;
+            const ly = ((2 * oriented[1] + 1) * 120) / 300;
+            const sx = lx * 8 / 7;
+            const expected: u32 = if (lx == 0 and ly == 0) 0x007f00 else if (sx % 2 == 0) 0xbcbcbc else 0x800000;
+            try t.expectEqual(expected, Model.visible[y*8+x]);
+        };
+        try second.begin(&cache2, 1000); try pump(&second, &cache2, device, .copied);
+        try t.expect(front.readers == 0 and engine.external_receipts == 0 and second.external_receipts == 1);
+        const allocated = Model.native_allocations; const imported = WindowMemory.count();
+        try windowCapture(&cache2, &front, view);
+        try t.expect(second.prepared(&cache2));
+        try second.begin(&cache2, 1000); try pump(&second, &cache2, device, .copied);
+        try t.expect(WindowMemory.count() == imported and Model.native_allocations == allocated and second.external_receipts == 1);
+        try t.expect(!front.failed and front.consumerFence().point != 0);
+        front.retired = true;
+        try t.expectError(error.Stale, front.borrow());
+        try t.expect(front.closeAcknowledged(WindowMemory{}));
+        try engine.close(); try second.close();
+        try t.expect(WindowMemory.count() == 0 and engine.reserved_bytes == 0 and second.reserved_bytes == 0);
+        for (&Model.jobs) |*job| try t.expect(job.* == null);
+    }
+    // Cancellation remains logically terminal while physical resources are
+    // held; neither the service lease nor its origin worker may disappear.
+    Model.serial = 0; Model.outcomes = @splat(0); Model.producer_ready = false;
+    WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+    var front: window_image.Frame = .{}; try front.open(WindowMemory{}, windowMessage());
+    try t.expectEqual(@as(i32,1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+    var recording = try @import("primitive_frame.zig").Frame.init(t.allocator); defer recording.deinit(); recording.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &recording;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    try windowCapture(&cache, &front, .{ .pixel_w = 8, .pixel_h = 8 });
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+    for (0..24) |_| { _ = engine.advance(&cache, 1); Model.complete(device); }
+    Model.hold_terminal = true; engine.cancel(error.Stale);
+    for (0..24) |_| { _ = engine.advance(&cache, 1); Model.complete(device); }
+    try t.expect(engine.active() and front.readers == 1 and !front.closeAcknowledged(WindowMemory{}));
+    Model.hold_terminal = false; Model.producer_ready = true;
+    try pump(&engine, &cache, device, .failed);
+    try t.expect(front.failed and front.readers == 0 and front.consumerFence().point != 0 and engine.external_receipts == 1);
+    try t.expect(front.closeAcknowledged(WindowMemory{})); try engine.close();
+    try t.expect(WindowMemory.count() == 0);
+    {
+        // Extended linear window colors must survive composition before the
+        // output transform. Any intermediate 8-bit image would lose both ends.
+        const original = WindowMemory.descriptor; defer WindowMemory.descriptor = original;
+        WindowMemory.descriptor.byte_length = 512; WindowMemory.descriptor.plane_pitches[0] = 64;
+        WindowMemory.descriptor.format = c.format_abgr16161616f;
+        const halves: *[256]f16 = @ptrCast(&WindowMemory.pixels);
+        for (0..64) |i| @memcpy(halves[i*4..][0..4], &[_]f16{ -0.25, 2, 0, 1 });
+        WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+        var message = windowMessage();
+        message.format.color = @bitCast(@import("composition_software.zig").description(true, false));
+        try front.open(WindowMemory{}, message);
+        try t.expectEqual(@as(i32, 1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+        try windowCapture(&cache, &front, .{ .pixel_w = 8, .pixel_h = 8 });
+        try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+        try pump(&engine, &cache, device, .copied);
+        const work = Model.image(device, @ptrCast(&engine.workings[engine.output_index].resource));
+        const row: [*]const f16 = @ptrFromInt(work.cpu_address + work.pitch);
+        try t.expectEqual(@as(f16, -0.25), row[4]);
+        try t.expectEqual(@as(f16, 2), row[5]);
+        try t.expectEqual(@as(f16, 1), row[7]);
+        try t.expect(front.closeAcknowledged(WindowMemory{})); try engine.close();
+        try t.expect(WindowMemory.count() == 0);
+        var fallback = layers.Cache.init(t.allocator, 1024); defer fallback.deinit();
+        try t.expect(fallback.hook().external == null);
+        fallback.recording = &recording; recording.mirror = true;
+        try t.expect(fallback.hook().external == null);
+        recording.mirror = false;
+        try t.expect(fallback.hook().external != null);
+    }
+    std.debug.print("[desktop-window-images] direct FP16 extended range, alpha/grid/clips/order, producer dependency, two outputs, warm reuse, held cancellation and CPU fallback: OK\n", .{});
 }
 
 fn checkHdrOutput(graphics: anytype, device: *const c.R4GfxDevice) !void {

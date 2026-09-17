@@ -16,6 +16,7 @@ pub const Context = struct {
     window_session: window_service.Session = .{},
     graphics: ?*gfx_renderer.Renderer = null,
     output_bounds: ?surface.Rect = null,
+    gpu_windows: [4]?*@import("window_image.zig").Frame = @splat(null),
 
     pub fn init(app: *r4os.App) ?Context {
         const sys = app.system();
@@ -681,6 +682,22 @@ pub const Context = struct {
     pub fn scenePaintBounds(self: *const Context) ?surface.Rect {
         const scene = self.scene orelse return null;
         return scene.paintBounds();
+    }
+    pub fn gpuWindow(self: *const Context, index: usize, instance_id: u32) ?*@import("window_image.zig").Frame {
+        if (index >= self.gpu_windows.len) return null;
+        const frame = self.gpu_windows[index] orelse return null;
+        if (frame.retired or frame.failed or frame.message.surface.owner.instance_id != instance_id or frame.message.surface.window_id != index) return null;
+        const scene = self.scene orelse return null;
+        const hook = scene.layer_hook orelse return null;
+        if (hook.external == null) return null;
+        return frame;
+    }
+    pub fn paintGpuWindow(self: *const Context, key: u32, bounds: surface.Rect, frame: *@import("window_image.zig").Frame) void {
+        const scene = self.scene orelse return;
+        const hook = scene.layer_hook orelse return;
+        const append = hook.external orelse return;
+        scene.flushPending();
+        append(hook.context, key, bounds, scene.paintBounds(), frame);
     }
 
     pub fn paintRect(self: *const Context, x: i32, y: i32, w: u32, h: u32, rgb: u32) void {
