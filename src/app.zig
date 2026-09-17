@@ -7,6 +7,7 @@ const appearance_signal = @import("appearance_signal.zig");
 const desk_api = @import("api.zig");
 const compositor = @import("compositor.zig");
 const composition_worker = @import("composition_worker.zig");
+const window_graphics = @import("window_graphics.zig");
 const output_manager = @import("output_manager.zig");
 const display_control = @import("display_control.zig");
 const output_geometry = @import("output_geometry.zig");
@@ -303,6 +304,7 @@ pub const App = struct {
     scene: scene_buffer.SceneBuffer = .{},
     cpu_composition: composition_software.Owner = .{},
     composition: ?*composition_worker.Worker = null,
+    graphics_windows: [4]window_graphics.Window = @splat(.{}),
     outputs: ?*output_manager.Manager = null,
     display_settings: display_control.Owner = .{},
     cpu_scene_current: bool = false,
@@ -581,6 +583,7 @@ pub const App = struct {
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
             self.flushWindowGeometry(false);
+            if (self.syncGraphicsWindows()) needs_redraw = true;
             if (self.syncCursor()) needs_redraw = true;
             if (self.hasDamage()) needs_redraw = true;
             self.syncRefreshPolicy();
@@ -649,6 +652,10 @@ pub const App = struct {
     }
 
     fn idleWait(self: *App, active: bool) void {
+        // Held GPU receipts can keep outputs polling after an IPC failure.
+        // They must not starve the explicit service-recovery sequence.
+        if (!self.win_service_gate.available) _ = self.retryWindowServiceIfDue();
+        if (self.win_service_gate.available) for (&self.graphics_windows) |*owner| if (owner.needsPolling()) { self.ctx.sleepTicks(1); return; };
         if (self.outputs) |manager| if (manager.needsPolling()) { self.ctx.sleepTicks(1); return; };
         if (self.composition) |worker| if (worker.needsPolling()) {
             // Damage coalesces while this immutable capture is in flight.
@@ -773,6 +780,9 @@ pub const App = struct {
     }
 
     fn loseTrayBroker(self: *App) bool {
+        for (self.ctx.gpu_windows, 0..) |frame, index| if (frame != null) self.damage.invalidate(self.windows[index].frameSurface().rect);
+        for (&self.graphics_windows) |*owner| owner.disconnect();
+        self.ctx.gpu_windows = @splat(null);
         self.ctx.closeWindowService();
         self.window_service_mirrored = .{false} ** 4;
         self.window_geometry_updates = .{};
@@ -6911,6 +6921,89 @@ pub const App = struct {
         }
     }
 
+    const GraphicsTransport = struct {
+        ctx: *desk_api.Context,
+        pub fn invalidate(self: @This()) void { self.ctx.closeWindowService(); }
+        pub fn publish(self: @This(), request: *const r4os.abi.WindowGraphicsPublication, reply: *r4os.abi.WindowGraphicsReply) bool {
+            return self.ctx.windowGraphicsCall(r4os.abi.window_graphics_op_publish, std.mem.asBytes(request), reply);
+        }
+        pub fn consumer(self: @This(), request: *const r4os.abi.WindowGraphicsConsumer, reply: *r4os.abi.WindowGraphicsReply) bool {
+            return self.ctx.windowGraphicsCall(r4os.abi.window_graphics_op_consumer, std.mem.asBytes(request), reply);
+        }
+        pub fn serviceDead(self: @This(), handle: r4os.abi.ProgramProcessHandle) bool {
+            var info: r4os.abi.ProgramInstanceInfo = .{};
+            const rc = self.ctx.programHandleStatus(&handle, &info);
+            return rc == r4os.abi.program_handle_error_not_found or rc == r4os.abi.program_handle_error_stale or
+                (rc == r4os.abi.program_handle_ok and info.id == handle.instance_id and info.state == 2);
+        }
+    };
+    fn graphicsWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
+        if (!self.win_service_gate.available or !self.window_service_mirrored[index] or index == 0) return null;
+        const win = &self.windows[index]; const handle = self.window_process_handles[index];
+        if (win.kind != .app or win.close_requested or !processHandleValid(handle) or handle.instance_id != win.instance_id) return null;
+        const manager = self.outputs orelse return null;
+        if (!manager.active()) return null;
+        const client = win.clientSurface().rect;
+        if (client.isEmpty()) return null;
+        var chosen: ?*output_manager.Slot = null; var area: u64 = 0; var ready = true;
+        const required = gfx.device_gpu_render | gfx.device_gpu_render_list | gfx.device_gpu_grid | gfx.device_gpu_color | gfx.device_gpu_color_grid;
+        for (&manager.slots) |*slot| {
+            // Release old receipt owners before reconfiguration can replace
+            // their workers. No frozen front may keep an obsolete output alive.
+            if (slot.gpu) |owner| if (owner.engine.external_receipts != 0 and
+                (slot.logical_index == null or slot.failed or slot.reconfiguring or slot.sleeping)) return null;
+            if (slot.logical_index == null or slot.disabled) continue;
+            const intersection = output_geometry.intersect(client, slot.bounds()) orelse continue;
+            if (slot.failed or slot.reconfiguring or slot.sleeping or slot.paused) return null;
+            const owner = slot.gpu orelse return null;
+            if (owner.failed_revision != null or owner.gpu_operations & required != required or owner.device_generation == 0 or owner.reset_generation == 0) return null;
+            if (chosen) |previous| if (previous.target.adapter_id != slot.target.adapter_id) return null;
+            ready = ready and !owner.blocksCapture() and owner.thread == null;
+            const pixels = @as(u64, @intCast(intersection.w)) * @as(u64, @intCast(intersection.h));
+            if (chosen == null or pixels > area) { chosen = slot; area = pixels; }
+        }
+        const output = chosen orelse return null;
+        const owner = output.gpu.?;
+        if (owner.device_generation != output.target.device_generation) return null;
+        var backend: r4os.abi.GfxBackendInfo = .{};
+        const queues = self.ctx.draw.queues();
+        var found = false;
+        for (0..32) |i| {
+            var candidate: r4os.abi.GfxBackendInfo = .{};
+            if (queues.backendInfo(@intCast(i), &candidate) != r4os.abi.gfx_queue_ok) continue;
+            if (candidate.binding.adapter_id == output.target.adapter_id and candidate.binding.device_generation == owner.device_generation and
+                candidate.binding.reset_generation == owner.reset_generation and candidate.binding.milestone == r4os.abi.gfx_queue_milestone_device_execution and
+                candidate.memory_generation != 0) { backend = candidate; found = true; break; }
+        }
+        if (!found) return null;
+        const width = (@as(u64, @intCast(client.w)) * output.view.scale + 119) / 120;
+        const height = (@as(u64, @intCast(client.h)) * output.view.scale + 119) / 120;
+        if (width == 0 or height == 0 or width > 32768 or height > 32768) return null;
+        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(width), .height = @intCast(height),
+            .flags = if (win.visible and !win.minimized and !self.terminal_mode) r4os.abi.window_graphics_visible else 0,
+            .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3,
+            .backend = backend, .output = .{ .adapter_id = output.target.adapter_id, .connector_id = output.target.connector_id,
+                .device_generation = output.target.device_generation, .connection_generation = output.target.connection_generation },
+            .display_generation = output.target.display_generation, .format_count = 4 };
+        config.formats[0] = .{ .format = gfx.format_xrgb8888, .color = @bitCast(composition_software.description(false, true)) };
+        config.formats[1] = .{ .format = gfx.format_argb8888, .color = @bitCast(composition_software.description(false, false)) };
+        config.formats[2] = .{ .format = gfx.format_abgr16161616f, .color = @bitCast(composition_software.description(true, false)) };
+        config.formats[3] = .{ .format = gfx.format_abgr16161616f, .color = @bitCast(composition_software.description(true, true)) };
+        return .{ .owner = handle, .config = config, .consumer_ready = ready };
+    }
+    fn syncGraphicsWindows(self: *App) bool {
+        var changed = false;
+        for (&self.graphics_windows, 0..) |*owner, index| {
+            const before = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
+            owner.poll(self.ctx.self_handle, @intCast(index), self.graphicsWindowSpec(index), GraphicsTransport{ .ctx = self.ctx }, self.ctx.draw.buffers());
+            self.ctx.gpu_windows[index] = owner.front();
+            const after = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
+            if (!std.meta.eql(before, after)) { self.damage.invalidate(self.windows[index].frameSurface().rect); changed = true; }
+        }
+        if (self.win_service_gate.available and self.ctx.window_session.handle == 0) self.markWindowServiceUnavailable();
+        return changed;
+    }
+
     fn resetWindowServiceState(self: *App) void {
         self.window_service_mirrored = .{false} ** 4;
         self.window_geometry_updates = .{};
@@ -6927,6 +7020,8 @@ pub const App = struct {
             self.markWindowServiceUnavailable();
             return;
         }
+        for (&self.graphics_windows) |*owner| owner.acknowledgeReset();
+        self.ctx.gpu_windows = @splat(null);
         self.win_service_gate.markAvailable();
         self.win_service_status.window_count = result.window_count;
         self.win_service_status.focused_window = result.focused_window;
@@ -7514,6 +7609,9 @@ pub const App = struct {
     }
 
     fn clearWindowInstanceBinding(self: *App, index: usize) void {
+        if (self.ctx.gpu_windows[index] != null) self.damage.invalidate(self.windows[index].frameSurface().rect);
+        self.graphics_windows[index].disconnect();
+        self.ctx.gpu_windows[index] = null;
         self.mirrorWindowRemove(index);
         self.window_service_mirrored[index] = false;
         self.gui_frame_caches[index].releaseSharedRasters(self.ctx);

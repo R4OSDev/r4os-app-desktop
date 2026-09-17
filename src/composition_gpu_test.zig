@@ -507,6 +507,144 @@ pub fn check() !void {
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
     try checkWindowImages(graphics, device);
+    try checkWindowTransport(graphics, device);
+}
+
+const WindowTransport = struct {
+    surface: a.WindowGraphicsSurface = .{},
+    config: a.WindowGraphicsConfig = .{},
+    last: ?a.WindowGraphicsConsumer = null,
+    reply: a.WindowGraphicsReply = .{},
+    lose_publish: bool = true,
+    lose_take: bool = true,
+    lose_return: bool = true,
+    available: bool = true,
+    release_ready: bool = false,
+    dead: bool = false,
+    invalidated: bool = false,
+    publishes: u32 = 0,
+    takes: u32 = 0,
+    returns: u32 = 0,
+    borrowed: a.GfxFence = .{},
+    pub fn invalidate(self: *@This()) void { self.invalidated = true; }
+    pub fn serviceDead(self: *@This(), _: a.ProgramProcessHandle) bool { return self.dead; }
+    pub fn publish(self: *@This(), request: *const a.WindowGraphicsPublication, out: *a.WindowGraphicsReply) bool {
+        if (request.action == a.window_graphics_publish) {
+            if (self.surface.serial == 0) {
+                self.surface = .{ .service = .{ .instance_id = 31, .generation = 9 }, .desktop = request.desktop,
+                    .owner = request.owner, .window_id = request.window_id, .serial = 42 };
+                self.publishes += 1;
+            }
+            self.config = request.config;
+        }
+        out.* = .{ .result = a.window_graphics_ok, .surface = self.surface, .config = self.config };
+        if (self.lose_publish) { self.lose_publish = false; return false; }
+        return true;
+    }
+    pub fn consumer(self: *@This(), request: *const a.WindowGraphicsConsumer, out: *a.WindowGraphicsReply) bool {
+        if (self.last) |last| if (last.request_serial == request.request_serial) {
+            std.debug.assert(std.meta.eql(last, request.*)); out.* = self.reply; return true;
+        };
+        out.* = .{ .result = a.window_graphics_ok, .surface = self.surface, .config = self.config,
+            .chain = request.chain, .image_slot = request.image_slot, .acquire_token = request.acquire_token };
+        switch (request.action) {
+            a.window_graphics_take => {
+                if (!self.available) { out.result = a.window_graphics_not_ready; return true; }
+                self.available = false; self.takes += 1;
+                out.frame = windowMessage(); out.frame.surface = self.surface; out.frame.config_revision = self.config.revision;
+                out.chain = out.frame.chain; out.image_slot = out.frame.image_slot; out.acquire_token = out.frame.acquire_token;
+            },
+            a.window_graphics_return => {
+                self.returns += 1; self.borrowed = request.fence;
+                if (request.result != a.window_graphics_ok) { out.flags = a.window_graphics_fence_released; self.borrowed = .{}; }
+            },
+            a.window_graphics_release_fence => {
+                std.debug.assert(std.meta.eql(self.borrowed, request.fence));
+                if (!self.release_ready) { out.result = a.window_graphics_not_ready; return true; }
+                self.borrowed = .{}; out.flags = a.window_graphics_fence_released;
+            },
+            else => unreachable,
+        }
+        self.last = request.*; self.reply = out.*;
+        if (request.action == a.window_graphics_take and self.lose_take) { self.lose_take = false; return false; }
+        if (request.action == a.window_graphics_return and self.lose_return) { self.lose_return = false; return false; }
+        return true;
+    }
+};
+fn checkWindowTransport(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    const transport = @import("window_graphics.zig");
+    var owner: transport.Window = .{};
+    var server: WindowTransport = .{};
+    const desktop: a.ProgramProcessHandle = .{ .instance_id = 5, .generation = 7 };
+    var spec: transport.Spec = .{ .owner = .{ .instance_id = 17, .generation = 3 },
+        .config = .{ .width = 8, .height = 8, .flags = a.window_graphics_visible } };
+    WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.publication != null and owner.surface.serial == 0 and server.publishes == 1);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.publication == null and owner.surface.serial == 42 and server.publishes == 1);
+    spec.consumer_ready = false;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.needsPolling() and server.takes == 0 and owner.request == null);
+    spec.consumer_ready = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const take = owner.request.?;
+    try t.expect(owner.front() == null and server.takes == 1 and WindowMemory.count() == 1);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const front = owner.front().?;
+    try t.expect(owner.request == null and server.takes == 1 and WindowMemory.count() == 2);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.serial == take.request_serial); // no replacement before composition
+    try t.expect(!owner.needsPolling()); // fully occluded front does not spin
+    try t.expectEqual(@as(i32, 1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+    Model.serial = 0; Model.outcomes = @splat(0); Model.producer_ready = true;
+    var recording = try @import("primitive_frame.zig").Frame.init(t.allocator); defer recording.deinit(); recording.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &recording;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    try windowCapture(&cache, front, .{ .pixel_w = 8, .pixel_h = 8 });
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+    // Hide during an active GPU read. Return must wait for physical retirement.
+    spec.config.flags = 0;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(owner.front() == null and front.retired and front.readers == 1 and server.returns == 0);
+    try pump(&engine, &cache, device, .copied);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const returned = owner.request.?;
+    try t.expect(server.returns == 1 and returned.fence.point != 0 and engine.external_receipts == 1);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(server.returns == 1 and owner.request == null and engine.external_receipts == 1);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const releasing = owner.request.?;
+    try t.expect(releasing.action == a.window_graphics_release_fence and releasing.request_serial > returned.request_serial);
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(std.meta.eql(releasing, owner.request.?) and engine.external_receipts == 1);
+    server.release_ready = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(engine.external_receipts == 0 and !server.invalidated and server.borrowed.point == 0);
+    try engine.close(); try t.expect(WindowMemory.count() == 0);
+
+    // A transport loss is not a service-generation death. Keep an already
+    // borrowed front through both, and clean it only after the read ends.
+    owner = .{}; server = .{ .lose_publish = false, .lose_take = false, .lose_return = false };
+    spec.config.flags = a.window_graphics_visible;
+    WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{}); owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    const held = owner.front().?; try held.borrow();
+    try t.expectEqual(@as(i32, 1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+    const old_owner = owner.owner;
+    spec.owner.generation += 1;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    try t.expect(std.meta.eql(owner.owner, old_owner) and owner.front() == null and held.retired and held.readers == 1);
+    owner.disconnect();
+    try t.expect(WindowMemory.count() == 1 and held.readers == 1);
+    server.dead = true;
+    owner.poll(desktop, 1, null, &server, WindowMemory{});
+    try t.expect(WindowMemory.count() == 1 and owner.ended);
+    try t.expect(held.finish(null, true));
+    owner.poll(desktop, 1, null, &server, WindowMemory{});
+    try t.expect(WindowMemory.count() == 0 and owner.surface.serial == 0 and !owner.needsPolling());
+    std.debug.print("[desktop-window-transport] lost publish/Take/Return replies, FIFO admission, hide during draw, exact fence ack and service-death retirement: OK\n", .{});
 }
 
 fn windowCapture(cache: *layers.Cache, frame: *window_image.Frame, view: @import("output_geometry.zig").topology.Viewport) !void {

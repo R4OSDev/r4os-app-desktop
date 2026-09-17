@@ -30,6 +30,7 @@ pub const Worker = struct {
     failed_revision: ?u64 = null,
     device_generation: u64 = 0,
     reset_generation: u64 = 0,
+    gpu_operations: u32 = 0,
     awaiting_visible: bool = false,
     failure_reported: bool = false,
     prepared_threads: u64 = 0,
@@ -81,6 +82,7 @@ pub const Worker = struct {
         if (self.thread != null or self.blocksCapture() or self.failed_revision == revision) return false;
         self.revision = revision;
         const info = self.graphics.info() orelse { if (self.engine.head != null) self.fail(error.Graphics); return false; };
+        self.gpu_operations = info.gpu_operations;
         const required = self.engine.requiredOperations();
         if (info.gpu_operations & required != required) { if (self.engine.head != null) self.fail(error.Unsupported); return false; }
         if (self.device_generation != info.device_generation or self.reset_generation != info.reset_generation) {

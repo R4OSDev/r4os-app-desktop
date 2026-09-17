@@ -494,6 +494,14 @@ pub const Context = struct {
         return out.result;
     }
 
+    pub fn windowGraphicsCall(self: *Context, op: u16, request: []const u8, out: *r4os.abi.WindowGraphicsReply) bool {
+        const got = self.window_session.call(self, op, request, std.mem.asBytes(out));
+        if (got != @sizeOf(r4os.abi.WindowGraphicsReply) or out.version != 1 or out.size != @sizeOf(r4os.abi.WindowGraphicsReply) or out.reserved != 0) {
+            self.closeWindowService(); return false;
+        }
+        return true;
+    }
+
     pub fn supportsClipboardContract(self: *const Context) bool {
         return self.desk.hasFn("clipboard_info");
     }
