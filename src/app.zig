@@ -6985,10 +6985,7 @@ pub const App = struct {
             .backend = backend, .output = .{ .adapter_id = output.target.adapter_id, .connector_id = output.target.connector_id,
                 .device_generation = output.target.device_generation, .connection_generation = output.target.connection_generation },
             .display_generation = output.target.display_generation, .format_count = 4 };
-        config.formats[0] = .{ .format = gfx.format_xrgb8888, .color = @bitCast(composition_software.description(false, true)) };
-        config.formats[1] = .{ .format = gfx.format_argb8888, .color = @bitCast(composition_software.description(false, false)) };
-        config.formats[2] = .{ .format = gfx.format_abgr16161616f, .color = @bitCast(composition_software.description(true, false)) };
-        config.formats[3] = .{ .format = gfx.format_abgr16161616f, .color = @bitCast(composition_software.description(true, true)) };
+        @import("window_color.zig").publish(&config);
         return .{ .owner = handle, .config = config, .consumer_ready = ready };
     }
     fn syncGraphicsWindows(self: *App) bool {

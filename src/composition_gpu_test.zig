@@ -300,7 +300,8 @@ const Model = struct {
     }
     fn renderColorList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderListRequest, flags: u32, out: *c.R4GfxJob) callconv(.c) i32 {
         if (!color_enabled) return c.status_unsupported;
-        std.debug.assert(flags == c.color_transform_output | c.color_transform_relative_white | c.color_transform_dither);
+        std.debug.assert(flags == c.color_transform_relative_white or flags == c.color_transform_output | c.color_transform_dither or
+            flags == c.color_transform_output | c.color_transform_relative_white | c.color_transform_dither);
         const rc = renderList(device, input, out);
         if (rc == 0) { jobs[out.slot - 1].?.operation.list.color_flags = flags; color_batches += 1; }
         return rc;
@@ -319,7 +320,7 @@ const Model = struct {
     }
     fn renderColorGridList(device: *const c.R4GfxDevice, input: *const c.R4GfxRenderGridListRequest, flags: u32, out: *c.R4GfxJob) callconv(.c) i32 {
         if (!combined_enabled) return c.status_unsupported;
-        std.debug.assert(flags == c.color_transform_relative_white);
+        std.debug.assert(flags == 0 or flags == c.color_transform_relative_white);
         const rc = renderGridList(device, input, out);
         if (rc == 0) { jobs[out.slot-1].?.operation.list.color_flags = flags; color_batches += 1; }
         return rc;
@@ -507,6 +508,7 @@ pub fn check() !void {
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
     try checkWindowImages(graphics, device);
+    try checkHdrWindows(graphics, device);
     try checkWindowTransport(graphics, device);
 }
 
@@ -1167,4 +1169,93 @@ fn checkAssets() !void {
     try t.expectError(error.OutOfMemory, cache.end(1));
     try t.expectError(error.OutOfMemory, cache.finish());
     try t.expect(cache.command_count == 0 and cache.reserved == 0);
+}
+
+fn checkHdrWindows(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    const policy = @import("window_color.zig");
+    const original = WindowMemory.descriptor;
+    defer WindowMemory.descriptor = original;
+    Model.chain_enabled = true; defer Model.chain_enabled = false;
+    defer Model.chain_format = c.format_xrgb8888;
+    for ([_]bool{ false, true }) |hdr_output| for ([_]bool{ false, true }) |pq_input| {
+        Model.chain_format = if (hdr_output) c.format_xrgb2101010 else c.format_xrgb8888;
+        Model.allow_visible = true; Model.clock = 1; Model.chain = .{};
+        Model.serial = 0; Model.outcomes = @splat(0); Model.producer_ready = true;
+        Model.chain_render = @splat(null); Model.chain_present = @splat(null);
+        var cache = layers.Cache.init(t.allocator, 4096); defer cache.deinit();
+        var recording = try @import("primitive_frame.zig").Frame.init(t.allocator); defer recording.deinit();
+        recording.mirror = false; cache.recording = &recording;
+        var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        if (hdr_output) try engine.configureOutput(.{ .flags = 7, .format = c.format_xrgb2101010,
+            .bpc = 10, .primaries = 3, .transfer = 3, .range = 2, .reference_white = 2030000, .peak = 10000000 }, c.format_xrgb2101010);
+        WindowMemory.descriptor = original;
+        WindowMemory.descriptor.format = if (pq_input) c.format_xrgb2101010 else c.format_abgr16161616f;
+        WindowMemory.descriptor.byte_length = if (pq_input) 256 else 512;
+        WindowMemory.descriptor.plane_pitches[0] = if (pq_input) 32 else 64;
+        for (0..64) |i| {
+            if (pq_input) {
+                // Independent ST2084 code anchors for 80 and 1000 cd/m2.
+                const code: u32 = if (i % 2 == 0) 497 else 769;
+                WindowMemory.pixels[i] = code | (code << 10) | (code << 20);
+            } else {
+                const halves: *[256]f16 = @ptrCast(&WindowMemory.pixels);
+                const value: f16 = if (i % 2 == 0) 1 else 12.5;
+                @memcpy(halves[i*4..][0..4], &[_]f16{value, value, value, 1});
+            }
+        }
+        WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+        var front: window_image.Frame = .{};
+        var message = windowMessage(); message.format.color = @bitCast(if (pq_input) policy.pq(true) else policy.scrgb(true));
+        try front.open(WindowMemory{}, message);
+        try t.expectEqual(@as(i32, 1), WindowMemory.release(.{}, &WindowMemory.source().reference));
+        const view: @import("output_geometry.zig").topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8 };
+        try windowCapture(&cache, &front, view);
+        try engine.prepare(&cache, 1000); try t.expect(engine.hdr_frame);
+        try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+        for (0..32) |_| { Model.complete(device); try engine.pollPresentation(); _ = engine.completion(); if (!engine.pending()) break; }
+        const work = Model.image(device, @ptrCast(&engine.workings[engine.output_index].resource));
+        const row: [*]const f16 = @ptrFromInt(work.cpu_address + work.pitch);
+        const white: f32 = if (hdr_output) 203 else 100;
+        try t.expectApproxEqAbs(@as(f32, 80), @as(f32, row[0]) * white, 1);
+        try t.expectApproxEqAbs(@as(f32, 1000), @as(f32, row[4]) * white, 3);
+        // The shared output shoulder maps 10000 to the monitor peak. It must
+        // retain highlights above SDR white and keep 80-nit scRGB absolute.
+        for ([_]usize{8, 9}, [_]i32{if (hdr_output) 490 else 230, if (hdr_output) 710 else 254}) |index, expected| {
+            const shifts = if (hdr_output) [_]u5{0, 10, 20} else [_]u5{0, 8, 16};
+            for (shifts) |shift| {
+                const actual: i32 = @intCast((Model.visible[index] >> shift) & @as(u32, if (hdr_output) 1023 else 255));
+                try t.expect(@abs(actual - expected) <= 2);
+            }
+        }
+        var readback = @import("r4gfx_readback").Owner.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
+        try readback.prepare(8, 8, engine.output_format, engine.output_color);
+        try readback.begin(.{ .source = engine.outputs[engine.output_index].resource, .epoch = 1, .frame = 1,
+            .regions = &.{.{ .x = 0, .y = 0, .width = 8, .height = 8 }}, .now_ns = 1, .deadline_ns = 1000 });
+        try pumpReadback(&readback, device);
+        try t.expect((readback.pixels[9] & 255) > (readback.pixels[8] & 255));
+        if (!hdr_output) try t.expectEqualSlices(u32, &Model.visible, readback.pixels);
+        try readback.close();
+        const allocated = Model.native_allocations;
+        try windowCapture(&cache, &front, view);
+        try t.expect(engine.prepared(&cache));
+        try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+        for (0..32) |_| { Model.complete(device); try engine.pollPresentation(); _ = engine.completion(); if (!engine.pending()) break; }
+        try t.expectEqual(allocated, Model.native_allocations);
+        try t.expect(front.closeAcknowledged(WindowMemory{}));
+        // Removing the HDR source rebuilds the private working images once,
+        // restoring the regular SDR policy on this same output owner.
+        try cache.start(.{.x=0,.y=0,.w=8,.h=8});
+        const background = (try cache.begin(1, cache.screen, cache.screen)).?;
+        background.fillRect(cache.screen, 0xffffff); try cache.end(1); _ = try cache.finish();
+        try t.expect(!engine.prepared(&cache));
+        try engine.prepare(&cache, 1000); try t.expect(!engine.hdr_frame);
+        try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+        for (0..32) |_| { Model.complete(device); try engine.pollPresentation(); _ = engine.completion(); if (!engine.pending()) break; }
+        if (!hdr_output) try t.expectEqual(@as(u32, 0xffffff), Model.visible[9]);
+        try engine.close();
+        try t.expect(WindowMemory.count() == 0 and engine.reserved_bytes == 0);
+        for (&Model.jobs) |*job| try t.expect(job.* == null);
+        for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    };
+    std.debug.print("[desktop-window-hdr] absolute scRGB/PQ, 80/1000-nit anchors, SDR/HDR output, capture, warm reuse and HDR removal: OK\n", .{});
 }

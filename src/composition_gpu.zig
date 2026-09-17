@@ -10,6 +10,7 @@ const primitive_assets = @import("primitive_assets.zig");
 const color = @import("composition_software.zig");
 const window_image = @import("window_image.zig");
 const geometry = @import("output_geometry.zig");
+const window_color = @import("window_color.zig");
 const empty = std.mem.zeroes(gfx.R4GfxResource);
 const Image = struct { resource: gfx.R4GfxResource = empty, color_view: gfx.R4GfxResource = empty, info: gfx.R4GfxResourceInfo = undefined, generation: u64 = 0, charge: u64 = 0,
     external_reference: r4os.abi.GfxBufferHandle = .{}, external_color: ?gfx.R4GfxColorDescription = null };
@@ -27,6 +28,7 @@ pub const Engine = struct {
     output_format: u32 = gfx.format_xrgb8888,
     output_color: gfx.R4GfxColorDescription = color.description(false, true),
     color_output: bool = false,
+    hdr_frame: bool = false,
     images: [layers.capacity]Image = @splat(.{}),
     assets: [primitive_assets.texture_capacity]Image = @splat(.{}),
     outputs: [gfx.swapchain_image_capacity]Image = @splat(.{}),
@@ -108,6 +110,12 @@ pub const Engine = struct {
     pub fn active(self: *const Engine) bool { return self.phase != .idle; }
     fn output(self: *Engine) *Image { return &self.outputs[self.output_index]; }
     fn working(self: *Engine) *Image { return &self.workings[self.output_index]; }
+    fn hasHdr(cache: *const layers.Cache) bool {
+        for (cache.commands[0..cache.command_count]) |command|
+            if (cache.entries[command.entry].external) |frame|
+                if (window_color.absolute(frame.description())) return true;
+        return false;
+    }
     pub fn invalidate(self: *Engine) void { for (&self.outputs) |*value| value.generation = 0; }
     pub fn pending(self: *const Engine) bool {
         for (self.chain_frames) |key| if (key != 0) return true;
@@ -188,6 +196,7 @@ pub const Engine = struct {
             !self.imageFits(self.output(), cache.screen.w, cache.screen.h, self.output_format) or
             !self.imageFits(&self.staging, if (cache.recording != null) 512 else cache.screen.w,
                 if (cache.recording != null) 512 else cache.screen.h, gfx.format_argb8888)) return false;
+        if (hasHdr(cache) != self.hdr_frame) return false;
         var visited: [layers.capacity]bool = @splat(false);
         for (&self.images, 0..) |*image_value, i| if (image_value.external_reference.id != 0 and
             cache.entries[i].frame != cache.frame) return false;
@@ -260,6 +269,14 @@ pub const Engine = struct {
                 if (!direct or (err != error.Unsupported and err != error.Limit)) return err;
                 try self.image(value, cache.screen.w, cache.screen.h, self.output_format, true, deadline);
             };
+        }
+        const hdr = hasHdr(cache);
+        if (hdr != self.hdr_frame) {
+            // The old workers are drained. Recreate their private FP16
+            // storage with its new absolute scale; never relabel a live BO.
+            for (&self.workings) |*value| try self.releaseImage(value);
+            self.hdr_frame = hdr;
+            self.invalidate();
         }
         for (self.workings[0..count]) |*value| try self.image(value, cache.screen.w, cache.screen.h, gfx.format_abgr16161616f, true, deadline);
         if (presentation) |value| if (self.chain.slot == 0) {
@@ -353,7 +370,7 @@ pub const Engine = struct {
         }
         if (format == gfx.format_xrgb8888 or format == gfx.format_xrgb2101010 or format == gfx.format_abgr16161616f) {
             try accepted(self.colors.color_resource_create(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxColorResourceDesc),
-                .resource = desc, .description = if (format == gfx.format_abgr16161616f) color.description(true, false) else self.output_color }, &target.resource));
+                .resource = desc, .description = if (format == gfx.format_abgr16161616f) (if (self.hdr_frame) window_color.working(self.output_color) else color.description(true, false)) else self.output_color }, &target.resource));
         } else try accepted(self.client.resource_create(self.device, &desc, &target.resource));
         // The resource remains tracked even if its metadata cannot be read.
         target.info = std.mem.zeroes(gfx.R4GfxResourceInfo);
@@ -386,6 +403,7 @@ pub const Engine = struct {
         // background (or fullscreen terminal). A new target must start there.
         if (self.needsFull(cache.screen.w, cache.screen.h) and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
         try self.acquire(self.input_ns);
+        if (self.hdr_frame != hasHdr(cache)) return error.State;
         self.clear_working = self.needsFull(cache.screen.w, cache.screen.h);
         self.encode_area = cache.commands[0].scissor;
         for (cache.commands[1..cache.command_count]) |command| self.encode_area = self.encode_area.merged(command.scissor);
@@ -635,12 +653,17 @@ pub const Engine = struct {
                     return;
                 }
                 var handle: gfx.R4GfxJob = undefined;
-                try accepted(self.client.render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
+                const request: gfx.R4GfxRenderRequest = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
                     .source = self.images[command.entry].color_view, .target = self.working().resource, .pipeline = self.over, .sampler = self.sampler,
                     .source_rect = .{ .x = clip.x - bounds.x, .y = clip.y - bounds.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .target_rect = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .scissor = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
-                    .color = 0, .opacity = 255, .transfer = gfx.render_transfer_srgb_decode, .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer }, &handle));
+                    .color = 0, .opacity = 255, .transfer = if (self.hdr_frame) gfx.render_transfer_identity else gfx.render_transfer_srgb_decode,
+                    .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer };
+                if (self.hdr_frame) {
+                    try accepted(self.colors.color_render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderListRequest),
+                        .commands = @intFromPtr(&request), .count = 1, .reserved = 0 }, gfx.color_transform_relative_white, &handle));
+                } else try accepted(self.client.render_submit(self.device, &request, &handle));
                 try self.track(slot, handle, null, 0, 0);
                 self.next_command += 1; self.render_jobs +|= 1;
             },
@@ -651,12 +674,13 @@ pub const Engine = struct {
                 const request: gfx.R4GfxRenderRequest = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
                     .source = self.working().resource, .target = self.output().resource, .pipeline = self.blit, .sampler = self.sampler,
                     .source_rect = area, .target_rect = area, .scissor = area, .color = 0, .opacity = 255,
-                    .transfer = if (self.color_output) gfx.render_transfer_identity else gfx.render_transfer_srgb_encode,
+                    .transfer = if (self.color_output or self.hdr_frame) gfx.render_transfer_identity else gfx.render_transfer_srgb_encode,
                     .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer };
-                if (self.color_output) {
+                if (self.color_output or self.hdr_frame) {
                     try accepted(self.colors.color_render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderListRequest),
                         .commands = @intFromPtr(&request), .count = 1, .reserved = 0 },
-                        gfx.color_transform_output | gfx.color_transform_relative_white | gfx.color_transform_dither, &handle));
+                        gfx.color_transform_output | gfx.color_transform_dither |
+                            @as(u32, if (self.hdr_frame) 0 else gfx.color_transform_relative_white), &handle));
                 } else try accepted(self.client.render_submit(self.device, &request, &handle));
                 try self.track(slot, handle, null, 0, 0);
                 self.render_jobs +|= 1;
@@ -707,7 +731,7 @@ pub const Engine = struct {
             .dependency_count = count, .dependencies = @intFromPtr(&dependencies), .deadline_ns = self.deadline };
         var handle: gfx.R4GfxJob = undefined;
         try accepted(self.colors.color_render_submit_grid(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderGridListRequest),
-            .commands = @intFromPtr(&request), .grids = @intFromPtr(&grid), .count = 1, .reserved = 0 }, gfx.color_transform_relative_white, &handle));
+            .commands = @intFromPtr(&request), .grids = @intFromPtr(&grid), .count = 1, .reserved = 0 }, if (window_color.absolute(frame.description())) 0 else gfx.color_transform_relative_white, &handle));
         self.external_last[index] = slot;
         try self.track(slot, handle, null, 0, 0);
     }
