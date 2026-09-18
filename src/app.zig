@@ -347,6 +347,7 @@ pub const App = struct {
     screen_power: @import("screen_power.zig").Owner = .{},
     screenshot_job: ?*@import("screenshot.zig").Job = null,
     screenshot_last: ?@import("screenshot.zig").Result = null,
+    recorder: ?*@import("recording.zig").Manager = null,
     activity_wait_wakes: u64 = 0,
     activity_wait_timeouts: u64 = 0,
     double_click_ticks: u64 = 25,
@@ -1188,6 +1189,25 @@ pub const App = struct {
         self.screenshot_last = null;
         self.screenshot_job = @import("screenshot.zig").Job.start(self.ctx.allocator(), self.ctx.sys, self.ctx.desk);
         if (self.screenshot_job == null) self.ctx.println("Screenshot unavailable");
+    }
+
+    fn toggleRecording(self: *App) void {
+        if (self.recorder) |recorder| {
+            if (recorder.active()) {
+                recorder.stop(); self.ctx.recording_state = 2;
+                self.invalidateTaskbar(); return;
+            }
+            var adapter: u32 = 0;
+            if (self.ctx.graphics) |graphics| if (graphics.info()) |info| { adapter = info.adapter_id; };
+            if (recorder.start(adapter)) {
+                self.ctx.recording_state = 1; self.invalidateTaskbar(); return;
+            }
+        }
+        if (self.dialog == .none) {
+            self.dialog = .message_window_info; self.dialog_focus = .message_ok;
+            self.setMessageBox(.@"error", .ok, "Recording", "Screen recording is unavailable.");
+            self.invalidateFull();
+        }
     }
 
     fn smokeCaptureContract(self: *App) void {
@@ -4589,8 +4609,9 @@ pub const App = struct {
         self.last_physical_input_sequence = input.sequence;
         if (self.screen_power.input(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0)) return true;
         if (input.key == @import("screenshot.zig").usage) {
-            if (input.kind == r4os.abi.physical_key_kind_down and input.flags & r4os.abi.physical_key_flag_repeat == 0 and self.screenshot_job == null) {
-                self.startScreenshot();
+            if (input.kind == r4os.abi.physical_key_kind_down and input.flags & r4os.abi.physical_key_flag_repeat == 0) {
+                const control = r4os.abi.physical_key_modifier_left_control | r4os.abi.physical_key_modifier_right_control;
+                if (input.modifiers & control != 0) self.toggleRecording() else self.startScreenshot();
             }
             return true;
         }
@@ -5950,6 +5971,17 @@ pub const App = struct {
     }
 
     fn pollComposition(self: *App) void {
+        if (self.recorder) |recorder| if (recorder.collect()) |result| {
+            self.ctx.recording_state = 0;
+            self.invalidateTaskbar();
+            if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
+                self.dialog = .message_window_info; self.dialog_focus = .message_ok;
+                if (result.ok) self.setMessageBox(.info, .ok, "Recording", "Saved in C:\\RECORDINGS.")
+                else if (result.parts != 0) self.setMessageBox(.@"error", .ok, "Recording", "Recording stopped after an error. Completed parts are in C:\\RECORDINGS.")
+                else self.setMessageBox(.@"error", .ok, "Recording", "The recording could not be saved.");
+                self.invalidateFull();
+            }
+        };
         if (self.screenshot_job) |job| if (job.collect()) |result| {
             self.screenshot_job = null; self.screenshot_last = result;
             if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {

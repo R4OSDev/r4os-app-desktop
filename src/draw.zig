@@ -750,7 +750,9 @@ pub fn taskbar(
     const taskbar_surface = surface.taskbar(screen_w, screen_h, theme.taskbar_h);
     const top = taskbar_surface.rect.y;
     fillSurface(ctx, taskbar_surface, theme.taskbar);
-    ctx.paintRect(0, top, @intCast(screen_w), 1, theme.taskbar_light);
+    const recording_color: u32 = if (ctx.recording_state == 2) 0xb06000 else 0xc00000;
+    ctx.paintRect(0, top, @intCast(screen_w), if (ctx.recording_state != 0) 3 else 1,
+        if (ctx.recording_state != 0) recording_color else theme.taskbar_light);
     bevel(ctx, 2, top + 4, theme.start_w, theme.start_h, pressed_target == .start_button);
     if (hover_target == .start_button and pressed_target != .start_button) focusRect(ctx, 5, top + 7, theme.start_w - 6, theme.start_h - 6);
     startGlyph(ctx, 10, top + 10, pressed_target == .start_button);
@@ -836,7 +838,9 @@ pub fn taskbar(
         bevel(ctx, rect.x, rect.y, rect.w, rect.h, true);
         ctx.paintRect(rect.x + 2, rect.y + 2, @intCast(rect.w - 4), @intCast(rect.h - 4), bg);
         if (hovered) focusRect(ctx, rect.x + 3, rect.y + 3, rect.w - 6, rect.h - 6);
-        ctx.paintText(rect.x + 10, top + 11, value, theme.text, bg);
+        ctx.paintText(rect.x + 10, top + 11,
+            if (ctx.recording_state == 1) "REC" else if (ctx.recording_state == 2) "Saving" else value,
+            if (ctx.recording_state != 0) recording_color else theme.text, bg);
     }
 }
 

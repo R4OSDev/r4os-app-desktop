@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.49`
+- Version: `0.1.67`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -33,6 +33,22 @@ last verified standalone dependency identities; workspace builds use the
 mapped local checkouts.
 
 ## Documentation
+
+**Ctrl+Print Screen** starts or stops screen recording. The taskbar has a red
+edge and its clock shows `REC`; `Saving` indicates finalization. Completed
+H.264 Matroska parts are saved in `C:\RECORDINGS`. Plain Print Screen saves a
+bitmap in `C:\SCREENSHOTS`. Recordings contain video only.
+
+The recorder uses optional R4ENC ENCODE_V1 on its own worker. It prefers a
+supported NVIDIA encoder and explicitly falls back to software after confirmed
+retirement. Resolution/source changes and backend fallback start a new file
+part. Input is the existing immutable sRGB CPU capture; conversion yields
+limited-range NV12 with sRGB transfer metadata. Native YUV producers can use
+R4ENC directly without this CPU capture/conversion step. Intermediate frames
+are skipped when busy; unchanged picture durations are preserved. File I/O
+holds neither a capture snapshot nor a display buffer. No capture or encoder
+work starts until requested. R4ENC's process runtime survives repeated
+recordings and finishes only at Desktop shutdown.
 
 The taskbar owns the notification-area layout. Its built-in volume item sits
 immediately left of the clock and controls AUDSVC's persistent global master

@@ -15,6 +15,7 @@ pub const Context = struct {
     scene: ?*scene_buffer.SceneBuffer = null,
     window_session: window_service.Session = .{},
     graphics: ?*gfx_renderer.Renderer = null,
+    recording_state: u8 = 0, // UI-owned: idle, recording, finalizing.
     output_bounds: ?surface.Rect = null,
     gpu_windows: [4]?*@import("window_image.zig").Frame = @splat(null),
 

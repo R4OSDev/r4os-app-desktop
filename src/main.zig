@@ -51,7 +51,9 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
     };
     const outputs = output_manager.Manager.create(ctx.allocator(), r4_app.startContext(), ctx.sys, ctx.draw);
     defer if (outputs) |manager| manager.destroy();
-    var desktop = app.App{ .ctx = &ctx, .images = &images, .png = &png, .raster = &raster, .colors = &colors, .composition = composition, .outputs = outputs };
+    const recorder = @import("recording.zig").Manager.create(ctx.allocator(), r4_app.startContext(), ctx.sys, ctx.desk);
+    defer if (recorder) |manager| manager.destroy();
+    var desktop = app.App{ .ctx = &ctx, .images = &images, .png = &png, .raster = &raster, .colors = &colors, .composition = composition, .outputs = outputs, .recorder = recorder };
     defer desktop.cpu_composition.deinit();
     return desktop.run();
 }

@@ -12,6 +12,22 @@ der Appearance-App, GPU-Ausfuehrung dem Treiber und der Timer dem Displaybesitze
 Zustaendigkeit
 --------------
 
+Ab 0.1.67 startet/stoppt Strg+Druck die Bildschirmaufnahme. Der rote Rand der
+Taskleiste und REC in der Uhr zeigen die Aktivitaet, Saving den Abschluss.
+Fertige H.264-Matroska-Dateien liegen unter C:\RECORDINGS; Druck ohne Strg
+speichert weiterhin BMP-Screenshots unter C:\SCREENSHOTS. Die Aufnahme hat
+keine Audiospur. Groessen-/Quellwechsel und Softwarefallback beginnen einen
+neuen Dateiteil. Fehler lassen bereits fertiggestellte Teile bestehen.
+
+recording.zig besitzt einen eigenen Worker, maximal ein angenommenes NV12-
+Eingabebild und zwei begrenzte Bitstreamleihen. Er liest die bestehende
+unveraenderliche CPU-Aufnahme und gibt sie vor Encoder-/Dateiwarten frei.
+Langsame Ausgabe verwirft Zwischenrevisionen; unveraenderte Bilddauern bleiben
+erhalten. Nach NVIDIA-Ausfall folgen bestaetigtes Close/Join und expliziter
+Softwareersatz. Ohne Start entstehen weder Capturebedarf noch Encodearbeit.
+Die optionale R4ENC-Bindung sperrt bei Fehlen nur die Aufnahme. Details:
+Docs/Drivers/Videoencoding07941.txt.
+
 - Desktopflaeche, Taskbar, Startmenue und Systemdialoge
 - gehostete GUI-Fenster
 - Terminalfenster und Terminalmodus als Console-Hosts

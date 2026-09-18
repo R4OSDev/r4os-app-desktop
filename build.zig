@@ -15,6 +15,9 @@ pub fn build(b: *std.Build) void {
             libraries_dep.namedLazyPath("r4gfx_zig_binding"),
             libraries_dep.namedLazyPath("r4gfx_desktop_outputs"),
             libraries_dep.namedLazyPath("r4gfx_readback"),
+            libraries_dep.namedLazyPath("r4enc_zig_binding"),
+            libraries_dep.namedLazyPath("r4enc_recording_mux"),
+            libraries_dep.namedLazyPath("r4enc_recording_pixels"),
         },
     });
 
