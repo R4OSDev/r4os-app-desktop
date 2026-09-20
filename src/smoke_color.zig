@@ -40,6 +40,17 @@ pub fn check(allocator: std.mem.Allocator, images: *const img.Context, raster: *
         const level = (pixels[0] >> shift) & 255;
         if (level < 187 or level > 189) return error.ProfilePixels;
     }
+    // The normal image/color facade also owns scaling; no private desktop
+    // scaler or direct framebuffer access is needed by image consumers.
+    var scaled: [4]u32 = @splat(0);
+    var scaled_target = target;
+    scaled_target.image = .{ .cpu_address = @intFromPtr(&scaled), .byte_length = 16, .pitch = 16,
+        .width = 4, .height = 1, .format = gfx.format_xrgb8888, .reserved = 0 };
+    var scaled_request = request;
+    scaled_request.target_rect.width = 4;
+    scaled_request.pixel_budget = 4;
+    _ = try img.ColorDecoder(gfx).decodeRaster(allocator, images, raster, colors, &bitmap, &scaled_target, &scaled_request, .{});
+    if (scaled[0] != pixels[0] or scaled[1] != pixels[0] or scaled[2] != pixels[1] or scaled[3] != pixels[1]) return error.ScaledPixels;
     const overlay = [_]u32{ 0x80ffffff, 0x00ffffff };
     var source = target;
     source.image.cpu_address = @intFromPtr(&overlay);

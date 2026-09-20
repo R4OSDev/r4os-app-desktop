@@ -44,6 +44,9 @@ pub const Output = struct {
     prepare_error: ?anyerror = null,
     last_status: i32 = 0,
     last_submitted: ?u32 = null,
+    frame_started_ns: u64 = 0,
+    frame_submit_last_ns: u64 = 0,
+    frame_submit_max_ns: u64 = 0,
     pub fn setProfile(self: *Output, sys: anytype, choice: catalog.color_preferences.Choice) !void {
         if (self.profile != null or self.acquired != null or self.pending or self.completed != 0) return error.State;
         if (!choice.enabled()) return;
@@ -162,6 +165,7 @@ pub const Output = struct {
         if (!self.scene.attach(storage, bounds.w, bounds.h)) { self.abandon(); return null; }
         self.scene.origin_x = bounds.x; self.scene.origin_y = bounds.y;
         self.color_composition.begin(self.graphics.allocator, &self.scene) catch { self.abandon(); return null; };
+        self.frame_started_ns = self.sys.monotonicNanoseconds() orelse 0;
         return &self.scene;
     }
     pub fn submit(self: *Output, deadline: u64) bool {
@@ -199,6 +203,11 @@ pub const Output = struct {
         self.acquired = null; self.pending = true;
         self.reported[frame.slot - 1] = false;
         self.last_submitted = frame.slot - 1;
+        const ended = self.sys.monotonicNanoseconds() orelse 0;
+        if (self.frame_started_ns != 0 and ended >= self.frame_started_ns) {
+            self.frame_submit_last_ns = ended - self.frame_started_ns;
+            self.frame_submit_max_ns = @max(self.frame_submit_max_ns, self.frame_submit_last_ns);
+        }
         return true;
     }
     fn abandon(self: *Output) void {

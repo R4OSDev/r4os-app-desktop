@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.67`
+- Version: `0.1.68`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -78,6 +78,15 @@ meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
 The existing desktop activity loop observes the optional R4DRAW ABI12
 output revision and invalidates the scene when it changes. Older API tables
 remain supported. No second hotplug timer or event queue is introduced.
-Native resolution changes still require the later coordinated display and
-surface transition; this stage keeps the actual boot geometry.
+Native outputs use coordinated per-output surfaces, generations and recovery.
+The permanent bootfb fallback retains the actual boot geometry.
+
+0.79.44 fixes the COLOR_V1 manifest minimum (revision 4) and identifies early
+startup failures. Opaque internal SDR tiles copy their final RGB values without
+reading covered layers or round-tripping through FP16. Partial, translucent
+and externally supplied color images keep the full color pipeline. Existing
+render tests compare the paths pixel-for-pixel. The window-idle smoke exposes
+legacy damage/copy counters and separate managed-output completion/cost data.
+Measured software limits and examples: Docs/Desktop/GrafikIntegration07944.txt.
+These timings are not NVIDIA throughput or monitor-refresh guarantees.
 Build.bat/Build.sh share PS7 orchestration via the configured SDK checkout.

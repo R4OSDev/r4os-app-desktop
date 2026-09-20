@@ -474,6 +474,35 @@ test "occlusion composition matches complete painter order after move hide minim
     try std.testing.expect(idle.len == 0);
     const idle_stats = try @import("composition_software.zig").paint(&graphics.colors,&cache,&scene);
     try std.testing.expect(idle_stats.commands == 0 and idle_stats.pixels == 0);
+    // Compare opaque tile copies with the full color pipeline. A transparent
+    // top layer forces that pipeline without changing the optical result.
+    var palette = [_]u32{0x123456} ** (64 * 64);
+    var palette_scene: scene_buffer.SceneBuffer = .{};
+    try std.testing.expect(palette_scene.attach(std.mem.sliceAsBytes(&palette), 64, 64));
+    var palette_cache = composition_layers.Cache.init(std.testing.allocator, 256 * 1024);
+    defer palette_cache.deinit();
+    const palette_bounds = palette_scene.fullRect();
+    try palette_cache.start(palette_bounds);
+    const palette_layer = (try palette_cache.begin(1, palette_bounds, palette_bounds)).?;
+    for (palette_layer.pixels.?[0..64 * 64], 0..) |*pixel, i| {
+        const value: u32 = @intCast(i % 256);
+        pixel.* = 0xff000000 | (value << 16) | ((255 - value) << 8) | (value ^ 0x5a);
+    }
+    try palette_cache.end(1);
+    _ = try palette_cache.finish();
+    const direct = try @import("composition_software.zig").paint(&graphics.colors, &palette_cache, &palette_scene);
+    try std.testing.expect(direct.direct_pixels == palette.len);
+    const expected_palette = palette;
+    try palette_cache.start(palette_bounds);
+    const repeated = (try palette_cache.begin(1, palette_bounds, palette_bounds)).?;
+    for (repeated.pixels.?[0..64 * 64], expected_palette) |*pixel, expected| pixel.* = expected | 0xff000000;
+    try palette_cache.end(1);
+    _ = (try palette_cache.begin(2, palette_bounds, palette_bounds)).?;
+    try palette_cache.end(2);
+    _ = try palette_cache.finish();
+    const blended = try @import("composition_software.zig").paint(&graphics.colors, &palette_cache, &palette_scene);
+    try std.testing.expect(blended.direct_pixels == 0);
+    try std.testing.expectEqualSlices(u32, &expected_palette, &palette);
     var tiny = composition_layers.Cache.init(std.testing.allocator,4);
     defer tiny.deinit();
     try tiny.start(scene.fullRect());

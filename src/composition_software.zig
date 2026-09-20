@@ -7,7 +7,7 @@ const layers = @import("composition_layers.zig");
 const scene = @import("scene_buffer.zig");
 const Rect = @import("surface.zig").Rect;
 const side = layers.ColorScratch.side;
-pub const Stats = struct { commands: u64 = 0, pixels: u64 = 0 };
+pub const Stats = struct { commands: u64 = 0, pixels: u64 = 0, direct_pixels: u64 = 0 };
 /// Retained CPU capture belongs to the output that consumes it. It never
 /// borrows the asynchronous GPU worker's layer storage.
 pub const Owner = struct {
@@ -36,6 +36,7 @@ pub const Owner = struct {
         self.frames +|= 1;
         self.stats.commands +|= result.commands;
         self.stats.pixels +|= result.pixels;
+        self.stats.direct_pixels +|= result.direct_pixels;
     }
     pub fn cancel(self: *Owner, canvas: *scene.SceneBuffer) void {
         canvas.layer_hook = null;
@@ -103,6 +104,39 @@ fn transform(colors: *const gfx.ColorV1Client, source: *const gfx.R4GfxColorImag
 fn bits(width: u32) u64 {
     return if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @as(u6, @intCast(width))) - 1;
 }
+
+/// A final opaque internal SDR layer needs neither the covered destination
+/// nor an sRGB -> FP16 -> sRGB round trip. External images retain COLOR_V1
+/// metadata handling. A partial or translucent top layer uses normal blending.
+fn copyOpaqueTile(cache: *const layers.Cache, tile: Rect, target: *scene.SceneBuffer) bool {
+    var index = cache.command_count;
+    while (index != 0) {
+        index -= 1;
+        const command = cache.commands[index];
+        const clip = layers.intersect(tile, command.scissor) orelse continue;
+        const entry = &cache.entries[command.entry];
+        if (!std.meta.eql(clip, tile) or entry.external != null) return false;
+        const width: usize = @intCast(tile.w);
+        const source_pitch: usize = @intCast(entry.bounds.w);
+        const source_start = @as(usize, @intCast(tile.y - entry.bounds.y)) * source_pitch + @as(usize, @intCast(tile.x - entry.bounds.x));
+        // Check the complete tile before writing any destination pixels.
+        for (0..@intCast(tile.h)) |row| {
+            for (entry.pixels[source_start + row * source_pitch ..][0..width]) |pixel| {
+                if (pixel >> 24 != 255) return false;
+            }
+        }
+        const destination = target.pixels.?;
+        const target_pitch: usize = @intCast(target.width);
+        const target_start = @as(usize, @intCast(tile.y - target.origin_y)) * target_pitch + @as(usize, @intCast(tile.x - target.origin_x));
+        for (0..@intCast(tile.h)) |row| {
+            const source = entry.pixels[source_start + row * source_pitch ..][0..width];
+            const output = destination[target_start + row * target_pitch ..][0..width];
+            for (source, output) |pixel, *out| out.* = pixel & 0x00ffffff;
+        }
+        return true;
+    }
+    return false;
+}
 pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *scene.SceneBuffer) !Stats {
     if (cache.collecting or cache.active != null or cache.failure != null or cache.view != null or target.premultiplied or
         target.width != cache.screen.w or target.height != cache.screen.h or target.origin_x != cache.screen.x or target.origin_y != cache.screen.y) return error.State;
@@ -134,6 +168,13 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
                 break;
             };
             if (!active) continue;
+            if (copyOpaqueTile(cache, tile, target)) {
+                const count = @as(u64, @intCast(tile.w)) * @as(u32, @intCast(tile.h));
+                stats.commands +|= 1;
+                stats.pixels +|= count;
+                stats.direct_pixels +|= count;
+                continue;
+            }
             @memset(&workspace.touched, 0);
             const local = rect(0, 0, tile.w, tile.h);
             const working = image(@intFromPtr(&workspace.linear), @sizeOf(@TypeOf(workspace.linear)), side * 8, @intCast(tile.w), @intCast(tile.h), true, false);

@@ -8,12 +8,12 @@ const composition_worker = @import("composition_worker.zig");
 const output_manager = @import("output_manager.zig");
 
 pub fn r4_app_main(r4_app: *r4os.App) i32 {
-    if (!r4std.init(r4_app.startContext())) return r4os.abi.err_no_group;
-    var images = r4img.Context.init(r4_app.startContext()) orelse return r4os.abi.err_no_group;
-    var png = r4img.PngContext.init(r4_app.startContext()) orelse return r4os.abi.err_no_group;
-    var raster = r4img.RasterContext.init(r4_app.startContext()) orelse return r4os.abi.err_no_group;
-    var colors = @import("r4gfx").ColorV1Client.init(r4_app.startContext()) catch return r4os.abi.err_no_group;
-    var ctx = desktop_api.Context.init(r4_app) orelse return r4os.abi.err_no_group;
+    if (!r4std.init(r4_app.startContext())) return startupFailure(r4_app, "R4STD");
+    var images = r4img.Context.init(r4_app.startContext()) orelse return startupFailure(r4_app, "R4IMG/API_V1");
+    var png = r4img.PngContext.init(r4_app.startContext()) orelse return startupFailure(r4_app, "R4IMG/PNG_V1");
+    var raster = r4img.RasterContext.init(r4_app.startContext()) orelse return startupFailure(r4_app, "R4IMG/RASTER_V1");
+    var colors = @import("r4gfx").ColorV1Client.init(r4_app.startContext()) catch return startupFailure(r4_app, "R4GFX/COLOR_V1");
+    var ctx = desktop_api.Context.init(r4_app) orelse return startupFailure(r4_app, "desktop context");
     defer ctx.closeWindowService();
     ctx.graphics = gfx_renderer.Renderer.create(ctx.allocator(), r4_app.startContext());
     defer if (ctx.graphics) |graphics| {
@@ -56,4 +56,11 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
     var desktop = app.App{ .ctx = &ctx, .images = &images, .png = &png, .raster = &raster, .colors = &colors, .composition = composition, .outputs = outputs, .recorder = recorder };
     defer desktop.cpu_composition.deinit();
     return desktop.run();
+}
+
+fn startupFailure(r4_app: *r4os.App, component: []const u8) i32 {
+    const sys = r4_app.system();
+    sys.write("R4DESK startup failed: ");
+    sys.println(component);
+    return r4os.abi.err_no_group;
 }

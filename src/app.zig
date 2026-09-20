@@ -1728,6 +1728,9 @@ pub const App = struct {
         const editor_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X";
         const timer_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X";
         self.ctx.println("DESKTOP window-idle smoke");
+        var render_sample = self.printSmokeRenderStats("window-idle-initial", .{});
+        self.smokePumpFrames(12);
+        render_sample = self.printSmokeRenderStats("window-idle-empty", render_sample);
         self.launchGuiPath(editor_path, "", "Default Apps", .gui);
         self.smokePumpFrames(20);
         const index = self.findWindowByLaunchPath(editor_path) orelse self.windowIdleSmokeFailed("launch");
@@ -1752,6 +1755,7 @@ pub const App = struct {
         _ = self.handleMouseEvent(release_mouse);
         if (self.resize.active or self.window_geometry_updates.pending[index] or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("resize-end");
         self.ctx.println("DESKTOP window-idle geometry: OK");
+        render_sample = self.printSmokeRenderStats("window-idle-geometry", render_sample);
         if (self.managedOutputs()) self.smokeOutputWindow(index);
         if (argsContain(self.ctx.argsRaw(), "/OUTPUTS")) self.smokeDisplayPreferences();
         self.launchGuiPath(timer_path, "", "MemView", .gui);
@@ -1777,6 +1781,7 @@ pub const App = struct {
         self.ctx.print("DESKTOP window-idle timeouts/2s: ");
         self.ctx.printU64(self.activity_wait_timeouts - before_timeouts);
         self.ctx.println("");
+        render_sample = self.printSmokeRenderStats("window-idle-two-producers", render_sample);
         var restart_layout: ?output_manager.topology.Layout = null;
         if (argsContain(self.ctx.argsRaw(), "/OUTPUTS")) {
             const manager = self.outputs.?;
@@ -1819,6 +1824,7 @@ pub const App = struct {
         self.smokePumpFrames(30);
         if (self.windows[index].instance_id != 0 or self.windows[timer_index].instance_id != 0) self.windowIdleSmokeFailed("close");
         self.ctx.println("DESKTOP window-idle result: OK");
+        _ = self.printSmokeRenderStats("window-idle-close", render_sample);
         self.smokeGraphicsResources();
         if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) self.smokeCaptureContract();
         self.ctx.systemPoweroff();
@@ -1837,6 +1843,7 @@ pub const App = struct {
         self.ctx.write(" fills="); self.ctx.printU64(graphics.fills);
         self.ctx.write(" imports="); self.ctx.printU64(info.imports);
         self.ctx.write(" linear-frames="); self.ctx.printU64(self.cpu_composition.frames);
+        self.ctx.write(" direct-sdr-pixels="); self.ctx.printU64(self.cpu_composition.stats.direct_pixels);
         self.ctx.println(" rejected=0");
         self.smokeCompositionResources();
     }
@@ -3198,11 +3205,31 @@ pub const App = struct {
     }
 
     fn printSmokeRenderStats(self: *const App, comptime label: []const u8, before: RenderSnapshot) RenderSnapshot {
+        if (self.managedOutputs()) {
+            for (&self.outputs.?.slots) |*slot| {
+                const index = slot.logical_index orelse continue;
+                if (slot.software) |output| {
+                    self.ctx.write("DESKTOP output render "); self.ctx.write(label);
+                    self.ctx.write(": index="); self.ctx.printU64(index);
+                    self.ctx.write(" submitted="); self.ctx.printU64(output.serial);
+                    self.ctx.write(" completed="); self.ctx.printU64(output.completed);
+                    self.ctx.write(" visible="); self.ctx.printU64(output.visible);
+                    self.ctx.write(" failed="); self.ctx.printU64(output.failed);
+                    self.ctx.write(" direct-sdr-pixels="); self.ctx.printU64(output.color_composition.stats.direct_pixels);
+                    self.ctx.write(" scratch-bytes="); self.ctx.printU64(output.scratch.len);
+                    self.ctx.write(" frame-submit-ns="); self.ctx.printU64(output.frame_submit_last_ns);
+                    self.ctx.write("/"); self.ctx.printU64(output.frame_submit_max_ns);
+                    self.ctx.println(" scope=per-output-cpu-to-submit");
+                }
+            }
+        }
         const after = self.renderSnapshot();
         const font_cache = paint.currentFontCacheStats();
         self.ctx.print("DESKTOP render ");
         self.ctx.write(label);
-        self.ctx.print(": redraws=");
+        self.ctx.print(": items="); self.ctx.printU64(self.desktop_items.count);
+        self.ctx.print(" folder-failed="); self.ctx.printU64(@intFromBool(self.desktop_folder_failed));
+        self.ctx.print(" redraws=");
         self.ctx.printU64(after.redraws);
         self.ctx.print(" delta_redraws=");
         self.ctx.printU64(@as(u32, after.redraws -% before.redraws));

@@ -1,0 +1,16 @@
+info: fork /root/Projekte/R4OS/Repositories/SDK matched 1 r4os_sdk packages
+info: fork /root/Projekte/R4OS/Repositories/Contract matched 1 r4os_contract packages
+info: fork /root/Projekte/R4OS/Repositories/Libraries matched 1 r4os_libraries packages
+render-test
++- run test w
+[desktop-primitives] 16 draws/batch; large source tiled through 1 MB staging; curves/AA/shadow max=3 LSB
+[desktop-outputs] signed origin, native composition, four rotations, 150/200 percent and warm assets: OK
+[desktop-primitives] fill/glyph/indexed/alpha/ARGB: bounded GPU capture; no CPU layer pixels; warm upload=0; fallback remains complete
+[desktop-window-images] direct FP16 extended range, alpha/grid/clips/order, producer dependency, two outputs, warm reuse, held cancellation and CPU fallback: OK
+[desktop-window-hdr] absolute scRGB/PQ, 80/1000-nit anchors, SDR/HDR output, capture, warm reuse and HDR removal: OK
+[desktop-window-transport] lost publish/Take/Return replies, FIFO admission, hide during draw, exact fence ack and service-death retirement: OK
+[desktop-cpu-window] producer fence, read lease, linear alpha, sparse damage, pending replacement, resize and lost Return: OK
+[desktop-work] eight clips: command visits 32768 -> 240, tree nodes 226
+[desktop-work] shape 2048x2048, one pixel dirty: mask pixels 4194304 -> 1, scratch budget 2 bytes
+failed command: ./.zig-cache/o/7bd1d7ba4cba011f8d6c1616adb30ae7/test --cache-dir=./.zig-cache --seed=0xe91d61f --listen=-
+
