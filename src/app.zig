@@ -627,6 +627,8 @@ pub const App = struct {
             const ready = !slot.disabled and !slot.paused and !slot.failed and !slot.reconfiguring and
                 !manager.reconcile and !self.display_settings.busy();
             slot.refresh.step(&self.ctx.draw, slot.target, now, scene, ready);
+            slot.brightness.select(manager.saved_brightness.find(entry.key));
+            slot.brightness.step(&self.ctx.draw, entry.info.identity, now, ready and !slot.sleeping);
         }
     }
 
@@ -7599,7 +7601,7 @@ pub const App = struct {
                 if (next.desktop_bg != requested) return false;
                 if (requested == self.config.desktop_bg) return false;
             },
-            .reload => if (self.outputs) |outputs| { outputs.reloadColors(); outputs.reloadRefresh(); },
+            .reload => if (self.outputs) |outputs| { outputs.reloadColors(); outputs.reloadRefresh(); outputs.reloadBrightness(); },
         }
         self.config = next;
         self.reloadWallpaper();

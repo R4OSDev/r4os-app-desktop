@@ -9,6 +9,7 @@ pub const topology = catalog.topology;
 pub const preferences = catalog.preferences;
 pub const color_preferences = catalog.color_preferences;
 pub const refresh_preferences = catalog.refresh_preferences;
+pub const brightness_preferences = catalog.brightness_preferences;
 const geometry = @import("output_geometry.zig");
 const surface = @import("surface.zig");
 const worker = @import("composition_worker.zig");
@@ -31,6 +32,7 @@ pub const Slot = struct {
     reported: u64 = 0,
     discarded_reported: u64 = 0,
     refresh: catalog.refresh_client.Client = .{},
+    brightness: catalog.brightness_client.Client = .{},
     activity: catalog.refresh_client.Activity = .{},
     pub fn occupied(self: *const Slot) bool { return self.target.connector_id != 0; }
     pub fn bounds(self: *const Slot) surface.Rect { return geometry.logical(self.view) catch unreachable; }
@@ -50,6 +52,7 @@ pub const Manager = struct {
     saved: preferences.Config = .{},
     saved_colors: color_preferences.Config = .{},
     saved_refresh: refresh_preferences.Config = .{},
+    saved_brightness: brightness_preferences.Config = .{},
     desired: ?topology.Layout = null,
     translation: topology.Point = .{},
     revision: u64 = 0,
@@ -67,6 +70,7 @@ pub const Manager = struct {
         self.loadPreferences();
         self.reloadColors();
         self.reloadRefresh();
+        self.reloadBrightness();
         return self;
     }
     pub fn reloadRefresh(self: *Manager) void {
@@ -83,6 +87,21 @@ pub const Manager = struct {
             };
         }
         self.saved_refresh = next;
+    }
+    pub fn reloadBrightness(self: *Manager) void {
+        if (r4std.config.recoverDocumentSave(&self.sys, brightness_preferences.path) < 0) {
+            self.sys.println("R4DESK brightness preferences: save recovery failed"); return;
+        }
+        var bytes: [brightness_preferences.max_bytes]u8 = undefined;
+        const count = self.sys.fileRead(brightness_preferences.path, &bytes);
+        var next: brightness_preferences.Config = .{};
+        if (count != -3) {
+            if (count <= 0 or count > bytes.len) { self.sys.println("R4DESK brightness preferences: read failed"); return; }
+            next = brightness_preferences.Config.parse(bytes[0..@intCast(count)]) catch {
+                self.sys.println("R4DESK brightness preferences: invalid document"); return;
+            };
+        }
+        self.saved_brightness = next;
     }
     pub fn contentFrame(self: *Manager, rect: surface.Rect) void {
         const now = self.sys.monotonicNanoseconds() orelse return;
