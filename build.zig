@@ -37,12 +37,15 @@ pub fn build(b: *std.Build) void {
     topology.addImport("r4os", host_r4os);
     const r4nv_binding = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4nv_zig_binding"), .target = test_target });
     r4nv_binding.addImport("r4os", host_r4os);
+    const r4amd_binding = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4amd_zig_binding"), .target = test_target });
+    r4amd_binding.addImport("r4os", host_r4os);
     const r4gfx_implementation = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Contract/Generated/implementation_abi.zig"), .target = test_target });
     r4gfx_implementation.addImport("r4os", host_r4os);
     const r4gfx_provider = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Source/device.zig"), .target = test_target });
     r4gfx_provider.addImport("r4os", host_r4os);
     r4gfx_provider.addImport("r4l_contract", r4gfx_implementation);
     r4gfx_provider.addImport("r4nv_binding", r4nv_binding);
+    r4gfx_provider.addImport("r4amd_binding", r4amd_binding);
     const color_provider = r4gfx_provider;
     libraries_build.addR4gfxHostColor(b, color_provider, libraries_dep.path("R4GFX"));
     const r4std_abi = b.createModule(.{
