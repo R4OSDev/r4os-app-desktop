@@ -1,4 +1,7 @@
 const std = @import("std");
+test "platform input drives screen and confirmed panel brightness" {
+    try @import("platform_input_test.zig").check();
+}
 const r4os = @import("r4os");
 
 /// Physical samples remain independent of the cursor moved by RDP. A poll

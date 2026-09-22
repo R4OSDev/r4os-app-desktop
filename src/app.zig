@@ -346,6 +346,7 @@ pub const App = struct {
     activity_wait_supported: bool = true,
     last_input_ns: u64 = 0,
     screen_power: @import("screen_power.zig").Owner = .{},
+    platform_input: @import("platform_input.zig").Owner = .{},
     screenshot_job: ?*@import("screenshot.zig").Job = null,
     screenshot_last: ?@import("screenshot.zig").Result = null,
     recorder: ?*@import("recording.zig").Manager = null,
@@ -561,6 +562,8 @@ pub const App = struct {
                 continue;
             }
             self.pollComposition();
+            const platform_now = self.ctx.sys.monotonicNanoseconds() orelse 0;
+            if (self.platform_input.poll(&self.ctx.sys, &self.ctx.draw, &self.screen_power, platform_now)) self.last_input_ns = platform_now;
             self.screen_power.tick(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.config.screen_off_seconds);
             var needs_redraw = self.syncDesktopFolder();
             if (self.syncOutputRevision()) needs_redraw = true;
@@ -631,6 +634,7 @@ pub const App = struct {
             slot.brightness.select(manager.saved_brightness.find(entry.key));
             slot.brightness.step(&self.ctx.draw, entry.info.identity, now, ready and !slot.sleeping);
         }
+        self.platform_input.step(&self.ctx.draw, now);
     }
 
     fn syncOutputRevision(self: *App) bool {
