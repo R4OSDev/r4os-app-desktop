@@ -51,6 +51,19 @@ pub fn check(allocator: std.mem.Allocator, images: *const img.Context, raster: *
     scaled_request.pixel_budget = 4;
     _ = try img.ColorDecoder(gfx).decodeRaster(allocator, images, raster, colors, &bitmap, &scaled_target, &scaled_request, .{});
     if (scaled[0] != pixels[0] or scaled[1] != pixels[0] or scaled[2] != pixels[1] or scaled[3] != pixels[1]) return error.ScaledPixels;
+    // Monitor range follows profile conversion. Compare the integer output
+    // quantizer with the actual COLOR_V1 transform and preserve capture RGB.
+    const canonical = pixels;
+    var limited: [2]u32 = @splat(0);
+    var limited_target = target;
+    limited_target.image.cpu_address = @intFromPtr(&limited);
+    limited_target.description.range = gfx.color_range_limited;
+    var range_stats: gfx.R4GfxCpuStats = undefined;
+    if (colors.color_image_transform(&target, &limited_target, &request, &range_stats) != gfx.status_ok) return error.LimitedPixels;
+    for (canonical, limited) |full, encoded| {
+        if ((@import("r4gfx_desktop_outputs").color.limitedRgb8(full) & 0xffffff) != (encoded & 0xffffff)) return error.LimitedPixels;
+    }
+    if (!std.meta.eql(canonical, pixels) or limited[1] & 0xffffff != 0xebebeb) return error.CapturePixels;
     const overlay = [_]u32{ 0x80ffffff, 0x00ffffff };
     var source = target;
     source.image.cpu_address = @intFromPtr(&overlay);

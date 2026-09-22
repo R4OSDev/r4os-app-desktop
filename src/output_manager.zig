@@ -339,7 +339,7 @@ pub const Manager = struct {
         const choice = self.saved_colors.find(entry.key);
         const profile_requested = if (choice) |value| value.enabled() else false;
         const profile_supported = if (entry.color) |color| color.flags & 7 == 7 and
-            color.format == a.gfx_buffer_format_xrgb8888 and color.bpc == 8 and color.primaries == 1 and color.transfer == 1 and color.range == 1 else false;
+            catalog.color.profileEncoding(color) else false;
         // The general ICC path runs on the CPU until the GPU advertises the
         // matching profile transform. Ordinary SDR keeps its native worker.
         const profile_enabled = profile_requested and profile_supported;
@@ -369,6 +369,7 @@ pub const Manager = struct {
                 }
                 self.fail(slot); return null;
             }
+            slot.software.?.limited = if (entry.color) |value| value.range == 2 else false;
             if (profile_enabled) slot.software.?.setProfile(&self.sys, choice.?) catch |err| {
                 self.sys.write("R4DESK color profile unavailable; using SDR: "); self.sys.println(@errorName(err));
             };

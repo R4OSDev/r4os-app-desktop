@@ -190,8 +190,10 @@ pub const Owner = struct {
     }
     fn selectColor(self: *Owner, ctx: *api.Context, manager: *outputs.Manager, entry: catalog.Entry, signal: a.GfxColorSignal) bool {
         _ = catalog.color.requestedSignal(signal) catch return false;
-        if (std.meta.eql(signal, catalog.color_preferences.sdr)) { self.mode_color = null; return true; }
-        if (!manager.colorReady(entry) or self.mode.count == 0) return false;
+        if (std.meta.eql(signal, catalog.color_preferences.sdr) and
+            (entry.color == null or catalog.color_control.canonical(entry.color.?))) { self.mode_color = null; return true; }
+        const cpu_color = catalog.color.profileEncoding(signal) and entry.presentation.flags & a.display_presentation_info_system_source != 0;
+        if ((!cpu_color and !manager.colorReady(entry)) or self.mode.count == 0) return false;
         catalog.color_control.validate(&ctx.draw, &entry, self.mode.modes[self.mode.selected], signal) catch return false;
         _ = gfx.ColorV1Client.init(manager.raw) catch return false;
         self.mode_color = signal; return true;
@@ -213,7 +215,7 @@ pub const Owner = struct {
         for (manager.snapshot.entries[0..manager.snapshot.count]) |entry| {
             const state = entry.color orelse continue;
             const saved = manager.saved_colors.find(entry.key);
-            const recovery = manager.softwareOnly(entry.target) and !catalog.color_control.canonical(state);
+            const recovery = manager.softwareOnly(entry.target) and !(state.flags & 7 == 7 and catalog.color.profileEncoding(state));
             const fallback: catalog.color_preferences.Choice = .{ .key = entry.key };
             if (recovery and self.color_recovery.seen(fallback, entry.info.identity)) continue;
             if (!recovery and (saved == null or catalog.color_control.matches(state, saved.?.signal) or

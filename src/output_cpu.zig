@@ -32,6 +32,7 @@ pub const Output = struct {
     scene: scene_buffer.SceneBuffer = .{},
     color_composition: composition.Owner = .{},
     profile: ?Profile = null,
+    limited: bool = false,
     count: u32 = 0,
     ready: bool = false,
     pending: bool = false,
@@ -132,7 +133,7 @@ pub const Output = struct {
         self.poll();
         if (self.lost) return null;
         if (self.capture.wanted and (self.sys.monotonicNanoseconds() orelse 0) >= self.capture.retry_ns) {
-            const prepared = if (self.profile != null) self.capture.prepareProfile(self.view)
+            const prepared = if (self.profile != null or self.limited) self.capture.prepareProfile(self.view)
                 else self.capture.prepare(self.view, gfx.format_xrgb8888, @import("r4gfx_readback").sdr());
             prepared catch {
                 self.capture.redraw = true;
@@ -153,7 +154,7 @@ pub const Output = struct {
         }
         const bounds = geometry.logical(self.view) catch { self.abandon(); return null; };
         var storage: []u8 = @as([*]u8, @ptrFromInt(self.mapping.cpu_address))[0..@intCast(bytes)];
-        if (self.profile != null or self.view.rotation != .normal or self.view.scale != 120) {
+        if (self.profile != null or self.limited or self.view.rotation != .normal or self.view.scale != 120) {
             const length = scene_buffer.SceneBuffer.requiredBytes(bounds.w, bounds.h) orelse { self.abandon(); return null; };
             if (length > 64 * 1024 * 1024) { self.abandon(); self.lost = true; return null; }
             if (self.scratch.len < length) {
@@ -175,7 +176,7 @@ pub const Output = struct {
         self.serial +|= 1;
         self.capture.record(frame.slot - 1, self.serial, self.capture_damage orelse (geometry.logical(self.view) catch unreachable), self.view, self.capture_cursor);
         self.capture.stageProfile(frame.slot - 1, self.scene.pixels.?, self.sys.monotonicNanoseconds() orelse 0);
-        if (self.profile != null or self.view.rotation != .normal or self.view.scale != 120) {
+        if (self.profile != null or self.limited or self.view.rotation != .normal or self.view.scale != 120) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
             transform(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]);
         }
@@ -184,6 +185,10 @@ pub const Output = struct {
             profile.applySdr(pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h], self.view.pixel_w, self.view.pixel_h) catch {
                 self.abandon(); return false;
             };
+        }
+        if (self.limited) {
+            const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
+            for (pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]) |*pixel| pixel.* = catalog.color.limitedRgb8(pixel.*);
         }
         if (self.draw.gfxBufferUnmap(&self.mapping.lease) != a.gfx_buffer_result_ok) {
             // Preserve the mapping and acquired image for retained teardown.
