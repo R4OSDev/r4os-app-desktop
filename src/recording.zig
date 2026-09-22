@@ -95,6 +95,7 @@ const Job = struct {
     demand: bool = false,
     encoder: ?enc.R4EncEncoder = null,
     native: bool = false,
+    backend: u32 = enc.backend_software,
     software_only: bool = false,
     buffer: a.GfxBufferReference = .{},
     mapped: a.GfxBufferMap = .{},
@@ -166,7 +167,8 @@ const Job = struct {
                 if (snapshot.id == 0 or snapshot.pixels_addr == 0 or snapshot.capacity_pixels < info.frame_pixels or
                     info.format != a.remote_frame_format_xrgb32 or info.stride_pixels < info.width or
                     info.frame_pixels < @as(u64, info.stride_pixels) * info.height) return error.InvalidSnapshot;
-                const layout = try pixels.Layout.init(info.width, info.height);
+                const layout = if (self.encoder != null and self.backend == enc.backend_amd)
+                    try pixels.Layout.initAmd(info.width, info.height) else try pixels.Layout.init(info.width, info.height);
                 rotate = self.encoder != null and (snapshot.epoch != self.epoch or !std.meta.eql(layout, self.layout));
                 if (!rotate and self.encoder != null and self.tag != 0 and info.revision == self.revision and snapshot.epoch == self.epoch) {
                     self.next_capture_ns = time +| interval_ns;
@@ -211,11 +213,11 @@ const Job = struct {
         }
         self.result.ok = self.result.parts != 0;
     }
-    fn config(self: *Job, native: bool) enc.R4EncConfig {
+    fn config(self: *Job, backend: u32) enc.R4EncConfig {
         var c = std.mem.zeroes(enc.R4EncConfig);
         c.version = 1; c.size = @sizeOf(enc.R4EncConfig);
-        c.query = .{ .version = 1, .size = @sizeOf(enc.R4EncCapsQuery), .backend = if (native) enc.backend_nvidia else enc.backend_software,
-            .adapter_id = if (native) self.adapter else 0, .codec = enc.codec_h264, .profile = enc.profile_h264_baseline, .bit_depth = 8, .chroma = enc.chroma_420 };
+        c.query = .{ .version = 1, .size = @sizeOf(enc.R4EncCapsQuery), .backend = backend,
+            .adapter_id = if (backend != enc.backend_software) self.adapter else 0, .codec = enc.codec_h264, .profile = enc.profile_h264_baseline, .bit_depth = 8, .chroma = enc.chroma_420 };
         c.memory_limit = memory_limit; c.width = self.layout.width; c.height = self.layout.height;
         c.fps_num = 30; c.fps_den = 1; c.gop_frames = 60;
         c.pending_frames = 1; c.packet_leases = 2; c.max_packet_bytes = packet_limit; c.work_timeout_ns = work_ns;
@@ -227,18 +229,24 @@ const Job = struct {
         return c;
     }
     fn openEncoder(self: *Job) !void {
-        self.native = !self.software_only and self.adapter != 0;
-        while (true) {
-            const c = self.config(self.native);
+        const native_requested = !self.software_only and self.adapter != 0;
+        for ([_]u32{ enc.backend_amd, enc.backend_nvidia, enc.backend_software }) |backend| {
+            if (!native_requested and backend != enc.backend_software) continue;
+            const c = self.config(backend);
             var handle: enc.R4EncEncoder = undefined;
             var caps: enc.R4EncCaps = undefined;
             if (self.owner.api.query_caps(&self.owner.runtime.?, &c.query, &caps) == enc.ok and
                 self.owner.api.create(&self.owner.runtime.?, &c, &handle) == enc.ok) {
-                self.encoder = handle; break;
+                self.encoder = handle;
+                self.backend = backend;
+                self.native = backend != enc.backend_software;
+                if (backend == enc.backend_amd) self.layout = try pixels.Layout.initAmd(self.layout.width, self.layout.height)
+                else self.layout = try pixels.Layout.init(self.layout.width, self.layout.height);
+                break;
             }
-            if (!self.native) return error.EncoderUnavailable;
-            self.native = false; self.software_only = true; self.result.fallback = true;
         }
+        if (self.encoder == null) return error.EncoderUnavailable;
+        if (!self.native and native_requested) { self.software_only = true; self.result.fallback = true; }
         self.request_id = 0; self.revision = 0; self.tag = 0;
         const layout = self.layout;
         if (self.buffers().create(&.{ .byte_length = layout.bytes, .alignment = 65536,
@@ -253,7 +261,10 @@ const Job = struct {
         if (self.owner.sys.exists(path) or self.owner.sys.exists(staged)) return error.Exists;
         self.file = .{ .path = staged };
         if (!r.file_stream.begin(&self.owner.sys, &self.file.?, staged, a.file_stream_open_create)) return error.Open;
-        self.owner.sys.println(if (self.native) "Recording: NVIDIA H.264" else "Recording: software H.264");
+        self.owner.sys.println(switch (self.backend) {
+            enc.backend_amd => "Recording: AMD H.264", enc.backend_nvidia => "Recording: NVIDIA H.264",
+            else => "Recording: software H.264",
+        });
     }
     fn convert(self: *Job, lease: a.RemoteFrameLease, info: a.RemoteFrameInfo) !void {
         if (self.buffers().map(&self.buffer.reference, a.gfx_buffer_map_write, 0, self.layout.bytes, &self.mapped) != a.gfx_buffer_result_ok) return error.Map;

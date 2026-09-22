@@ -40,7 +40,7 @@ H.264 Matroska parts are saved in `C:\RECORDINGS`. Plain Print Screen saves a
 bitmap in `C:\SCREENSHOTS`. Recordings contain video only.
 
 The recorder uses optional R4ENC ENCODE_V1 on its own worker. It prefers a
-supported NVIDIA encoder and explicitly falls back to software after confirmed
+supported AMD or NVIDIA encoder and explicitly falls back to software after confirmed
 retirement. Resolution/source changes and backend fallback start a new file
 part. Input is the existing immutable sRGB CPU capture; conversion yields
 limited-range NV12 with sRGB transfer metadata. Native YUV producers can use
@@ -49,6 +49,13 @@ are skipped when busy; unchanged picture durations are preserved. File I/O
 holds neither a capture snapshot nor a display buffer. No capture or encoder
 work starts until requested. R4ENC's process runtime survives repeated
 recordings and finishes only at Desktop shutdown.
+
+Since 0.1.74, AMD AVC input uses a 256-byte pitch and neutral initialized
+16-row coded padding. Visible capture dimensions remain unchanged. The
+native encoder borrows this unmapped system buffer until its own completion;
+the capture snapshot is already released. RDP continues to use its existing
+bitmap/RLE/NSCodec transport; recording does not advertise an AVC RDP codec.
+See `Docs/Drivers/AMDCapture08032.txt` for integration evidence and limits.
 
 The taskbar owns the notification-area layout. Its built-in volume item sits
 immediately left of the clock and controls AUDSVC's persistent global master
@@ -90,3 +97,7 @@ legacy damage/copy counters and separate managed-output completion/cost data.
 Measured software limits and examples: Docs/Desktop/GrafikIntegration07944.txt.
 These timings are not NVIDIA throughput or monitor-refresh guarantees.
 Build.bat/Build.sh share PS7 orchestration via the configured SDK checkout.
+
+Physical pointer polls now report only real motion, wheel or button changes.
+An unchanged local pointer cannot overwrite a remote click or renew the
+screen-idle timer. Physical and remote button histories remain independent.

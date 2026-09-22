@@ -319,6 +319,7 @@ pub const App = struct {
     event_key: u32 = 0,
     event_mouse: r4os.abi.Mouse = .{ .x = 0, .y = 0, .dx = 0, .dy = 0, .wheel = 0, .buttons = 0, .present = 0, .reserved = 0, .packets = 0 },
     event_remote_input: bool = false,
+    physical_mouse_activity: physical_input.MouseActivity = .{},
     remote_prev_buttons: u8 = 0,
     remote_input_events: u32 = 0,
     remote_input_keys: u32 = 0,
@@ -4653,10 +4654,17 @@ pub const App = struct {
         if (self.outputs) |manager| {
             var sample: r4os.abi.MouseMotion = .{ .mouse = undefined };
             if (manager.active() and self.ctx.desk.mouseMotion(&sample) == 0) {
+                if (!self.physical_mouse_activity.changed(sample.mouse, .{ sample.motion_x, sample.motion_y })) return false;
                 const point = manager.pointer(sample, .{ .x = self.cursor_x, .y = self.cursor_y });
                 self.event_mouse = sample.mouse; self.event_mouse.x = point.x; self.event_mouse.y = point.y;
-            } else self.ctx.mouseState(&self.event_mouse);
-        } else self.ctx.mouseState(&self.event_mouse);
+            } else {
+                self.ctx.mouseState(&self.event_mouse);
+                if (!self.physical_mouse_activity.changed(self.event_mouse, null)) return false;
+            }
+        } else {
+            self.ctx.mouseState(&self.event_mouse);
+            if (!self.physical_mouse_activity.changed(self.event_mouse, null)) return false;
+        }
         return self.prepareMouseEvent(.mouse);
     }
 
@@ -9358,11 +9366,16 @@ pub const App = struct {
     fn readInitialCursor(self: *App) void {
         var mouse: r4os.abi.Mouse = undefined;
         self.ctx.mouseState(&mouse);
+        self.physical_mouse_activity.last = mouse;
         self.cursor_x = clamp(mouse.x, 0, @max(0, self.screen_w - 1));
         self.cursor_y = clamp(mouse.y, 0, @max(0, self.screen_h - 1));
         if (self.outputs) |manager| {
             var sample: r4os.abi.MouseMotion = .{ .mouse = undefined };
-            if (self.ctx.desk.mouseMotion(&sample) == 0) manager.motion = .{ sample.motion_x, sample.motion_y };
+            if (self.ctx.desk.mouseMotion(&sample) == 0) {
+                manager.motion = .{ sample.motion_x, sample.motion_y };
+                self.physical_mouse_activity.last = sample.mouse;
+                self.physical_mouse_activity.motion = .{ sample.motion_x, sample.motion_y };
+            }
         }
     }
 

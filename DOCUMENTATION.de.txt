@@ -23,10 +23,18 @@ recording.zig besitzt einen eigenen Worker, maximal ein angenommenes NV12-
 Eingabebild und zwei begrenzte Bitstreamleihen. Er liest die bestehende
 unveraenderliche CPU-Aufnahme und gibt sie vor Encoder-/Dateiwarten frei.
 Langsame Ausgabe verwirft Zwischenrevisionen; unveraenderte Bilddauern bleiben
-erhalten. Nach NVIDIA-Ausfall folgen bestaetigtes Close/Join und expliziter
+erhalten. Nach AMD-/NVIDIA-Ausfall folgen bestaetigtes Close/Join und expliziter
 Softwareersatz. Ohne Start entstehen weder Capturebedarf noch Encodearbeit.
 Die optionale R4ENC-Bindung sperrt bei Fehlen nur die Aufnahme. Details:
 Docs/Drivers/Videoencoding07941.txt.
+
+Ab 0.1.74 wird ein zum Adapter passender AMD- oder NVIDIA-Encoder gewaehlt.
+AMD-AVC erhaelt NV12 mit 256-Byte-Pitch und neutral initialisierten 16-Zeilen-
+Blockgrenzen. Die sichtbare Bildgroesse bleibt erhalten. Der Encoder haelt
+den zuvor CPU-unmappten Systempuffer bis zur bestaetigten Freigabe; die
+Capture-Snapshot-Lease ist zu diesem Zeitpunkt bereits freigegeben.
+RDPSVC verwendet weiterhin Bitmap/RLE/NSCodec und bietet keinen H.264-
+Transport an. Nachweise und Grenzen: Docs/Drivers/AMDCapture08032.txt.
 
 - Desktopflaeche, Taskbar, Startmenue und Systemdialoge
 - gehostete GUI-Fenster
@@ -250,3 +258,10 @@ Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
 nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
 nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
 meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
+
+Die lokale Mausabfrage verarbeitet nur echte Bewegung, Rad- oder
+Tastenzustandsaenderung. Ein unveraenderter lokaler Mauszustand darf weder
+Remote-Klicks ueberschreiben noch den Bildschirmruhe-Timer erneuern.
+Kumulative Bewegung, latched Press/Release, Paketzaehlerwechsel und
+unveraenderte Hardwaremeldungen sind in der vorhandenen Eingabegruppe
+geprueft. Lokale und entfernte Tastenzustaende bleiben getrennt.
