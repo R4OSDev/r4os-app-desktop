@@ -461,6 +461,13 @@ pub const Manager = struct {
         };
         return false;
     }
+    pub fn captureWaitTicks(self: *const Manager, now_ns: u64, hz: u32, limit: u64) u64 {
+        var delay = limit;
+        for (&self.slots) |*slot| if (slot.dirty()) {
+            if (slot.gpu) |owner| delay = owner.engine.captureWaitTicks(now_ns, hz, delay);
+        };
+        return delay;
+    }
     pub fn pointer(self: *Manager, sample: a.MouseMotion, old: topology.Point) topology.Point {
         const totals = [2]u32{ sample.motion_x, sample.motion_y };
         defer self.motion = totals;

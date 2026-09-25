@@ -1095,6 +1095,28 @@ fn checkReadback(graphics: anytype, device: *const c.R4GfxDevice, engine: *gpu.E
 }
 
 fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    // A dirty, otherwise idle output must wake at the producer deadline;
+    // an unused third ABI slot cannot stand in for a free configured image.
+    {
+        var paced = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        paced.chain = std.mem.zeroes(@TypeOf(paced.chain));
+        paced.chain.slot = 1; paced.chain.generation = 1;
+        var status = std.mem.zeroes(@TypeOf(paced.chain_status.?));
+        status.count = 2; status.next_start_ns = 5 * std.time.ns_per_ms + 1;
+        paced.chain_status = status;
+        try t.expect(paced.captureBlocked(4 * std.time.ns_per_ms));
+        try t.expectEqual(@as(u64, 2), paced.captureWaitTicks(4 * std.time.ns_per_ms, 1000, 500));
+        try t.expectEqual(@as(u64, 1), paced.captureWaitTicks(6 * std.time.ns_per_ms, 1000, 500));
+        try t.expect(!paced.captureBlocked(6 * std.time.ns_per_ms));
+        status.frame0.phase = 3; status.frame1.phase = 3; paced.chain_status = status;
+        try t.expect(paced.captureBlocked(6 * std.time.ns_per_ms));
+        try t.expectEqual(@as(u64, 500), paced.captureWaitTicks(6 * std.time.ns_per_ms, 1000, 500));
+        status.count = 3; paced.chain_status = status;
+        try t.expect(!paced.captureBlocked(6 * std.time.ns_per_ms));
+        try t.expectEqual(@as(u64, 1), paced.captureWaitTicks(6 * std.time.ns_per_ms, 1000, 500));
+        status.life = 1; paced.chain_status = status;
+        try t.expectEqual(@as(u64, 500), paced.captureWaitTicks(6 * std.time.ns_per_ms, 1000, 500));
+    }
     try checkTargetDamage(graphics, device);
     Model.chain_enabled = true; defer Model.chain_enabled = false;
     Model.allow_visible = false; Model.clock = 1; Model.chain = .{};

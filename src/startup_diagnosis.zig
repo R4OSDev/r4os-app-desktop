@@ -26,7 +26,7 @@ pub fn flush() void {
     const now = sys.monotonicNanoseconds() orelse return;
     if (now < start_ns or now - start_ns < 30 * std.time.ns_per_s) return;
     flushed = true;
-    const suffix = std.fmt.bufPrint(bytes[used..], "END R4DESK84 startup records={d} dropped={d}\n", .{count, dropped}) catch return;
+    const suffix = std.fmt.bufPrint(bytes[used..], "END R4DESK85 startup records={d} dropped={d}\n", .{count, dropped}) catch return;
     used += suffix.len;
-    _ = sys.fileWrite("C:\\TEMP\\AMD221\\DSK84SEL.LOG", bytes[0..used]);
+    _ = sys.fileWrite("C:\\TEMP\\AMD221\\DSK85SEL.LOG", bytes[0..used]);
 }

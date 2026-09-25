@@ -705,6 +705,9 @@ pub const App = struct {
         const blink_delay = self.blink_half_ticks - (now % self.blink_half_ticks);
         var delay = window_service_gate.deadlineDelay(now, blink_delay, &.{ tray_deadline, self.next_clock_check_tick });
         delay = @max(1, self.window_geometry_updates.delay(now, delay));
+        if (self.outputs) |manager| if (self.ctx.sys.monotonicNanoseconds()) |now_ns| {
+            delay = manager.captureWaitTicks(now_ns, self.monotonic_hz, delay);
+        };
         if (self.cursor_controller.retryPending()) delay = @min(delay, self.loop_sleep_ticks);
         if (self.activity_wait_supported) {
             const rc = self.ctx.desktopActivityWait(self.activity_seq, delay, &self.activity_seq);

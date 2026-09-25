@@ -178,8 +178,22 @@ pub const Engine = struct {
         const status = self.chain_status orelse return false;
         if (status.life >= 2) return false; // Let the owner rebuild/fall back.
         if (status.life == 1 or now < status.next_start_ns) return true;
-        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }) |value| if (value.phase == 0) return false;
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, index|
+            if (index < status.count and value.phase == 0) return false;
         return true;
+    }
+    /// Dirty output may be waiting only for its next producer start. Include
+    /// that deadline in the normal event wait after all GPU work has drained.
+    pub fn captureWaitTicks(self: *const Engine, now_ns: u64, hz: u32, limit: u64) u64 {
+        if (self.active() or self.fault != null or self.chain.slot == 0 or self.acquired != null) return limit;
+        const status = self.chain_status orelse return limit;
+        if (status.life != 0) return limit;
+        for ([_]gfx.R4GfxSwapchainFrameStatus{ status.frame0, status.frame1, status.frame2 }, 0..) |value, index| {
+            if (index >= status.count or value.phase != 0) continue;
+            const ticks = r4os.time_contract.durationToTicks(.{ .nanoseconds = status.next_start_ns -| now_ns }, hz) catch return limit;
+            return @min(limit, @max(1, ticks));
+        }
+        return limit;
     }
     pub fn acquire(self: *Engine, input_ns: u64) Error!void {
         if (self.chain.slot == 0 or self.acquired != null) return;
