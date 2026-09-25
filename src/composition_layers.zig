@@ -45,6 +45,11 @@ pub const Cache = struct {
     changed_bytes: u64 = 0,
     unchanged_layers: u64 = 0,
     recording: ?*primitives.Frame = null,
+    // Borrowed only while collecting, from Engine's last retired snapshot.
+    // Retained texture pages are pinned before any painter can evict them.
+    replay_commands: []const primitives.Command = &.{},
+    replay_layers: [capacity]bool = @splat(false),
+    reused_captures: u64 = 0,
     view: ?geometry.topology.Viewport = null,
     logical_screen: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 
@@ -97,6 +102,7 @@ pub const Cache = struct {
         if (self.recording) |recording| try recording.start(self.frame);
         self.screen = bounds; self.logical_screen = logical_bounds;
         self.command_count = 0; self.failure = null; self.collecting = true;
+        self.replay_commands = &.{}; self.replay_layers = @splat(false);
     }
     pub fn finish(self: *Cache) ![]const Command {
         if (!self.collecting or self.active != null) return error.State;
@@ -184,6 +190,23 @@ pub const Cache = struct {
         const entry = &self.entries[index];
         if (entry.external != null) return error.State;
         const mirror = if (self.recording) |recording| recording.mirror else true;
+        if (!mirror and self.replay_layers[index] and entry.initialized and
+            entry.frame == self.frame - 1 and std.meta.eql(entry.bounds, raster) and
+            std.meta.eql(entry.capture_bounds, clipped) and std.meta.eql(logical_scissor, clipped)) {
+            const recording = self.recording.?;
+            var count: usize = 0;
+            for (self.replay_commands) |command| { if (command.layer == index) count += 1; }
+            if (count != 0) {
+                if (count > recording.commands.len - recording.count) return error.Capacity;
+                for (self.replay_commands) |command| if (command.layer == index) {
+                    recording.commands[recording.count] = command; recording.count += 1;
+                };
+                entry.frame = self.frame;
+                self.commands[self.command_count] = .{ .entry = @intCast(index), .scissor = scissor };
+                self.command_count += 1; self.reused_captures +|= 1;
+                return null;
+            }
+        }
         if (!std.meta.eql(entry.bounds,raster) or !std.meta.eql(entry.capture_bounds,clipped)) {
             if (entry.frame == self.frame) return error.State;
             const bytes = scene.SceneBuffer.requiredBytes(clipped.w,clipped.h) orelse return error.Bounds;

@@ -7,6 +7,7 @@ const gfx = @import("r4gfx");
 const layers = @import("composition_layers.zig");
 const surface = @import("surface.zig");
 const primitive_assets = @import("primitive_assets.zig");
+const primitives = @import("primitive_frame.zig");
 const color = @import("composition_software.zig");
 const window_image = @import("window_image.zig");
 const geometry = @import("output_geometry.zig");
@@ -56,10 +57,21 @@ pub const Engine = struct {
     external_last: [layers.capacity]?usize = @splat(null),
     external_receipts: usize = 0,
     last: ?usize = null,
+    // Common receipts retain their dependency ancestors. Limit each chain
+    // independently of reusable userland job slots and wait for its tail's
+    // physical retirement before admitting another chain.
+    dependency_depth: usize = 0,
     stage_job: ?usize = null,
     phase: enum { idle, upload, asset_upload, primitives, linear_clear, draw, encode, present, drain } = .idle,
     clear_working: bool = true,
+    replace_background: bool = false,
     encode_area: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    // Each rotating target contains its own earlier scene. Damage accumulates
+    // until that exact target has completed composition. Layer captures stay
+    // complete so primitive reuse never mistakes a clipped stream for a layer.
+    capture_damage: ?surface.Rect = null,
+    capture_view: ?geometry.topology.Viewport = null,
+    target_damage: [gfx.swapchain_image_capacity]?surface.Rect = @splat(null),
     frame: u64 = 0,
     next_image: usize = 0,
     next_command: usize = 0,
@@ -76,6 +88,15 @@ pub const Engine = struct {
     primitive_draws: u64 = 0,
     batch_enabled: bool = false,
     grid_enabled: bool = false,
+    // A bounded CPU snapshot belongs to this output, not to the shared asset
+    // cache. Allocate it only on the preparation thread; Engine itself must
+    // remain small enough to create on a normal worker stack.
+    snapshot_allocator: ?std.mem.Allocator = null,
+    snapshot: []primitives.Command = &.{},
+    snapshot_count: usize = 0,
+    snapshot_images: [layers.capacity]gfx.R4GfxResource = @splat(empty),
+    snapshot_assets: [primitive_assets.texture_capacity]u64 = @splat(0),
+    reuse_layers: [layers.capacity]bool = @splat(false),
     reserved_bytes: u64 = 0,
     budget_bytes: u64 = 256 * 1024 * 1024,
 
@@ -116,7 +137,23 @@ pub const Engine = struct {
                 if (window_color.absolute(frame.description())) return true;
         return false;
     }
-    pub fn invalidate(self: *Engine) void { for (&self.outputs) |*value| value.generation = 0; }
+    pub fn invalidate(self: *Engine) void {
+        for (&self.outputs) |*value| value.generation = 0;
+        self.target_damage = @splat(null);
+        self.snapshot_count = 0;
+    }
+    pub fn compositionDamage(self: *Engine, view: geometry.topology.Viewport, damage: ?surface.Rect) void {
+        std.debug.assert(!self.active());
+        if (self.capture_view == null or !std.meta.eql(self.capture_view.?, view)) self.invalidate();
+        self.capture_view = view;
+        self.capture_damage = null;
+        // Fractional/rotated output sampling still uses full reconstruction.
+        // Normal 1:1 outputs have an exact logical-to-native translation.
+        if (view.scale != 120 or view.rotation != .normal) return;
+        const bounds = geometry.logical(view) catch return;
+        const clipped = geometry.intersect(bounds, damage orelse return) orelse return;
+        self.capture_damage = .{ .x = clipped.x - bounds.x, .y = clipped.y - bounds.y, .w = clipped.w, .h = clipped.h };
+    }
     pub fn pending(self: *const Engine) bool {
         for (self.chain_frames) |key| if (key != 0) return true;
         return false;
@@ -152,6 +189,8 @@ pub const Engine = struct {
         self.acquired = frame; self.output_index = frame.slot - 1;
     }
     pub fn pollPresentation(self: *Engine) Error!void {
+        const profile_stamp = @import("presentation_profile.zig").stamp();
+        defer @import("presentation_profile.zig").end(.engine_poll, profile_stamp);
         if (self.chain.slot == 0) return;
         if (self.chain_closing) {
             self.closeChain() catch |err| { if (err != error.Busy) return err; };
@@ -183,9 +222,8 @@ pub const Engine = struct {
     }
     pub fn needsFull(self: *const Engine, width: i32, height: i32) bool {
         const target = &self.outputs[self.output_index];
-        // Rotating targets may contain different earlier frames. Recompose
-        // the complete output from cached layers; unchanged layer pixels and
-        // primitive assets still need no upload or CPU reconstruction.
+        // Rotating targets still need a complete source-layer capture. Final
+        // composition may be clipped using each target's accumulated damage.
         return self.chain.slot != 0 or target.resource.slot == 0 or target.generation == 0 or
             target.info.image.width != width or target.info.image.height != height;
     }
@@ -211,7 +249,7 @@ pub const Engine = struct {
             if (!self.imageFits(&self.images[command.entry], entry.bounds.w, entry.bounds.h, gfx.format_argb8888) or self.images[command.entry].color_view.slot == 0) return false;
         }
         if (cache.recording) |recording| {
-            if (self.fill.slot == 0) return false;
+            if (self.fill.slot == 0 or self.snapshot.len < recording.commands.len) return false;
             for (&recording.assets.textures, 0..) |*texture, index| {
                 if (texture.pinned != cache.frame) continue;
                 if (!self.imageFits(&self.assets[index], @intCast(texture.width), @intCast(texture.height), gfx.format_argb8888)) return false;
@@ -306,6 +344,12 @@ pub const Engine = struct {
             try self.colorView(&self.images[index]);
         }
         if (cache.recording) |recording| {
+            if (recording.commands.len > primitives.capacity) return error.Limit;
+            if (self.snapshot.len < recording.commands.len) {
+                const replacement = cache.allocator.alloc(primitives.Command, recording.commands.len) catch return error.Limit;
+                if (self.snapshot_allocator) |allocator| allocator.free(self.snapshot);
+                self.snapshot = replacement; self.snapshot_allocator = cache.allocator; self.snapshot_count = 0;
+            }
             try self.stateResource(&self.fill, gfx.resource_pipeline, gfx.render_operation_fill);
             for (&recording.assets.textures, 0..) |*texture, index| {
                 if (texture.pinned != cache.frame) continue;
@@ -394,11 +438,85 @@ pub const Engine = struct {
         self.reserved_bytes -= image_value.charge;
         image_value.* = .{};
     }
+    fn planReuse(self: *Engine, cache: *const layers.Cache) void {
+        self.reuse_layers = @splat(false);
+        const recording = cache.recording orelse return;
+        if (recording.mirror or self.snapshot_count == 0) return;
+        for (&cache.entries, 0..) |*entry, index| {
+            const image_value = &self.images[index];
+            if (entry.frame != cache.frame or entry.external != null or image_value.generation == 0 or
+                image_value.resource.slot == 0 or !std.meta.eql(image_value.resource, self.snapshot_images[index])) continue;
+            // Compare fields, never padding bytes or hashes. Commands remain
+            // ordered within each layer; the final layer composition is still
+            // executed in full, including changed positions and scissors.
+            var previous: usize = 0;
+            var matched: usize = 0;
+            const identical = for (recording.commands[0..recording.count]) |command| {
+                if (command.layer != index) continue;
+                while (previous < self.snapshot_count and self.snapshot[previous].layer != index) previous += 1;
+                if (previous == self.snapshot_count or !std.meta.eql(command, self.snapshot[previous])) break false;
+                if (command.texture) |texture| {
+                    const generation = recording.assets.textures[texture].generation;
+                    if (generation == 0 or generation != self.snapshot_assets[texture] or generation != self.assets[texture].generation) break false;
+                }
+                previous += 1; matched += 1;
+            } else true;
+            if (!identical or matched == 0) continue;
+            while (previous < self.snapshot_count and self.snapshot[previous].layer != index) previous += 1;
+            self.reuse_layers[index] = previous == self.snapshot_count;
+        }
+    }
+    /// Reuse CPU commands only outside the caller's accumulated scene damage.
+    /// The usual full layer walk still determines presence, geometry and order.
+    pub fn reuseCapture(self: *const Engine, cache: *layers.Cache, damage: ?surface.Rect) void {
+        const changed = damage orelse return;
+        const recording = cache.recording orelse return;
+        const view = cache.view orelse return;
+        if (!cache.collecting or cache.command_count != 0 or recording.mirror or self.active() or
+            self.fault != null or self.snapshot_count == 0 or self.frame != cache.frame - 1 or
+            self.capture_view == null or !std.meta.eql(self.capture_view.?, view)) return;
+        for (&cache.entries, 0..) |*entry, index| {
+            const image_value = &self.images[index];
+            cache.replay_layers[index] = entry.initialized and entry.external == null and
+                entry.frame == self.frame and geometry.intersect(entry.capture_bounds, changed) == null and
+                image_value.generation == entry.generation and image_value.resource.slot != 0 and
+                std.meta.eql(image_value.resource, self.snapshot_images[index]);
+        }
+        const commands = self.snapshot[0..self.snapshot_count];
+        for (commands) |command| if (command.texture) |texture| {
+            const generation = recording.assets.textures[texture].generation;
+            if (generation == 0 or generation != self.snapshot_assets[texture]) cache.replay_layers[command.layer] = false;
+        };
+        // Do this before any new intern(): a painter earlier in layer order
+        // must not evict a texture needed by a later retained layer. Appending
+        // new atlas content is safe; normal GPU generation checks still apply.
+        for (commands) |command| if (cache.replay_layers[command.layer]) {
+            if (command.texture) |texture| {
+                recording.assets.textures[texture].pinned = recording.assets.frame;
+                recording.assets.textures[texture].touched = recording.assets.frame;
+            }
+        };
+        cache.replay_commands = commands;
+    }
+    fn rememberPrimitives(self: *Engine, cache: *const layers.Cache) void {
+        self.snapshot_count = 0;
+        const recording = cache.recording orelse return;
+        if (recording.mirror) return;
+        // Called only after every write/read has physically retired without
+        // a fault. A cancelled partial redraw must never certify old pixels.
+        std.debug.assert(recording.count <= self.snapshot.len);
+        @memcpy(self.snapshot[0..recording.count], recording.commands[0..recording.count]);
+        self.snapshot_count = recording.count;
+        for (&cache.entries, 0..) |*entry, index| self.snapshot_images[index] =
+            if (entry.frame == cache.frame and entry.external == null) self.images[index].resource else empty;
+        for (&self.assets, 0..) |*asset, index| self.snapshot_assets[index] = asset.generation;
+    }
     pub fn begin(self: *Engine, cache: *const layers.Cache, deadline: u64) Error!void {
         if (self.active() or !self.drained()) return error.Busy;
         if (self.chain.slot == 0 and self.readback_pin.slot != 0) return error.Busy;
         if (cache.collecting or cache.failure != null or cache.command_count == 0 or self.output().resource.slot == 0 or self.staging.resource.slot == 0)
             return error.State;
+        if (cache.recording) |recording| if (recording.count > self.snapshot.len) return error.State;
         // The first command of a complete desktop capture is its opaque
         // background (or fullscreen terminal). A new target must start there.
         if (self.needsFull(cache.screen.w, cache.screen.h) and !std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
@@ -407,17 +525,44 @@ pub const Engine = struct {
         self.clear_working = self.needsFull(cache.screen.w, cache.screen.h);
         self.encode_area = cache.commands[0].scissor;
         for (cache.commands[1..cache.command_count]) |command| self.encode_area = self.encode_area.merged(command.scissor);
+        if (self.capture_damage) |damage| {
+            // Only complete captures can reconstruct older targets. The
+            // caller's damage refers to changes since the last admitted frame.
+            if (!std.meta.eql(cache.commands[0].scissor, cache.screen)) return error.Incomplete;
+            for (&self.target_damage) |*area| area.* = if (area.*) |old| old.merged(damage) else damage;
+            if (self.output().generation != 0) self.encode_area = self.target_damage[self.output_index].?;
+            self.clear_working = true;
+        } else {
+            // An untracked capture may change any pixel; other target ages
+            // cannot carry forward a narrower damage certificate.
+            for (&self.target_damage) |*area| area.* = cache.screen;
+        }
+        // Over a cleared transparent target, the first layer is exactly its
+        // converted source, including alpha. Replace it in one draw only if
+        // it covers the entire reconstruction area. External/HDR conversion
+        // and partial coverage keep the explicit clear and ordinary blend.
+        const first = cache.commands[0];
+        self.replace_background = self.clear_working and !self.hdr_frame and
+            cache.entries[first.entry].external == null and
+            (if (geometry.intersect(first.scissor, self.encode_area)) |covered|
+                std.meta.eql(covered, self.encode_area) else false);
         if (self.acquired) |value| { self.chain_frames[value.slot - 1] = cache.frame; self.reported[value.slot - 1] = false; }
         self.frame = cache.frame; self.deadline = deadline; self.phase = if (cache.recording != null) .asset_upload else .upload;
         self.next_image = 0; self.next_command = 0; self.fault = null; self.present_fence = null;
-        self.last = null; self.stage_job = null;
+        self.last = null; self.stage_job = null; self.dependency_depth = 0;
         self.external_last = @splat(null);
         self.next_asset = 0; self.asset_x = 0; self.asset_y = 0; self.next_primitive = 0;
+        self.planReuse(cache);
     }
     pub fn cancel(self: *Engine, reason: Error) void {
-        if (self.fault == null) self.fault = reason;
+        if (self.fault == null) {
+            @import("startup_diagnosis.zig").record("engine-cancel reason={s} phase={s} frame={d} command={d} primitive={d} asset={d} jobs={d} draws={d} uploads={d} resources={d}",
+                .{@errorName(reason), @tagName(self.phase), self.frame, self.next_command, self.next_primitive, self.next_asset,
+                    self.render_jobs, self.primitive_draws, self.uploaded_bytes, self.reserved_bytes});
+            self.fault = reason;
+        }
         self.phase = .drain;
-        self.output().generation = 0;
+        self.invalidate();
         if (self.acquired) |value| {
             if (self.client.swapchain_release(self.device, &self.chain, &value) == gfx.status_ok) {
                 self.chain_frames[value.slot - 1] = 0; self.acquired = null;
@@ -430,6 +575,8 @@ pub const Engine = struct {
         }
     }
     pub fn advance(self: *Engine, cache: *layers.Cache, now: u64) Progress {
+        const profile_stamp = @import("presentation_profile.zig").stamp();
+        defer @import("presentation_profile.zig").end(.engine_advance, profile_stamp);
         self.pollPresentation() catch |err| { if (self.active()) self.cancel(err); };
         if (!self.active()) return if (self.fault == null) .copied else .failed;
         if (cache.frame != self.frame or cache.collecting) self.cancel(error.State);
@@ -446,15 +593,18 @@ pub const Engine = struct {
             self.phase = .idle;
             if (self.fault == null) {
                 self.output().generation = self.frame;
+                self.target_damage[self.output_index] = null;
                 if (cache.recording != null) for (&cache.entries, 0..) |*entry, index| {
                     if (entry.frame == cache.frame) self.images[index].generation = entry.generation;
                 };
+                self.rememberPrimitives(cache);
             }
             return if (self.fault == null) .copied else .failed;
         }
         // Admission is bounded independently of scene size. Returning Busy
         // leaves this exact operation for a subsequent desktop event cycle.
         for (0..4) |_| {
+            if (self.dependency_depth >= self.jobs.len) break;
             self.step(cache) catch |err| {
                 if (err != error.Busy) self.cancel(err);
                 return .pending;
@@ -464,11 +614,16 @@ pub const Engine = struct {
         return .pending;
     }
     fn collect(self: *Engine, cache: *layers.Cache) Error!void {
+        const profile_stamp = @import("presentation_profile.zig").stamp();
+        defer @import("presentation_profile.zig").end(.engine_collect, profile_stamp);
         for (&self.jobs, 0..) |*slot, index| if (slot.*) |*job| {
             var info: gfx.R4GfxJobInfo = undefined;
             try accepted(self.client.job_info(self.device, &job.handle, &info));
             if (info.phase != r4os.abi.gfx_queue_phase_terminal or info.flags != 0) continue;
-            if (info.result != r4os.abi.gfx_queue_result_complete and self.fault == null) self.cancel(error.Graphics);
+            if (info.result != r4os.abi.gfx_queue_result_complete and self.fault == null) {
+                @import("startup_diagnosis.zig").record("job-failed index={d} phase={d} result={d} flags={x}", .{index, info.phase, info.result, info.flags});
+                self.cancel(error.Graphics);
+            }
             if (!job.complete) {
                 if (job.upload) |image_index| if (info.result == r4os.abi.gfx_queue_result_complete) {
                     self.images[image_index].generation = job.generation;
@@ -485,9 +640,11 @@ pub const Engine = struct {
                 job.result = info.result;
             }
             if (self.stage_job == index) self.stage_job = null;
-            // Keep the most recent receipt until the next job has copied its
-            // explicit dependency; a failed predecessor must veto Present.
-            if (self.last == index and self.phase != .drain) continue;
+            // Result and physical retirement were checked above. A later
+            // submit is now ordered by this observation and need not pin the
+            // completed dependency graph. External window receipts keep
+            // their own exact handle until the consumer returns it.
+            if (self.last == index) { self.last = null; self.dependency_depth = 0; }
             var retained = false;
             for (self.external_last) |last| if (last == index) { retained = true; break; };
             if (retained) continue;
@@ -531,9 +688,17 @@ pub const Engine = struct {
         self.jobs[index] = .{ .handle = handle, .fence = undefined, .upload = upload, .generation = generation, .bytes = bytes };
         try accepted(self.client.job_fence(self.device, &handle, &self.jobs[index].?.fence));
         self.last = index;
+        self.dependency_depth += 1;
         if (bytes != 0) self.stage_job = index;
     }
     fn step(self: *Engine, cache: *layers.Cache) Error!void {
+        const profile_stamp = @import("presentation_profile.zig").stamp();
+        const profile_stage: @import("presentation_profile.zig").Stage = switch (self.phase) {
+            .idle => .step_idle, .upload => .step_upload, .asset_upload => .step_asset_upload,
+            .primitives => .step_primitives, .linear_clear => .step_linear_clear, .draw => .step_draw,
+            .encode => .step_encode, .present => .step_present, .drain => .step_drain,
+        };
+        defer @import("presentation_profile.zig").end(profile_stage, profile_stamp);
         const dependencies = self.dependency();
         const pointer: u64 = if (dependencies.len == 0) 0 else @intFromPtr(dependencies.ptr);
         switch (self.phase) {
@@ -570,6 +735,7 @@ pub const Engine = struct {
             },
             .primitives => {
                 const recording = cache.recording orelse return error.State;
+                while (self.next_primitive < recording.count and self.reuse_layers[recording.commands[self.next_primitive].layer]) self.next_primitive += 1;
                 if (self.next_primitive == recording.count) { self.phase = .linear_clear; return; }
                 const first = recording.commands[self.next_primitive];
                 var requests: [gfx.render_list_capacity]gfx.R4GfxRenderRequest = undefined;
@@ -630,12 +796,12 @@ pub const Engine = struct {
                 self.phase = .linear_clear;
             },
             .linear_clear => {
-                if (self.clear_working) {
+                if (self.clear_working and !self.replace_background) {
                     const slot = try self.reserve();
                     var handle: gfx.R4GfxJob = undefined;
                     try accepted(self.client.render_submit(self.device, &.{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
                         .source = empty, .target = self.working().resource, .pipeline = self.fill, .sampler = empty,
-                        .source_rect = std.mem.zeroes(gfx.R4GfxSignedRect), .target_rect = rect(cache.screen), .scissor = rect(cache.screen),
+                        .source_rect = std.mem.zeroes(gfx.R4GfxSignedRect), .target_rect = rect(self.encode_area), .scissor = rect(self.encode_area),
                         .color = 0, .opacity = 255, .transfer = 0, .dependency_count = @intCast(dependencies.len), .deadline_ns = self.deadline, .dependencies = pointer }, &handle));
                     try self.track(slot, handle, null, 0, 0);
                     self.render_jobs +|= 1;
@@ -643,10 +809,12 @@ pub const Engine = struct {
                 self.phase = .draw;
             },
             .draw => {
+                while (self.next_command < cache.command_count and
+                    geometry.intersect(cache.commands[self.next_command].scissor, self.encode_area) == null) self.next_command += 1;
                 if (self.next_command == cache.command_count) { self.phase = .encode; return; }
                 const slot = try self.reserve();
                 const command = cache.commands[self.next_command]; const entry = &cache.entries[command.entry];
-                const bounds = entry.bounds; const clip = command.scissor;
+                const bounds = entry.bounds; const clip = geometry.intersect(command.scissor, self.encode_area) orelse return error.State;
                 if (entry.external) |frame| {
                     try self.drawExternal(cache, command.entry, frame, clip, slot);
                     self.next_command += 1; self.render_jobs +|= 1;
@@ -654,7 +822,8 @@ pub const Engine = struct {
                 }
                 var handle: gfx.R4GfxJob = undefined;
                 const request: gfx.R4GfxRenderRequest = .{ .version = 1, .size = @sizeOf(gfx.R4GfxRenderRequest),
-                    .source = self.images[command.entry].color_view, .target = self.working().resource, .pipeline = self.over, .sampler = self.sampler,
+                    .source = self.images[command.entry].color_view, .target = self.working().resource,
+                    .pipeline = if (self.replace_background and self.next_command == 0) self.blit else self.over, .sampler = self.sampler,
                     .source_rect = .{ .x = clip.x - bounds.x, .y = clip.y - bounds.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .target_rect = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
                     .scissor = .{ .x = clip.x, .y = clip.y, .width = @intCast(clip.w), .height = @intCast(clip.h) },
@@ -765,6 +934,8 @@ pub const Engine = struct {
         for ([_]*gfx.R4GfxResource{ &self.over, &self.blit, &self.fill, &self.sampler }) |handle| if (handle.slot != 0) {
             try accepted(self.client.resource_release(self.device, handle)); handle.* = empty;
         };
+        if (self.snapshot_allocator) |allocator| allocator.free(self.snapshot);
+        self.snapshot = &.{}; self.snapshot_count = 0; self.snapshot_allocator = null;
     }
     fn closeChain(self: *Engine) Error!void {
         if (self.readback_pin.slot != 0) return error.Busy;
@@ -773,6 +944,7 @@ pub const Engine = struct {
         self.chain = std.mem.zeroes(gfx.R4GfxSwapchain); self.presentation = null; self.chain_status = null;
         self.acquired = null; self.chain_frames = @splat(0); self.reported = @splat(false); self.output_index = 0;
         self.chain_closing = false;
+        self.invalidate();
     }
 };
 fn rect(value: surface.Rect) gfx.R4GfxSignedRect { return .{ .x = value.x, .y = value.y, .width = @intCast(value.w), .height = @intCast(value.h) }; }

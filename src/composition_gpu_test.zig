@@ -72,8 +72,15 @@ const Model = struct {
     var hold_terminal = false;
     var combined_enabled = true;
     var jobs: [c.device_job_capacity]?Job = @splat(null);
-    var outcomes: [256]u32 = @splat(0);
+    var outcomes: [2048]u32 = @splat(0);
     var serial: u64 = 0;
+    // Retired client handles do not free common receipts while descendants
+    // still reference them. Exercise a smaller finite pool than the kernel.
+    const Receipt = struct { live: bool = false, client: bool = false, parent: u64 = 0, children: u32 = 0 };
+    var receipts: [2048]Receipt = @splat(.{});
+    var retained_limit: usize = 0;
+    var retained_count: usize = 0;
+    var retained_peak: usize = 0;
     var native_allocations: u32 = 0;
     var presents: u32 = 0;
     var busy_count: u32 = 0;
@@ -287,6 +294,7 @@ const Model = struct {
     }
     fn submit(device: *const c.R4GfxDevice, operation: Operation, count: u32, address: u64, out: *c.R4GfxJob) i32 {
         if (busy_count != 0) { busy_count -= 1; return c.status_busy; }
+        if (retained_limit != 0 and retained_count >= retained_limit) return c.status_busy;
         const index = for (&jobs,0..) |*slot,i| { if (slot.* == null) break i; } else return c.status_busy;
         std.debug.assert(count <= 2 and serial+1 < outcomes.len);
         var dependency: u64 = 0; var external_wait = false;
@@ -295,6 +303,15 @@ const Model = struct {
             else { std.debug.assert(value.timeline == 123); dependency = value.point; }
         };
         serial += 1;
+        if (retained_limit != 0) {
+            if (dependency != 0) {
+                std.debug.assert(receipts[dependency].live);
+                receipts[dependency].children += 1;
+            }
+            receipts[serial] = .{ .live = true, .client = true, .parent = dependency };
+            retained_count += 1;
+            retained_peak = @max(retained_peak, retained_count);
+        }
         const handle: c.R4GfxJob = .{ .slot=@intCast(index+1), .reserved=0, .generation=serial, .device_generation=device.generation, .device_address=device.address };
         jobs[index] = .{ .handle=handle, .operation=operation, .dependency=dependency, .external_wait=external_wait }; out.*=handle;
         return 0;
@@ -366,7 +383,20 @@ const Model = struct {
     fn cancel(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 { find(handle).cancelled=true; return 0; }
     fn releaseJob(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob) callconv(.c) i32 {
         if (!find(handle).terminal or find(handle).pins != 0 or hold_terminal) return c.status_busy;
-        jobs[handle.slot-1]=null; return 0;
+        jobs[handle.slot-1]=null;
+        if (retained_limit != 0) {
+            std.debug.assert(receipts[handle.generation].live and receipts[handle.generation].client);
+            receipts[handle.generation].client = false;
+            var changed = true;
+            while (changed) {
+                changed = false;
+                for (&receipts) |*item| if (item.live and !item.client and item.children == 0) {
+                    if (item.parent != 0) { std.debug.assert(receipts[item.parent].children != 0); receipts[item.parent].children -= 1; }
+                    item.* = .{}; retained_count -= 1; changed = true;
+                };
+            }
+        }
+        return 0;
     }
     fn image(device: *const c.R4GfxDevice, resource: *const c.R4GfxResource) c.R4GfxCpuImage {
         var value: c.R4GfxResourceInfo=undefined; std.debug.assert(p.resourceInfo(device,resource,&value)==0); return value.image;
@@ -526,6 +556,7 @@ pub fn check() !void {
     for(&Model.jobs) |*job| try t.expect(job.*==null);
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
+    try checkDependencyPressure(graphics, device);
     try checkPrimitives(graphics, device);
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
@@ -1064,6 +1095,7 @@ fn checkReadback(graphics: anytype, device: *const c.R4GfxDevice, engine: *gpu.E
 }
 
 fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    try checkTargetDamage(graphics, device);
     Model.chain_enabled = true; defer Model.chain_enabled = false;
     Model.allow_visible = false; Model.clock = 1; Model.chain = .{};
     Model.serial = 0; Model.presents = 0; Model.outcomes = @splat(0);
@@ -1111,6 +1143,98 @@ fn checkSwapchain(graphics: anytype, device: *const c.R4GfxDevice) !void {
     try t.expect(engine.reserved_bytes == 0);
 }
 
+fn targetDamageCapture(cache: *layers.Cache, x: i32, color: u32) !void {
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try cache.start(full);
+    const background = (try cache.begin(1, full, full)).?;
+    // The first layer need not be opaque: replacing it must erase old
+    // cursor pixels even under fully transparent or translucent texels.
+    var backdrop: [64]u32 = undefined;
+    for (&backdrop, 0..) |*pixel, i| pixel.* = (@as(u32, @intCast(i % 4)) * 85 << 24) | 0x203040;
+    try t.expect(background.blendArgb32(full, 0, 0, 8, 8, 1, std.mem.sliceAsBytes(&backdrop)));
+    try cache.end(1);
+    const area: surface.Rect = .{ .x = 2, .y = 2, .w = 4, .h = 3 };
+    const overlay = (try cache.begin(2, area, full)).?;
+    overlay.fillRect(overlay.fullRect(), color); try cache.end(2);
+    const cursor: surface.Rect = .{ .x = x, .y = 6, .w = 1, .h = 1 };
+    const arrow = (try cache.begin(3, cursor, full)).?;
+    arrow.fillRect(arrow.fullRect(), 0xffffff); try cache.end(3);
+    _ = try cache.finish();
+}
+
+fn checkTargetDamage(graphics: anytype, device: *const c.R4GfxDevice) !void {
+    Model.chain_enabled = true; defer Model.chain_enabled = false;
+    Model.allow_visible = false; Model.clock = 1; Model.chain = .{};
+    Model.serial = 0; Model.presents = 0; Model.outcomes = @splat(0);
+    Model.chain_render = @splat(null); Model.chain_present = @splat(null);
+    var cache = layers.Cache.init(t.allocator, 1024 * 1024); defer cache.deinit();
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const view: @import("output_geometry.zig").topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8 };
+    // Keep the first image awaiting visibility so the next capture must use
+    // the other target. Subsequent pairs exercise two different buffer ages.
+    var previous_x: i32 = 0;
+    var previous_color: u32 = 0x882244;
+    for (0..4) |pair| {
+        Model.allow_visible = false;
+        for (0..2) |member| {
+            const step = pair * 2 + member;
+            const x: i32 = @intCast(step % 7);
+            const color: u32 = if (step >= 4) 0x445566 else 0x882244;
+            var damage: surface.Rect = .{ .x = @min(previous_x, x), .y = 6, .w = @intCast(@abs(x - previous_x) + 1), .h = 1 };
+            if (color != previous_color) damage = damage.merged(.{ .x = 2, .y = 2, .w = 4, .h = 3 });
+            try targetDamageCapture(&cache, x, color);
+            engine.compositionDamage(view, damage);
+            try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+            try t.expectEqual(member, engine.output_index);
+            if (step < 2) try t.expectEqualDeep(full, engine.encode_area)
+            else if (step < 4) try t.expect(engine.encode_area.h == 1 and engine.encode_area.y == 6 and engine.encode_area.w >= 2);
+            const before = engine.render_jobs;
+            try pump(&engine, &cache, device, .copied);
+            if (step < 2) try t.expectEqual(@as(u64, 4), engine.render_jobs - before)
+            else if (step < 4) try t.expectEqual(@as(u64, 3), engine.render_jobs - before);
+            var expected: [64]u32 = @splat(0); var target: scene.SceneBuffer = .{};
+            try t.expect(target.attach(std.mem.sliceAsBytes(&expected), 8, 8));
+            _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
+            const output_image = &engine.outputs[engine.output_index];
+            const image = Model.buffers[output_image.resource.slot - 1].?;
+            const pixels: []const u32 = std.mem.bytesAsSlice(u32, image);
+            const stride: usize = @intCast(output_image.info.image.pitch / 4);
+            for (0..8) |y| try t.expectEqualSlices(u32, expected[y * 8..][0..8], pixels[y * stride..][0..8]);
+            previous_x = x; previous_color = color;
+        }
+        Model.allow_visible = true;
+        for (0..32) |_| {
+            Model.complete(device); try engine.pollPresentation();
+            _ = engine.completion();
+            if (!engine.pending()) break;
+        }
+        try t.expect(!engine.pending());
+    }
+    // Cancellation invalidates every output certificate. A succeeding frame
+    // cannot reuse even the unaffected target's untracked older content.
+    try targetDamageCapture(&cache, 3, previous_color);
+    engine.compositionDamage(view, .{ .x = 0, .y = 6, .w = 4, .h = 1 });
+    try engine.begin(&cache, 1000); _ = engine.advance(&cache, 1); Model.complete(device);
+    engine.cancel(error.Deadline); try pump(&engine, &cache, device, .failed);
+    for (&engine.outputs) |*output| try t.expectEqual(@as(u64, 0), output.generation);
+    try targetDamageCapture(&cache, 4, previous_color);
+    engine.compositionDamage(view, .{ .x = 3, .y = 6, .w = 2, .h = 1 });
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+    try t.expectEqualDeep(full, engine.encode_area);
+    try pump(&engine, &cache, device, .copied);
+    for (0..32) |_| { Model.complete(device); try engine.pollPresentation(); _ = engine.completion(); if (!engine.pending()) break; }
+    try t.expect(!engine.pending());
+    var transformed = view; transformed.scale = 180;
+    engine.compositionDamage(transformed, .{ .x = 0, .y = 0, .w = 1, .h = 1 });
+    try t.expect(engine.capture_damage == null);
+    for (&engine.outputs) |*output| try t.expectEqual(@as(u64, 0), output.generation);
+    try engine.close();
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-swapchain] damage follows both target ages; all pixels match full composition; unrelated layer skipped; cancel/view change invalidate: OK\n", .{});
+}
+
 fn primitiveScene(painter: *scene.SceneBuffer) !void {
     const paint = @import("paint.zig");
     painter.fillRect(.{ .x = 0, .y = 0, .w = 8, .h = 8 }, 0x203040);
@@ -1148,9 +1272,26 @@ fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *con
     };
     try t.expect(Model.batches > 0 and Model.max_batch >= 2 and engine.primitive_jobs < engine.primitive_draws);
     const uploads = engine.uploaded_bytes; const conversions = frame.assets.converted_pixels; const allocations = Model.native_allocations;
+    const visible_warm = Model.visible;
+    const draws_warm = engine.primitive_draws; const jobs_warm = engine.primitive_jobs;
+    try primitiveCapture(&cache, full);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expect(engine.primitive_draws == draws_warm and engine.primitive_jobs == jobs_warm);
+    try t.expectEqualSlices(u32, &visible_warm, &Model.visible);
+    // An unchanged command stream still depends on the exact texture-page
+    // generation. Even an atlas append outside this layer must invalidate it.
+    try primitiveCapture(&cache, full);
+    const texture = for (frame.commands[0..frame.count]) |command| { if (command.texture) |index| break index; } else return error.MissingTexture;
+    frame.assets.generation += 1;
+    frame.assets.textures[texture].generation = frame.assets.generation;
+    frame.assets.textures[texture].dirty = frame.assets.textures[texture].rect();
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expect(engine.primitive_draws == draws_warm + frame.count and engine.uploaded_bytes > uploads);
+    try t.expectEqualSlices(u32, &visible_warm, &Model.visible);
+    const uploads_refreshed = engine.uploaded_bytes;
     try primitiveCapture(&cache, .{ .x = 3, .y = 3, .w = 1, .h = 1 });
     try t.expect(engine.prepared(&cache)); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
-    try t.expect(engine.uploaded_bytes == uploads and frame.assets.converted_pixels == conversions and Model.native_allocations == allocations);
+    try t.expect(engine.uploaded_bytes == uploads_refreshed and frame.assets.converted_pixels == conversions and Model.native_allocations == allocations);
     frame.mirror = true; for (&cache.entries) |*entry| entry.initialized = false;
     try primitiveCapture(&cache, full);
     _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
@@ -1162,10 +1303,130 @@ fn checkPrimitives(graphics: *@import("gfx_renderer.zig").Renderer, device: *con
     try engine.close();
     for (&Model.jobs) |*job| try t.expect(job.* == null);
     for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    try checkLayerReuse(graphics, device);
     try checkShapesAndLargeImage(graphics, device);
     try checkAssets();
     try checkOutputTransforms(graphics, device);
     std.debug.print("[desktop-primitives] fill/glyph/indexed/alpha/ARGB: bounded GPU capture; no CPU layer pixels; warm upload=0; fallback remains complete\n", .{});
+}
+
+fn checkLayerReuse(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try capture(&cache, full, 0x882244);
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    const draws = engine.primitive_draws;
+    const first = Model.visible;
+    try capture(&cache, full, 0x882244);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expectEqual(draws, engine.primitive_draws);
+    try t.expectEqualSlices(u32, &first, &Model.visible);
+    // A changed overlay redraws only itself; the ordered final composition
+    // still reads both images and must expose the new pixels.
+    try capture(&cache, full, 0x445566);
+    var overlay_draws: usize = 0;
+    for (frame.commands[0..frame.count]) |command| { if (command.layer == 1) overlay_draws += 1; }
+    try t.expect(overlay_draws != 0);
+    try engine.begin(&cache, 1000);
+    try t.expect(engine.reuse_layers[0] and !engine.reuse_layers[1]);
+    try pump(&engine, &cache, device, .copied);
+    try t.expectEqual(draws + overlay_draws, engine.primitive_draws);
+    try t.expectEqual(@as(u32, 0x203040), Model.visible[0]);
+    try t.expectEqual(@as(u32, 0x445566), Model.visible[3 * 8 + 3]);
+    const changed = Model.visible;
+    // Let an admitted draw alter its private layer before cancellation.
+    // Returning to the old scene must repaint instead of using its snapshot.
+    try capture(&cache, full, 0x998877); try engine.begin(&cache, 1000);
+    _ = engine.advance(&cache, 1); Model.complete(device); engine.cancel(error.Deadline);
+    try t.expectError(error.Busy, engine.close());
+    try pump(&engine, &cache, device, .failed);
+    try capture(&cache, full, 0x445566); try engine.begin(&cache, 1000);
+    try t.expect(!engine.reuse_layers[0] and !engine.reuse_layers[1]);
+    try pump(&engine, &cache, device, .copied);
+    try t.expectEqualSlices(u32, &changed, &Model.visible);
+    engine.invalidate();
+    try capture(&cache, full, 0x445566); try engine.begin(&cache, 1000);
+    try t.expect(!engine.reuse_layers[0] and !engine.reuse_layers[1]);
+    try pump(&engine, &cache, device, .copied);
+    try t.expectEqualSlices(u32, &changed, &Model.visible);
+    try engine.close();
+    try t.expect(engine.snapshot.len == 0 and engine.reserved_bytes == 0);
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-primitives] exact layer reuse, selective repaint, texture invalidation and cancelled partial draw: OK\n", .{});
+    try checkCaptureReuse(graphics, device);
+}
+
+fn checkCaptureReuse(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    const view: @import("output_geometry.zig").topology.Viewport = .{ .pixel_w = 8, .pixel_h = 8 };
+    var prior_cursor: i32 = 0;
+    for (0..9) |step| {
+        const cursor_x: i32 = @intCast(step % 7);
+        const area: surface.Rect = .{ .x = if (step < 5) 2 else 4, .y = 2, .w = 2, .h = 2 };
+        const color: u32 = if (step < 2) 0x882244 else 0x445566;
+        const cursor: surface.Rect = .{ .x = cursor_x, .y = 6, .w = 1, .h = 1 };
+        var damage: surface.Rect = .{ .x = @min(prior_cursor, cursor_x), .y = 6, .w = @intCast(@abs(cursor_x - prior_cursor) + 1), .h = 1 };
+        if (step == 0) damage = full;
+        if (step >= 2 and step <= 5) damage = damage.merged(.{ .x = 2, .y = 2, .w = 4, .h = 2 });
+        if (step == 7) engine.invalidate();
+        if (step == 8) {
+            const texture = for (frame.commands[0..frame.count]) |command| { if (command.texture) |value| break value; } else return error.MissingTexture;
+            frame.assets.generation += 1;
+            frame.assets.textures[texture].generation = frame.assets.generation;
+            frame.assets.textures[texture].dirty = frame.assets.textures[texture].rect();
+        }
+        try cache.startOutput(view);
+        engine.reuseCapture(&cache, damage);
+        const background = (try cache.begin(1, full, full)).?;
+        background.fillRect(full, 0x203040); try cache.end(1);
+        const reused = cache.reused_captures;
+        const hits = frame.assets.hits;
+        if (step != 3) {
+            const painter = try cache.begin(2, area, full);
+            const expect_reuse = step == 1 or step == 6;
+            try t.expectEqual(expect_reuse, painter == null);
+            if (painter) |overlay| {
+                const pixels: [4]u32 = @splat(0xff000000 | color);
+                try t.expect(overlay.blendArgb32(area, area.x, area.y, 2, 2, 1, std.mem.sliceAsBytes(&pixels)));
+                try cache.end(2);
+            }
+            if (expect_reuse) {
+                try t.expectEqual(reused + 1, cache.reused_captures);
+                try t.expectEqual(hits, frame.assets.hits); // No painter or asset-key rehash.
+                for (frame.commands[0..frame.count]) |command| if (command.texture) |texture| {
+                    try t.expectEqual(frame.assets.frame, frame.assets.textures[texture].pinned);
+                };
+            }
+        }
+        const arrow = (try cache.begin(3, cursor, full)).?;
+        arrow.fillRect(cursor, 0xffffff); try cache.end(3);
+        _ = try cache.finish();
+        engine.compositionDamage(view, damage);
+        try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+        var expected: [64]u32 = @splat(0x203040);
+        if (step != 3) for (0..2) |y| {
+            for (0..2) |x| expected[(y + 2) * 8 + x + @as(usize, @intCast(area.x))] = color;
+        };
+        expected[6 * 8 + @as(usize, @intCast(cursor_x))] = 0xffffff;
+        try t.expectEqualSlices(u32, &expected, &Model.visible);
+        prior_cursor = cursor_x;
+    }
+    // A changed viewport invalidates CPU capture even if its native size is unchanged.
+    var moved = view; moved.origin.x = 1;
+    try cache.startOutput(moved);
+    engine.reuseCapture(&cache, .{ .x = 0, .y = 6, .w = 8, .h = 1 });
+    for (cache.replay_layers) |retained| try t.expect(!retained);
+    _ = try cache.finish();
+    try engine.close();
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-primitives] CPU capture reuse skips unchanged painters/asset hashing; pixels match through content change, removal, return, move, texture generation and invalidation: OK\n", .{});
 }
 
 fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
@@ -1188,6 +1449,7 @@ fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device
             software.transform(view, source, @intCast(bounds.w), &expected);
             for (0..2) |iteration| {
                 const converted = frame.assets.converted_pixels;
+                const draws = engine.primitive_draws;
                 try cache.startOutput(view);
                 const painter = (try cache.begin(1, bounds, bounds)).?;
                 painter.blitXrgb32(bounds.x, bounds.y, @intCast(bounds.w), @intCast(bounds.h), source);
@@ -1196,6 +1458,7 @@ fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device
                 try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
                 try t.expectEqualSlices(u32, &expected, &Model.visible);
                 if (iteration == 1) {
+                    try t.expectEqual(draws, engine.primitive_draws);
                     var remote = @import("remote_capture.zig").Capture.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device);
                     remote.setDemand(true); try remote.prepare(view, c.format_xrgb8888, @import("r4gfx_readback").sdr());
                     remote.record(0, 1, bounds, view, .{ .x = bounds.x + 1, .y = bounds.y + 2, .visible = true });
@@ -1382,4 +1645,38 @@ fn checkHdrWindows(graphics: anytype, device: *const c.R4GfxDevice) !void {
         for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
     };
     std.debug.print("[desktop-window-hdr] absolute scRGB/PQ, 80/1000-nit anchors, SDR/HDR output, capture, warm reuse and HDR removal: OK\n", .{});
+}
+
+fn checkDependencyPressure(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    Model.receipts = @splat(.{}); Model.retained_count = 0; Model.retained_peak = 0; Model.retained_limit = 24;
+    defer Model.retained_limit = 0;
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try cache.start(full);
+    const painter = (try cache.begin(1, full, full)).?;
+    painter.fillRect(full, 0);
+    const translucent: [64]u32 = @splat(0x8000ff00);
+    for (0..768) |_| try t.expect(painter.blendArgb32(full, 0, 0, 8, 8, 8, std.mem.sliceAsBytes(&translucent)));
+    try cache.end(1); _ = try cache.finish();
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    try engine.prepare(&cache, 1000); try engine.begin(&cache, 1000);
+    var result: gpu.Progress = .pending;
+    for (0..512) |_| {
+        result = engine.advance(&cache, 1);
+        if (result != .pending) break;
+        Model.complete(device);
+    }
+    if (result == .pending) {
+        // Preserve allocator/ownership diagnostics even for the old failing
+        // implementation; cancellation must eventually retire its graph.
+        engine.cancel(error.Deadline);
+        try pump(&engine, &cache, device, .failed);
+    }
+    try engine.close();
+    try t.expectEqual(gpu.Progress.copied, result);
+    try t.expect(engine.primitive_jobs > Model.retained_limit);
+    try t.expect(Model.retained_count == 0 and Model.retained_peak <= c.device_job_capacity);
+    for (Model.visible) |pixel| try t.expectEqual(@as(u32, 0x00ff00), pixel);
+    std.debug.print("[desktop-dependencies] 768 draws exceed finite receipt pool; ordered pixels match; all receipts retired; peak={d}\n", .{Model.retained_peak});
 }

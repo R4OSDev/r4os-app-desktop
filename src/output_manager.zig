@@ -65,6 +65,7 @@ pub const Manager = struct {
     cursor: topology.Point = .{},
 
     pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, sys: r4os.r4sys.Context, draw: r4os.r4draw.Context) ?*Manager {
+        @import("startup_diagnosis.zig").initialize(sys);
         const self = allocator.create(Manager) catch return null;
         self.* = .{ .allocator = allocator, .raw = raw, .sys = sys, .draw = draw };
         self.loadPreferences();
@@ -350,8 +351,13 @@ pub const Manager = struct {
         const accelerated = if (slot.gpu) |owner| blk: {
             const info = owner.graphics.info() orelse break :blk false;
             const needed = owner.engine.requiredOperations();
+            @import("startup_diagnosis.zig").record("candidate head={d} display={d} backend={d} operations={x} required={x}",
+                .{entry.target.head_id, entry.target.display_generation, info.backend, info.gpu_operations, needed});
             break :blk info.gpu_operations & needed == needed;
         } else false;
+        @import("startup_diagnosis.zig").record("select head={d} display={d} flags={x} worker={} accelerated={} failed-target={} icc={} size={d}x{d}",
+            .{entry.target.head_id, entry.target.display_generation, entry.presentation.flags, slot.gpu != null, accelerated,
+                software_only, profile_enabled, view.pixel_w, view.pixel_h});
         if (!accelerated) {
             if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
             if (slot.gpu == null and entry.presentation.format == a.gfx_buffer_format_xrgb8888 and
@@ -377,6 +383,8 @@ pub const Manager = struct {
         return slot;
     }
     pub fn fail(self: *Manager, slot: *Slot) void {
+        if (!slot.failed) @import("startup_diagnosis.zig").record("manager-fail head={d} display={d} gpu={} cpu={} reconfiguring={}",
+            .{slot.target.head_id, slot.target.display_generation, slot.gpu != null, slot.software != null, slot.reconfiguring});
         slot.failed = true;
         if (slot.gpu != null) {
             const index = for (self.software_targets, 0..) |target, i| {

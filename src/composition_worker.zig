@@ -45,10 +45,16 @@ pub const Worker = struct {
     pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context,
         adapter: u32, head: ?u32, encoding: ?r4os.abi.GfxOutputColorState, format: u32) ?*Worker
     {
+        @import("startup_diagnosis.zig").initialize(sys);
         if (encoding) |value| if (value.identity.adapter_id != adapter) return null;
-        const graphics = renderer.Renderer.createForAdapter(allocator, raw, adapter) orelse return null;
+        const graphics = renderer.Renderer.createForAdapter(allocator, raw, adapter) orelse {
+            @import("startup_diagnosis.zig").record("worker-create adapter={d} renderer=null", .{adapter}); return null;
+        };
         var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
-        engine.configureOutput(encoding, format) catch { graphics.destroy(); return null; };
+        engine.configureOutput(encoding, format) catch |err| {
+            @import("startup_diagnosis.zig").record("worker-create adapter={d} color-error={s}", .{adapter, @errorName(err)});
+            graphics.destroy(); return null;
+        };
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
         const primitive_frame = primitives.Frame.init(allocator) catch { allocator.destroy(self); graphics.destroy(); return null; };
         self.* = .{ .graphics = graphics, .sys = sys, .cache = layers.Cache.init(allocator, 128 * 1024 * 1024),
@@ -151,6 +157,11 @@ pub const Worker = struct {
         return true;
     }
     fn fail(self: *Worker, reason: gpu.Error) void {
+        if (self.failed_revision != self.revision) @import("startup_diagnosis.zig").record(
+            "worker-fail reason={s} phase={s} revision={d} preparation={s} thread={} visible={d} frames={d} commands={d} ops={x}",
+            .{@errorName(reason), @tagName(self.engine.phase), self.revision,
+                if (self.preparation_error) |err| @errorName(err) else "none", self.thread != null,
+                self.frames_visible, self.cache.frame, self.cache.command_count, self.gpu_operations});
         self.capture.reader.cancel(error.Stale);
         self.failed_revision = self.revision;
         self.awaiting_visible = false;

@@ -172,10 +172,15 @@ pub const Output = struct {
     pub fn submit(self: *Output, deadline: u64) bool {
         const frame = self.acquired orelse return false;
         if (self.scene.failure != null or self.mapping.lease.id == 0) { self.abandon(); return false; }
+        var phase_stamp = @import("presentation_profile.zig").stamp();
         self.color_composition.finish(&self.graphics.colors, &self.scene) catch { self.abandon(); return false; };
+        @import("presentation_profile.zig").end(.cpu_color, phase_stamp);
+        phase_stamp = @import("presentation_profile.zig").stamp();
         self.serial +|= 1;
         self.capture.record(frame.slot - 1, self.serial, self.capture_damage orelse (geometry.logical(self.view) catch unreachable), self.view, self.capture_cursor);
         self.capture.stageProfile(frame.slot - 1, self.scene.pixels.?, self.sys.monotonicNanoseconds() orelse 0);
+        @import("presentation_profile.zig").end(.cpu_capture, phase_stamp);
+        phase_stamp = @import("presentation_profile.zig").stamp();
         if (self.profile != null or self.limited or self.view.rotation != .normal or self.view.scale != 120) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
             transform(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]);
@@ -190,16 +195,21 @@ pub const Output = struct {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
             for (pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]) |*pixel| pixel.* = catalog.color.limitedRgb8(pixel.*);
         }
+        @import("presentation_profile.zig").end(.cpu_transform, phase_stamp);
+        phase_stamp = @import("presentation_profile.zig").stamp();
         if (self.draw.gfxBufferUnmap(&self.mapping.lease) != a.gfx_buffer_result_ok) {
             // Preserve the mapping and acquired image for retained teardown.
             // Leaving this live would prevent every subsequent begin().
             self.lost = true; return false;
         }
         self.mapping = .{}; self.scene.reset();
+        @import("presentation_profile.zig").end(.cpu_unmap, phase_stamp);
+        phase_stamp = @import("presentation_profile.zig").stamp();
         const rc = self.graphics.client.swapchain_present(&self.graphics.device, &self.chain,
             &.{ .version = 1, .size = @sizeOf(gfx.R4GfxSwapchainPresent), .frame = frame,
                 .render_job = std.mem.zeroes(gfx.R4GfxJob), .deadline_ns = deadline, .intent = 0,
                 .blockers = gfx.present_block_cursor | @as(u32, if (self.capture.wanted) gfx.present_block_readers else 0) });
+        @import("presentation_profile.zig").end(.cpu_present, phase_stamp);
         if (rc != gfx.status_ok) {
             self.abandon();
             if (rc != gfx.status_busy and rc != gfx.status_occluded) self.lost = true;

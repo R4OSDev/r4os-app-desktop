@@ -561,14 +561,21 @@ pub const App = struct {
                 self.ctx.sleepTicks(self.loop_sleep_ticks);
                 continue;
             }
+            var phase_stamp = @import("presentation_profile.zig").stamp();
             self.pollComposition();
+            @import("presentation_profile.zig").end(.loop_composition, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             const platform_now = self.ctx.sys.monotonicNanoseconds() orelse 0;
             if (self.platform_input.poll(&self.ctx.sys, &self.ctx.draw, &self.screen_power, platform_now)) self.last_input_ns = platform_now;
             self.screen_power.tick(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.config.screen_off_seconds);
+            @import("presentation_profile.zig").end(.loop_platform, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             var needs_redraw = self.syncDesktopFolder();
             if (self.syncOutputRevision()) needs_redraw = true;
             if (self.syncTrayBroker()) needs_redraw = true;
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
+            @import("presentation_profile.zig").end(.loop_metadata, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
                 self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
@@ -588,15 +595,24 @@ pub const App = struct {
                 if (!self.screen_power.input(&self.ctx.draw, self.last_input_ns) and self.dispatchEvent()) needs_redraw = true;
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
+            @import("presentation_profile.zig").end(.loop_input, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             self.flushWindowGeometry(false);
             if (self.syncWindowModes()) needs_redraw = true;
             if (self.syncGraphicsWindows()) needs_redraw = true;
             if (self.syncCursor()) needs_redraw = true;
             if (self.hasDamage()) needs_redraw = true;
             self.syncRefreshPolicy();
+            @import("presentation_profile.zig").end(.loop_windows, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             if (needs_redraw) self.redraw();
             if (self.capture_cursor_damage.active and self.remote_frame_consumers != 0) _ = self.publishRemoteScene(&.{});
+            @import("presentation_profile.zig").end(.loop_redraw, phase_stamp);
+            phase_stamp = @import("presentation_profile.zig").stamp();
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
+            @import("presentation_profile.zig").end(.loop_idle, phase_stamp);
+            @import("presentation_profile.zig").finish();
+            @import("startup_diagnosis.zig").flush();
         }
     }
 
@@ -4683,6 +4699,7 @@ pub const App = struct {
 
         self.remote_input_events +%= 1;
         self.last_remote_input_sequence = input.sequence;
+        if (input.kind == r4os.abi.remote_input_kind_mouse_move) @import("presentation_profile.zig").arm(self.ctx.sys);
 
         if (input.kind == r4os.abi.remote_input_kind_key_down) {
             self.remote_input_keys +%= 1;
@@ -5770,6 +5787,13 @@ pub const App = struct {
             self.cursor_damage.reset();
         }
         if (region_count == 0) {
+            // Managed outputs retain damage while their compositor is busy.
+            // hasDamage() can resume that capture without any new app damage;
+            // preserve the queued region instead of expanding it to full-screen.
+            if (self.managedOutputs() and self.outputs.?.needsCapture()) {
+                self.presentOutputRegions(&.{});
+                return;
+            }
             regions[0] = surface.desktop(self.screen_w, self.screen_h).rect;
             region_count = 1;
         }
@@ -5837,6 +5861,8 @@ pub const App = struct {
         self.invalidateFull();
     }
     fn presentOutputRegions(self: *App, regions: []const surface.Rect) void {
+        const profile_capture = @import("presentation_profile.zig").stamp();
+        defer @import("presentation_profile.zig").end(.output_capture, profile_capture);
         const manager = self.outputs orelse return;
         self.syncCaptureDemand();
         manager.invalidate(regions);
@@ -5854,24 +5880,34 @@ pub const App = struct {
                 if (!owner.available(manager.revision)) continue;
                 owner.primitives.mirror = false;
                 owner.cache.startOutput(slot.view) catch { owner.rejectCapture(); manager.fail(slot); continue; };
+                owner.engine.reuseCapture(&owner.cache, slot.damage.bounds);
                 var capture: scene_buffer.SceneBuffer = .{ .width = bounds.w, .height = bounds.h,
                     .origin_x = bounds.x, .origin_y = bounds.y, .layer_hook = owner.cache.hook() };
                 self.ctx.beginSceneClipped(&capture, bounds);
+                const profile_paint = @import("presentation_profile.zig").stamp();
                 if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(bounds, &offsets, &views);
                 self.ctx.endScene();
+                @import("presentation_profile.zig").end(.output_paint, profile_paint);
+                const profile_finish = @import("presentation_profile.zig").stamp();
+                defer @import("presentation_profile.zig").end(.output_finish, profile_finish);
                 _ = owner.cache.finish() catch { owner.rejectCapture(); manager.fail(slot); continue; };
                 // Software cursor and output transforms require composition.
                 // Each head still owns its own measured scheduling phase.
                 owner.engine.present_intent = 0; owner.engine.present_blockers = gfx.present_block_cursor |
                     @as(u32, if (owner.capture_demand) gfx.present_block_readers else 0);
                 owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
+                owner.engine.compositionDamage(slot.view, slot.damage.bounds);
                 captured = owner.start();
             } else if (slot.software) |owner| {
                 owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
                 const canvas = owner.begin(self.last_input_ns) orelse continue;
                 self.ctx.beginSceneClipped(canvas, bounds);
+                const profile_paint = @import("presentation_profile.zig").stamp();
                 if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(bounds, &offsets, &views);
                 self.ctx.endScene();
+                @import("presentation_profile.zig").end(.output_paint, profile_paint);
+                const profile_finish = @import("presentation_profile.zig").stamp();
+                defer @import("presentation_profile.zig").end(.output_finish, profile_finish);
                 captured = owner.submit((self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s);
             }
             if (captured) {
@@ -6040,6 +6076,8 @@ pub const App = struct {
                 else if (slot.software) |owner| { if (owner.capture.wanted) self.publishCapture(&owner.capture); }
                 const completed = if (slot.gpu) |owner| owner.frames_completed else if (slot.software) |owner| owner.completed else 0;
                 if (completed <= slot.reported) continue;
+                if (slot.gpu) |owner| @import("presentation_profile.zig").frame(true, completed, owner.engine.primitive_draws, owner.engine.render_jobs, owner.engine.uploaded_bytes)
+                else @import("presentation_profile.zig").frame(false, completed, 0, 0, 0);
                 self.render_stats.present_successes +|= completed - slot.reported;
                 if (slot.reported == 0) {
                     self.ctx.write("R4DESK output: head="); self.ctx.printU64(slot.target.head_id);
