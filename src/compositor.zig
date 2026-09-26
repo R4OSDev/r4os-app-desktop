@@ -502,6 +502,8 @@ test "occlusion composition matches complete painter order after move hide minim
     _ = try palette_cache.finish();
     const blended = try @import("composition_software.zig").paint(&graphics.colors, &palette_cache, &palette_scene);
     try std.testing.expect(blended.direct_pixels == 0);
+    try std.testing.expectEqual(@as(u64, 3), blended.commands);
+    try std.testing.expectEqual(@as(u64, 3 * 4096), blended.pixels);
     try std.testing.expectEqualSlices(u32, &expected_palette, &palette);
     var tiny = composition_layers.Cache.init(std.testing.allocator,4);
     defer tiny.deinit();
@@ -552,6 +554,10 @@ test "occlusion composition matches complete painter order after move hide minim
         const sparse_stats = try tile_software.paint(&graphics.colors, &sparse_cache, &sparse_scene);
         try std.testing.expectEqual(@as(u64, 16), sparse_stats.tiles);
         try std.testing.expectEqual(@as(u64, 17), sparse_stats.candidates);
+        try std.testing.expectEqual(@as(u64, 129), sparse_stats.pixels);
+        try std.testing.expectEqual(@as(u64, 780), sparse_stats.read_bytes);
+        try std.testing.expectEqual(@as(u64, 776), sparse_stats.write_bytes);
+        std.debug.print("[desktop-cpu-color] sparse damage: 129 transformed pixels, 780 read / 776 written bytes; opaque base removes destination conversion\n", .{});
         for (sparse_pixels, 0..) |value, i| {
             const x = i % 1024; const y = i / 1024;
             const expected: u32 = if (x == 2 and y == 3) 0xbcbcbc else

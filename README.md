@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.87`
+- Version: `0.1.88`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -124,3 +124,13 @@ scanning every layer for each active tile. Two fixed edge arrays use 16 KB
 inside the existing budgeted color scratch. The index is rebuilt per frame.
 The existing render-test checks sparse 1024x1024 composition: 16 of 256 tiles
 and 17 instead of 4352 candidate visits, with exact unchanged/alpha pixels.
+
+
+Bounded color work (0.81.23)
+-----------------------------
+Only the affected rectangle within an active tile enters COLOR_V1. A proven
+opaque first internal layer initializes that working rectangle directly;
+covered destination conversion and its first OVER read are omitted. Failure
+still discards the unpublished output and invalidates its contents.
+The sparse reference case reports 129 converted pixels and 780/776 COLOR_V1
+read/write bytes; index and alpha-proof reads are separate from these counts.
