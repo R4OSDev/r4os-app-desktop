@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.88`
+- Version: `0.1.89`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -134,3 +134,14 @@ covered destination conversion and its first OVER read are omitted. Failure
 still discards the unpublished output and invalidates its contents.
 The sparse reference case reports 129 converted pixels and 780/776 COLOR_V1
 read/write bytes; index and alpha-proof reads are separate from these counts.
+
+
+Composition progress (0.81.24)
+-----------------------------
+Common GPU admission uses at most 64 attempts or 250 microseconds between
+bounded operations. Actual Busy waits for progress; a completion observed
+during collection can retry the exact operation within the same budget.
+Runnable budget exhaustion yields cooperatively after normal input handling.
+Pending work uses the existing desktop activity sequence and a one-tick
+deadline fallback. The common Kernel queue coalesces completion/retirement
+wakes outside graphics owners. No backend-specific wait or ABI was added.

@@ -69,6 +69,7 @@ const Model = struct {
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
     var imported: [c.device_resource_capacity]a.GfxBufferReference = @splat(.{});
     var producer_ready = true;
+    var auto_complete = false;
     var hold_terminal = false;
     var combined_enabled = true;
     var jobs: [c.device_job_capacity]?Job = @splat(null);
@@ -370,7 +371,8 @@ const Model = struct {
     fn find(handle: *const c.R4GfxJob) *Job {
         const job = &jobs[handle.slot-1].?; std.debug.assert(std.meta.eql(handle.*,job.handle)); return job;
     }
-    fn info(_: *const c.R4GfxDevice, handle: *const c.R4GfxJob, out: *c.R4GfxJobInfo) callconv(.c) i32 {
+    fn info(device: *const c.R4GfxDevice, handle: *const c.R4GfxJob, out: *c.R4GfxJobInfo) callconv(.c) i32 {
+        if (auto_complete) complete(device);
         const job = find(handle); out.* = std.mem.zeroes(c.R4GfxJobInfo);
         out.version=1; out.size=@sizeOf(c.R4GfxJobInfo); out.point=handle.generation; out.timeline=123;
         out.device_generation=1; out.reset_generation=1;
@@ -557,6 +559,7 @@ pub fn check() !void {
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
     try checkDependencyPressure(graphics, device);
+    try checkAdmissionBudget(graphics, device);
     try checkPrimitives(graphics, device);
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
@@ -1716,4 +1719,42 @@ fn checkDependencyPressure(graphics: *@import("gfx_renderer.zig").Renderer, devi
     try t.expect(Model.retained_count == 0 and Model.retained_peak <= c.device_job_capacity);
     for (Model.visible) |pixel| try t.expectEqual(@as(u32, 0x00ff00), pixel);
     std.debug.print("[desktop-dependencies] 768 draws exceed finite receipt pool; ordered pixels match; all receipts retired; peak={d}\n", .{Model.retained_peak});
+}
+
+fn checkAdmissionBudget(graphics: *@import("gfx_renderer.zig").Renderer, device: *const c.R4GfxDevice) !void {
+    const Clock = struct {
+        var now: u64 = 1;
+        fn read(_: usize) u64 { const value = now; now += 100 * std.time.ns_per_us; return value; }
+    };
+    var frame = try @import("primitive_frame.zig").Frame.init(t.allocator); defer frame.deinit(); frame.mirror = false;
+    var cache = layers.Cache.init(t.allocator, 1024); defer cache.deinit(); cache.recording = &frame;
+    const full: surface.Rect = .{ .x = 0, .y = 0, .w = 8, .h = 8 };
+    try cache.start(full);
+    const painter = (try cache.begin(1, full, full)).?;
+    painter.fillRect(full, 0);
+    const translucent: [64]u32 = @splat(0x8000ff00);
+    for (0..1536) |_| try t.expect(painter.blendArgb32(full, 0, 0, 8, 8, 8, std.mem.sliceAsBytes(&translucent)));
+    try cache.end(1); _ = try cache.finish();
+    defer Model.auto_complete = false;
+    for (0..3) |mode| {
+        var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+        try engine.prepare(&cache, std.time.ns_per_s); try engine.begin(&cache, std.time.ns_per_s);
+        Model.auto_complete = mode != 2;
+        Clock.now = 1;
+        if (mode == 1) engine.clock = .{ .context = 0, .read = Clock.read };
+        try t.expectEqual(gpu.Progress.pending, engine.advance(&cache, 1));
+        if (mode == 0) {
+            try t.expectEqual(@as(usize, gpu.Engine.admission_limit), engine.last_admission_steps);
+            try t.expect(engine.immediate_work);
+        } else if (mode == 1) {
+            try t.expect(engine.last_admission_steps <= 3 and engine.immediate_work);
+            engine.cancel(error.Deadline);
+        } else try t.expect(!engine.immediate_work);
+        engine.clock = null;
+        try pump(&engine, &cache, device, if (mode == 1) .failed else .copied);
+        try engine.close();
+        for (&Model.jobs) |*job| try t.expect(job.* == null);
+        for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    }
+    std.debug.print("[desktop-admission] immediate completion reaches 64-step bound; 250us clock bound; true Busy waits; cancel drains retained resources: OK\n", .{});
 }

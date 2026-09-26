@@ -62,7 +62,15 @@ pub const Worker = struct {
             .capture = remote.Capture.init(allocator, &graphics.client, &graphics.colors, &graphics.device) };
         self.cache.recording = &self.primitives;
         self.engine.head = head;
+        self.engine.clock = .{ .context = @intFromPtr(self), .read = readClock };
         return self;
+    }
+    fn readClock(raw: usize) u64 {
+        const self: *Worker = @ptrFromInt(raw);
+        return self.sys.monotonicNanoseconds() orelse self.deadline;
+    }
+    pub fn immediateWork(self: *const Worker) bool {
+        return self.thread == null and self.engine.active() and self.engine.fault == null and self.engine.immediate_work;
     }
     pub fn busy(self: *const Worker) bool { return self.thread != null or self.engine.active() or self.engine.pending() or self.awaiting_visible; }
     pub fn needsPolling(self: *const Worker) bool { return self.thread != null or self.engine.needsPolling() or self.awaiting_visible or self.capture.needsPolling() or self.cache.hasBorrowed(); }

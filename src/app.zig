@@ -677,18 +677,31 @@ pub const App = struct {
         return true;
     }
 
+    fn waitForGraphics(self: *App) void {
+        // Queue completion/retirement and input share the existing lost-wake
+        // safe activity sequence. One tick also handles absent notifications,
+        // preparation workers and output receivers without completion events.
+        if (self.activity_wait_supported) {
+            const rc = self.ctx.desktopActivityWait(self.activity_seq, 1, &self.activity_seq);
+            if (rc >= 0) {
+                if (rc > 0) self.activity_wait_wakes +%= 1 else self.activity_wait_timeouts +%= 1;
+                return;
+            }
+            self.activity_wait_supported = false;
+        }
+        self.ctx.sleepTicks(1);
+    }
+
     fn idleWait(self: *App, active: bool) void {
         // Held GPU receipts can keep outputs polling after an IPC failure.
         // They must not starve the explicit service-recovery sequence.
         if (!self.win_service_gate.available) _ = self.retryWindowServiceIfDue();
-        if (self.win_service_gate.available) for (&self.graphics_windows) |*owner| if (owner.needsPolling()) { self.ctx.sleepTicks(1); return; };
-        if (self.outputs) |manager| if (manager.needsPolling()) { self.ctx.sleepTicks(1); return; };
-        if (self.composition) |worker| if (worker.needsPolling()) {
-            // Damage coalesces while this immutable capture is in flight.
-            // Input is still consumed every cycle without a busy-yield loop.
-            self.ctx.sleepTicks(1);
-            return;
-        };
+        const immediate = (if (self.outputs) |manager| manager.immediateWork() else false) or
+            (if (self.composition) |worker| worker.immediateWork() else false);
+        if (immediate) { self.ctx.sleepTicks(0); return; }
+        if (self.win_service_gate.available) for (&self.graphics_windows) |*owner| if (owner.needsPolling()) { self.waitForGraphics(); return; };
+        if (self.outputs) |manager| if (manager.needsPolling()) { self.waitForGraphics(); return; };
+        if (self.composition) |worker| if (worker.needsPolling()) { self.waitForGraphics(); return; };
         if (active) {
             // A freshly launched GUI task must get a turn immediately. A
             // timer wait here can miss the child's first revision wake while

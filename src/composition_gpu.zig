@@ -20,6 +20,13 @@ pub const Error = error{ Busy, Unsupported, Stale, Graphics, Limit, State, Deadl
 pub const Progress = enum { pending, copied, failed };
 pub const Completion = struct { frame: u64, status: gfx.R4GfxSwapchainFrameStatus };
 pub const Engine = struct {
+    pub const Clock = struct { context: usize, read: *const fn (usize) u64 };
+    pub const admission_limit = 64;
+    pub const admission_nanoseconds = 250 * std.time.ns_per_us;
+    clock: ?Clock = null,
+    immediate_work: bool = false,
+    last_admission_steps: usize = 0,
+    retirement_epoch: u64 = 0,
     client: *const gfx.DeviceV1Client,
     colors: *const gfx.ColorV1Client,
     device: *const gfx.R4GfxDevice,
@@ -591,6 +598,7 @@ pub const Engine = struct {
     pub fn advance(self: *Engine, cache: *layers.Cache, now: u64) Progress {
         const profile_stamp = @import("presentation_profile.zig").stamp();
         defer @import("presentation_profile.zig").end(.engine_advance, profile_stamp);
+        self.immediate_work = false; self.last_admission_steps = 0;
         self.pollPresentation() catch |err| { if (self.active()) self.cancel(err); };
         if (!self.active()) return if (self.fault == null) .copied else .failed;
         if (cache.frame != self.frame or cache.collecting) self.cancel(error.State);
@@ -615,16 +623,32 @@ pub const Engine = struct {
             }
             return if (self.fault == null) .copied else .failed;
         }
-        // Admission is bounded independently of scene size. Returning Busy
-        // leaves this exact operation for a subsequent desktop event cycle.
-        for (0..4) |_| {
-            if (self.dependency_depth >= self.jobs.len) break;
+        // Stop on actual backpressure, elapsed CPU budget or finite work.
+        // A retired job can make the exact Busy operation runnable already;
+        // otherwise the event loop waits for completion with a deadline.
+        while (self.last_admission_steps < admission_limit) {
+            const instant = if (self.clock) |clock| clock.read(clock.context) else now;
+            if (instant >= self.deadline) { self.cancel(error.Deadline); break; }
+            if (self.last_admission_steps != 0 and instant -| now >= admission_nanoseconds) {
+                self.immediate_work = true; break;
+            }
+            self.last_admission_steps += 1;
+            if (self.dependency_depth >= self.jobs.len) {
+                const previous = self.retirement_epoch;
+                self.collect(cache) catch |err| { self.cancel(err); return .pending; };
+                if (self.fault != null or self.retirement_epoch == previous) return .pending;
+                continue;
+            }
             self.step(cache) catch |err| {
-                if (err != error.Busy) self.cancel(err);
-                return .pending;
+                if (err != error.Busy) { self.cancel(err); return .pending; }
+                const previous = self.retirement_epoch;
+                self.collect(cache) catch |failure| { self.cancel(failure); return .pending; };
+                if (self.fault != null or self.retirement_epoch == previous) return .pending;
+                continue;
             };
             if (self.phase == .drain) break;
         }
+        if (self.last_admission_steps == admission_limit and self.phase != .drain) self.immediate_work = true;
         return .pending;
     }
     fn collect(self: *Engine, cache: *layers.Cache) Error!void {
@@ -650,6 +674,7 @@ pub const Engine = struct {
                         if (cache.recording) |recording| recording.assets.uploaded(asset_index, job.generation);
                     }
                 }
+                self.retirement_epoch +%= 1;
                 job.complete = true;
                 job.result = info.result;
             }
@@ -667,6 +692,7 @@ pub const Engine = struct {
             try accepted(released);
             if (self.last == index) self.last = null;
             slot.* = null;
+            self.retirement_epoch +%= 1;
         };
     }
     fn drained(self: *const Engine) bool { for (&self.jobs) |*job| if (job.* != null) return false; return true; }

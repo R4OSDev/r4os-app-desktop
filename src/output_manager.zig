@@ -446,6 +446,10 @@ pub const Manager = struct {
         };
     }
     pub fn invalidateAll(self: *Manager) void { for (&self.slots) |*slot| if (slot.logical_index != null) { slot.invalidate(); }; }
+    pub fn immediateWork(self: *const Manager) bool {
+        for (&self.slots) |*slot| if (slot.gpu) |owner| if (owner.immediateWork()) return true;
+        return false;
+    }
     pub fn needsPolling(self: *const Manager) bool {
         for (&self.slots) |*slot| {
             if (slot.logical_index == null and (slot.gpu != null or slot.software != null)) return true;
