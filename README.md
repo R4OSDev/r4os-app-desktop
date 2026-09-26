@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.68`
+- Version: `0.1.86`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -101,3 +101,16 @@ Build.bat/Build.sh share PS7 orchestration via the configured SDK checkout.
 Physical pointer polls now report only real motion, wheel or button changes.
 An unchanged local pointer cannot overwrite a remote click or renew the
 screen-idle timer. Physical and remote button histories remain independent.
+
+
+CPU output damage (0.81.21)
+---------------------------
+Each of the three CPU swapchain images retains its own validity and bounded
+missing-region history. The acquired image repaints only accumulated damage.
+Unknown contents, configuration changes and partial failures force complete
+reconstruction. Color-profile/range encoding uses repaired native rows only;
+the canonical scratch image remains separate for composition and capture.
+Capture metadata describes current scene damage, not backbuffer age repair.
+The existing render-test covers all rotations and 100/150/200 percent scale
+against full output; output_damage.zig covers 100 alternating images, rejected
+writes, configuration reset and independent output ownership.

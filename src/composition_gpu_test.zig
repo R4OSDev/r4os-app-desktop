@@ -1469,6 +1469,21 @@ fn checkOutputTransforms(graphics: *@import("gfx_renderer.zig").Renderer, device
             const source = pixels[0..@intCast(bounds.w * bounds.h)];
             var expected: [64]u32 = undefined;
             software.transform(view, source, @intCast(bounds.w), &expected);
+            // Repair each logical pixel independently through every rotation
+            // and fractional scale; untouched native pixels remain identical.
+            for (0..source.len) |cell| {
+                var partial = expected;
+                var reference: [64]u32 = undefined;
+                const damage: surface.Rect = .{ .x = bounds.x + @as(i32, @intCast(cell % @as(usize, @intCast(bounds.w)))),
+                    .y = bounds.y + @as(i32, @intCast(cell / @as(usize, @intCast(bounds.w)))), .w = 1, .h = 1 };
+                const native_damage = try software.physicalDamage(view, damage);
+                source[cell] ^= 0xffffff;
+                software.transformRegion(view, source, @intCast(bounds.w), &partial, native_damage);
+                software.transform(view, source, @intCast(bounds.w), &reference);
+                try t.expectEqualSlices(u32, &reference, &partial);
+                try t.expect(native_damage.w * native_damage.h < 64);
+                source[cell] ^= 0xffffff;
+            }
             for (0..2) |iteration| {
                 const converted = frame.assets.converted_pixels;
                 const draws = engine.primitive_draws;

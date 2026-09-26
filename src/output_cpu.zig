@@ -4,6 +4,7 @@ const std = @import("std");
 const r4os = @import("r4os");
 const gfx = @import("r4gfx");
 const a = r4os.abi;
+const surface = @import("surface.zig");
 const geometry = @import("output_geometry.zig");
 const scene_buffer = @import("scene_buffer.zig");
 const renderer = @import("gfx_renderer.zig");
@@ -19,6 +20,11 @@ pub const Output = struct {
     capture: remote.Capture,
     capture_cursor: remote.Cursor = .{},
     capture_damage: ?@import("surface.zig").Rect = null,
+    history: @import("output_damage.zig").History = .{},
+    repaint: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    history_view: ?geometry.topology.Viewport = null,
+    history_profile: gfx.R4GfxColorProfile = std.mem.zeroes(gfx.R4GfxColorProfile),
+    history_limited: bool = false,
     serial: u64 = 0,
     reported: [3]bool = @splat(false),
     view: geometry.topology.Viewport,
@@ -118,6 +124,7 @@ pub const Output = struct {
                     self.capture.complete(i, frame.frame.image, now);
                 } else {
                     self.capture.discarded(i);
+                    self.history.rejected(i);
                     if (frame.result == 3) self.discarded +|= 1
                     else { self.failed +|= 1; self.lost = true; }
                 }
@@ -153,6 +160,13 @@ pub const Output = struct {
             self.abandon(); return null;
         }
         const bounds = geometry.logical(self.view) catch { self.abandon(); return null; };
+        const profile_handle = if (self.profile) |value| value.handle else std.mem.zeroes(gfx.R4GfxColorProfile);
+        if (self.history_view == null or !std.meta.eql(self.history_view.?, self.view) or
+            !std.meta.eql(profile_handle, self.history_profile) or self.limited != self.history_limited) {
+            self.history = .{};
+            self.history_view = self.view; self.history_profile = profile_handle; self.history_limited = self.limited;
+        }
+        self.history.invalidate(self.capture_damage orelse bounds);
         var storage: []u8 = @as([*]u8, @ptrFromInt(self.mapping.cpu_address))[0..@intCast(bytes)];
         if (self.profile != null or self.limited or self.view.rotation != .normal or self.view.scale != 120) {
             const length = scene_buffer.SceneBuffer.requiredBytes(bounds.w, bounds.h) orelse { self.abandon(); return null; };
@@ -160,12 +174,14 @@ pub const Output = struct {
             if (self.scratch.len < length) {
                 const replacement = self.graphics.allocator.alloc(u8, length) catch { self.abandon(); return null; };
                 self.graphics.allocator.free(self.scratch); self.scratch = replacement;
+                self.history = .{};
             }
             storage = self.scratch;
         }
         if (!self.scene.attach(storage, bounds.w, bounds.h)) { self.abandon(); return null; }
         self.scene.origin_x = bounds.x; self.scene.origin_y = bounds.y;
         self.color_composition.begin(self.graphics.allocator, &self.scene) catch { self.abandon(); return null; };
+        self.repaint = self.history.required(frame.slot - 1, bounds);
         self.frame_started_ns = self.sys.monotonicNanoseconds() orelse 0;
         return &self.scene;
     }
@@ -181,19 +197,26 @@ pub const Output = struct {
         self.capture.stageProfile(frame.slot - 1, self.scene.pixels.?, self.sys.monotonicNanoseconds() orelse 0);
         @import("presentation_profile.zig").end(.cpu_capture, phase_stamp);
         phase_stamp = @import("presentation_profile.zig").stamp();
+        const native_damage = physicalDamage(self.view, self.repaint) catch { self.abandon(); return false; };
         if (self.profile != null or self.limited or self.view.rotation != .normal or self.view.scale != 120) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
-            transform(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]);
+            transformRegion(self.view, self.scene.pixels.?, @intCast(self.scene.width), pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h], native_damage);
         }
         if (self.profile) |*profile| {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
-            profile.applySdr(pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h], self.view.pixel_w, self.view.pixel_h) catch {
-                self.abandon(); return false;
-            };
+            for (@intCast(native_damage.y)..@intCast(native_damage.bottom())) |row| {
+                const start = row * self.view.pixel_w + @as(usize, @intCast(native_damage.x));
+                profile.applySdr(pixels[start..][0..@intCast(native_damage.w)], @intCast(native_damage.w), 1) catch {
+                    self.abandon(); return false;
+                };
+            }
         }
         if (self.limited) {
             const pixels: [*]u32 = @ptrFromInt(self.mapping.cpu_address);
-            for (pixels[0..@as(usize, self.view.pixel_w) * self.view.pixel_h]) |*pixel| pixel.* = catalog.color.limitedRgb8(pixel.*);
+            for (@intCast(native_damage.y)..@intCast(native_damage.bottom())) |row| {
+                const start = row * self.view.pixel_w + @as(usize, @intCast(native_damage.x));
+                for (pixels[start..][0..@intCast(native_damage.w)]) |*pixel| pixel.* = catalog.color.limitedRgb8(pixel.*);
+            }
         }
         @import("presentation_profile.zig").end(.cpu_transform, phase_stamp);
         phase_stamp = @import("presentation_profile.zig").stamp();
@@ -215,6 +238,7 @@ pub const Output = struct {
             if (rc != gfx.status_busy and rc != gfx.status_occluded) self.lost = true;
             return false;
         }
+        self.history.accepted(frame.slot - 1);
         self.acquired = null; self.pending = true;
         self.reported[frame.slot - 1] = false;
         self.last_submitted = frame.slot - 1;
@@ -226,6 +250,7 @@ pub const Output = struct {
         return true;
     }
     fn abandon(self: *Output) void {
+        if (self.acquired) |frame| self.history.rejected(frame.slot - 1);
         self.color_composition.cancel(&self.scene);
         if (self.mapping.lease.id != 0) {
             if (self.draw.gfxBufferUnmap(&self.mapping.lease) != a.gfx_buffer_result_ok) { self.lost = true; return; }
@@ -270,7 +295,16 @@ pub const Output = struct {
     }
 };
 pub fn transform(view: geometry.topology.Viewport, source: []const u32, stride: usize, output: []u32) void {
-    for (0..view.pixel_h) |y| for (0..view.pixel_w) |x| {
+    transformRegion(view, source, stride, output, geometry.native(view));
+}
+pub fn physicalDamage(view: geometry.topology.Viewport, damage: surface.Rect) !surface.Rect {
+    if (damage.isEmpty()) return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    const value = try view.physicalDamage(.{ .x = damage.x, .y = damage.y, .w = @intCast(damage.w), .h = @intCast(damage.h) });
+    const r = value orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+    return .{ .x = r.x, .y = r.y, .w = @intCast(r.w), .h = @intCast(r.h) };
+}
+pub fn transformRegion(view: geometry.topology.Viewport, source: []const u32, stride: usize, output: []u32, damage: surface.Rect) void {
+    for (@intCast(damage.y)..@intCast(damage.bottom())) |y| for (@intCast(damage.x)..@intCast(damage.right())) |x| {
         const oriented: [2]usize = switch (view.rotation) {
             .normal => .{ x, y }, .clockwise90 => .{ view.pixel_h - 1 - y, x },
             .clockwise180 => .{ view.pixel_w - 1 - x, view.pixel_h - 1 - y }, .clockwise270 => .{ y, view.pixel_w - 1 - x },

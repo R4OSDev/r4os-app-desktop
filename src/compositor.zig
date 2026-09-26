@@ -673,3 +673,5 @@ fn drawOverlay(
         .message_box => |box| draw.messageBoxDialog(ctx, screen_w, screen_h, box, hover_target, pressed_target),
     }
 }
+
+test { _ = @import("output_damage.zig"); }

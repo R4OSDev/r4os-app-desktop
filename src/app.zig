@@ -5904,9 +5904,10 @@ pub const App = struct {
             } else if (slot.software) |owner| {
                 owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
                 const canvas = owner.begin(self.last_input_ns) orelse continue;
-                self.ctx.beginSceneClipped(canvas, bounds);
+                const repair = owner.repaint;
+                self.ctx.beginSceneClipped(canvas, repair);
                 const profile_paint = @import("presentation_profile.zig").stamp();
-                if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(bounds, &offsets, &views);
+                if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(repair, &offsets, &views);
                 self.ctx.endScene();
                 @import("presentation_profile.zig").end(.output_paint, profile_paint);
                 const profile_finish = @import("presentation_profile.zig").stamp();
