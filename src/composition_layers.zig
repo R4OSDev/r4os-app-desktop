@@ -22,7 +22,8 @@ pub const Entry = struct {
 };
 pub const Command = struct { entry: u8, scissor: surface.Rect };
 pub const ColorScratch = struct {
-    pub const side = 64;
+    pub const side = @import("composition_tiles.zig").side;
+    tiles: @import("composition_tiles.zig").Index = .{},
     linear: [side * side * 4]u16 = undefined,
     encoded: [side * side]u32 = undefined,
     touched: [side]u64 = @splat(0),

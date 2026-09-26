@@ -7,7 +7,9 @@ const layers = @import("composition_layers.zig");
 const scene = @import("scene_buffer.zig");
 const Rect = @import("surface.zig").Rect;
 const side = layers.ColorScratch.side;
-pub const Stats = struct { commands: u64 = 0, pixels: u64 = 0, direct_pixels: u64 = 0 };
+const tiles = @import("composition_tiles.zig");
+comptime { std.debug.assert(layers.command_capacity <= tiles.capacity); }
+pub const Stats = struct { commands: u64 = 0, pixels: u64 = 0, direct_pixels: u64 = 0, tiles: u64 = 0, candidates: u64 = 0 };
 /// Retained CPU capture belongs to the output that consumes it. It never
 /// borrows the asynchronous GPU worker's layer storage.
 pub const Owner = struct {
@@ -37,6 +39,7 @@ pub const Owner = struct {
         self.stats.commands +|= result.commands;
         self.stats.pixels +|= result.pixels;
         self.stats.direct_pixels +|= result.direct_pixels;
+        self.stats.tiles +|= result.tiles; self.stats.candidates +|= result.candidates;
     }
     pub fn cancel(self: *Owner, canvas: *scene.SceneBuffer) void {
         canvas.layer_hook = null;
@@ -108,10 +111,9 @@ fn bits(width: u32) u64 {
 /// A final opaque internal SDR layer needs neither the covered destination
 /// nor an sRGB -> FP16 -> sRGB round trip. External images retain COLOR_V1
 /// metadata handling. A partial or translucent top layer uses normal blending.
-fn copyOpaqueTile(cache: *const layers.Cache, tile: Rect, target: *scene.SceneBuffer) bool {
-    var index = cache.command_count;
-    while (index != 0) {
-        index -= 1;
+fn copyOpaqueTile(cache: *const layers.Cache, tile: Rect, target: *scene.SceneBuffer, candidates: *const tiles.Mask) bool {
+    var ordered = candidates.iterator(.{ .direction = .reverse });
+    while (ordered.next()) |index| {
         const command = cache.commands[index];
         const clip = layers.intersect(tile, command.scissor) orelse continue;
         const entry = &cache.entries[command.entry];
@@ -157,52 +159,52 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
     const workspace = try cache.colorStorage();
     target.flushPending();
     const existing = image(@intFromPtr(destination.ptr), destination.len * 4, @as(u64, @intCast(target.width)) * 4, @intCast(target.width), @intCast(target.height), false, true);
-    var y: i32 = 0;
-    while (y < target.height) : (y += side) {
-        var x: i32 = 0;
-        while (x < target.width) : (x += side) {
-            const tile: Rect = .{ .x = target.origin_x + x, .y = target.origin_y + y, .w = @min(side, target.width - x), .h = @min(side, target.height - y) };
-            var active = false;
-            for (cache.commands[0..cache.command_count]) |command| if (layers.intersect(tile, command.scissor) != null) {
-                active = true;
-                break;
-            };
-            if (!active) continue;
-            if (copyOpaqueTile(cache, tile, target)) {
-                const count = @as(u64, @intCast(tile.w)) * @as(u32, @intCast(tile.h));
-                stats.commands +|= 1;
-                stats.pixels +|= count;
-                stats.direct_pixels +|= count;
-                continue;
-            }
-            @memset(&workspace.touched, 0);
-            const local = rect(0, 0, tile.w, tile.h);
-            const working = image(@intFromPtr(&workspace.linear), @sizeOf(@TypeOf(workspace.linear)), side * 8, @intCast(tile.w), @intCast(tile.h), true, false);
-            const output = image(@intFromPtr(&workspace.encoded), @sizeOf(@TypeOf(workspace.encoded)), side * 4, @intCast(tile.w), @intCast(tile.h), false, true);
-            try transform(colors, &existing, &working, rect(x, y, tile.w, tile.h), local, false, false, &stats);
-            for (cache.commands[0..cache.command_count]) |command| {
-                const clip = layers.intersect(tile, command.scissor) orelse continue;
-                const entry = &cache.entries[command.entry];
-                const source = if (entry.external) |frame| frame.cpuImage().? else
-                    image(@intFromPtr(entry.pixels.ptr), entry.pixels.len * 4, @as(u64, @intCast(entry.bounds.w)) * 4, @intCast(entry.bounds.w), @intCast(entry.bounds.h), false, false);
-                const dx = clip.x - tile.x;
-                const dy = clip.y - tile.y;
-                try transform(colors, &source, &working, rect(clip.x - entry.bounds.x, clip.y - entry.bounds.y, clip.w, clip.h), rect(dx, dy, clip.w, clip.h), true, false, &stats);
-                const mask = bits(@intCast(clip.w)) << @as(u6, @intCast(dx));
-                for (workspace.touched[@intCast(dy)..@intCast(dy + clip.h)]) |*row| row.* |= mask;
-            }
-            // Ordinary SDR UI assets already have8-bit source precision.
-            // Nearest final quantization preserves unchanged opaque UI colors;
-            // high-precision image/output conversion chooses dither explicitly.
-            try transform(colors, &working, &output, local, local, false, false, &stats);
-            for (0..@intCast(tile.h)) |row| {
-                const offset = (@as(usize, @intCast(y)) + row) * @as(usize, @intCast(target.width)) + @as(usize, @intCast(x));
-                var mask = workspace.touched[row];
-                while (mask != 0) {
-                    const start: u6 = @intCast(@ctz(mask));
-                    const count: u32 = @intCast(@ctz(~(mask >> start)));
-                    @memcpy(destination[offset + start ..][0..count], workspace.encoded[row * side + start ..][0..count]);
-                    mask &= ~(bits(count) << start);
+    workspace.tiles.init(cache.commands[0..cache.command_count], cache.screen);
+    while (workspace.tiles.next()) |block| {
+        var y = block.y * side;
+        while (y < block.bottom * side) : (y += side) {
+            var x = block.x * side;
+            while (x < block.right * side) : (x += side) {
+                const tile: Rect = .{ .x = target.origin_x + x, .y = target.origin_y + y, .w = @min(side, target.width - x), .h = @min(side, target.height - y) };
+                stats.tiles += 1; stats.candidates += block.candidates.count();
+                if (copyOpaqueTile(cache, tile, target, &block.candidates)) {
+                    const count = @as(u64, @intCast(tile.w)) * @as(u32, @intCast(tile.h));
+                    stats.commands +|= 1;
+                    stats.pixels +|= count;
+                    stats.direct_pixels +|= count;
+                    continue;
+                }
+                @memset(&workspace.touched, 0);
+                const local = rect(0, 0, tile.w, tile.h);
+                const working = image(@intFromPtr(&workspace.linear), @sizeOf(@TypeOf(workspace.linear)), side * 8, @intCast(tile.w), @intCast(tile.h), true, false);
+                const output = image(@intFromPtr(&workspace.encoded), @sizeOf(@TypeOf(workspace.encoded)), side * 4, @intCast(tile.w), @intCast(tile.h), false, true);
+                try transform(colors, &existing, &working, rect(x, y, tile.w, tile.h), local, false, false, &stats);
+                var ordered = block.candidates.iterator(.{});
+                while (ordered.next()) |command_index| {
+                    const command = cache.commands[command_index];
+                    const clip = layers.intersect(tile, command.scissor) orelse continue;
+                    const entry = &cache.entries[command.entry];
+                    const source = if (entry.external) |frame| frame.cpuImage().? else
+                        image(@intFromPtr(entry.pixels.ptr), entry.pixels.len * 4, @as(u64, @intCast(entry.bounds.w)) * 4, @intCast(entry.bounds.w), @intCast(entry.bounds.h), false, false);
+                    const dx = clip.x - tile.x;
+                    const dy = clip.y - tile.y;
+                    try transform(colors, &source, &working, rect(clip.x - entry.bounds.x, clip.y - entry.bounds.y, clip.w, clip.h), rect(dx, dy, clip.w, clip.h), true, false, &stats);
+                    const mask = bits(@intCast(clip.w)) << @as(u6, @intCast(dx));
+                    for (workspace.touched[@intCast(dy)..@intCast(dy + clip.h)]) |*row| row.* |= mask;
+                }
+                // Ordinary SDR UI assets already have8-bit source precision.
+                // Nearest final quantization preserves unchanged opaque UI colors;
+                // high-precision image/output conversion chooses dither explicitly.
+                try transform(colors, &working, &output, local, local, false, false, &stats);
+                for (0..@intCast(tile.h)) |row| {
+                    const offset = (@as(usize, @intCast(y)) + row) * @as(usize, @intCast(target.width)) + @as(usize, @intCast(x));
+                    var mask = workspace.touched[row];
+                    while (mask != 0) {
+                        const start: u6 = @intCast(@ctz(mask));
+                        const count: u32 = @intCast(@ctz(~(mask >> start)));
+                        @memcpy(destination[offset + start ..][0..count], workspace.encoded[row * side + start ..][0..count]);
+                        mask &= ~(bits(count) << start);
+                    }
                 }
             }
         }

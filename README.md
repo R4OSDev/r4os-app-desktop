@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.86`
+- Version: `0.1.87`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -114,3 +114,13 @@ Capture metadata describes current scene damage, not backbuffer age repair.
 The existing render-test covers all rotations and 100/150/200 percent scale
 against full output; output_damage.zig covers 100 alternating images, rejected
 writes, configuration reset and independent output ownership.
+
+
+Software composition candidates (0.81.22)
+----------------------------------------
+A bounded sweep index derives disjoint active tile blocks and ordered command
+bitsets from validated scissors. It avoids visiting empty screen tiles and
+scanning every layer for each active tile. Two fixed edge arrays use 16 KB
+inside the existing budgeted color scratch. The index is rebuilt per frame.
+The existing render-test checks sparse 1024x1024 composition: 16 of 256 tiles
+and 17 instead of 4352 candidate visits, with exact unchanged/alpha pixels.

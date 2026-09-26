@@ -529,6 +529,38 @@ test "occlusion composition matches complete painter order after move hide minim
     try std.testing.expectEqualSlices(u32, &.{ 0xbcbcbc, 0x123456, 0x123456, 0x123456 }, &color_pixels);
     try std.testing.expect(cpu_owner.frames == 1 and color_scene.layer_hook == null);
     {
+        const tile_software = @import("composition_software.zig");
+        const sparse_pixels = try std.testing.allocator.alloc(u32, 1024 * 1024);
+        defer std.testing.allocator.free(sparse_pixels);
+        @memset(sparse_pixels, 0x123456);
+        var sparse_scene: scene_buffer.SceneBuffer = .{};
+        try std.testing.expect(sparse_scene.attach(std.mem.sliceAsBytes(sparse_pixels), 1024, 1024));
+        var sparse_cache = composition_layers.Cache.init(std.testing.allocator, 256 * 1024);
+        defer sparse_cache.deinit();
+        try sparse_cache.start(sparse_scene.fullRect());
+        for (0..16) |i| {
+            const area: surface.Rect = .{ .x = @as(i32, @intCast(i % 4)) * 256 + 2,
+                .y = @as(i32, @intCast(i / 4)) * 256 + 3, .w = 2, .h = 2 };
+            const sparse_layer = (try sparse_cache.begin(@intCast(i + 1), area, area)).?;
+            sparse_layer.fillRect(area, 0); try sparse_cache.end(@intCast(i + 1));
+        }
+        const alpha_area: surface.Rect = .{ .x = 2, .y = 3, .w = 1, .h = 1 };
+        const alpha = (try sparse_cache.begin(17, alpha_area, alpha_area)).?;
+        const translucent_white = [_]u32{0x80ffffff};
+        try std.testing.expect(alpha.blendArgb32(alpha_area, 2, 3, 1, 1, 1, std.mem.sliceAsBytes(&translucent_white)));
+        try sparse_cache.end(17); _ = try sparse_cache.finish();
+        const sparse_stats = try tile_software.paint(&graphics.colors, &sparse_cache, &sparse_scene);
+        try std.testing.expectEqual(@as(u64, 16), sparse_stats.tiles);
+        try std.testing.expectEqual(@as(u64, 17), sparse_stats.candidates);
+        for (sparse_pixels, 0..) |value, i| {
+            const x = i % 1024; const y = i / 1024;
+            const expected: u32 = if (x == 2 and y == 3) 0xbcbcbc else
+                if (x % 256 >= 2 and x % 256 < 4 and y % 256 >= 3 and y % 256 < 5) 0 else 0x123456;
+            try std.testing.expectEqual(expected, value);
+        }
+        std.debug.print("[desktop-cpu-tiles] sparse 1024x1024: 16/256 tiles, 17/4352 layer candidates; untouched and translucent pixels match\n", .{});
+    }
+    {
         // Exercise the actual window painter hook, including its CPU fallback.
         // This capture-only fixture owns no kernel BO and submits no GPU job.
         var front: @import("window_image.zig").Frame = .{
@@ -675,3 +707,5 @@ fn drawOverlay(
 }
 
 test { _ = @import("output_damage.zig"); }
+
+test { _ = @import("composition_tiles.zig"); }
