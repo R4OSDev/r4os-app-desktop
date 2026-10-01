@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.92`
+- Version: `0.1.93`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -25,6 +25,12 @@ resources, one-pixel damage, menus, window moves/close, occlusion and full
 reconstruction after cancellation. Warm resources must not upload again;
 the GPU canvas must remain untouched by CPU composition. These timings
 include diagnostic capture/admission and do not measure displayed FPS.
+
+`/COMPOSITIONVERIFY /TRANSITIONS` adds changing generic GUI commands,
+window/fullscreen/menu/restore/resize/occlusion/reveal/close transitions,
+the observed CE/GR queue peak and idle allocation checks. It uses the real
+window geometry owner and private frame snapshots; Window service and
+physical presentation are separate qualifications.
 
 `/COMPOSITIONREFERENCES` reuses the original glyph/indexed/alpha/ARGB and
 curve/shadow/large-image fixtures from the existing render tests. It also

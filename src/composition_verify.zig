@@ -51,13 +51,16 @@ pub fn run(ctx: *api.Context, raw: *const r4os.abi.R4XStartContext) i32 {
             ctx.write("DESKTOP offscreen: FAIL create="); ctx.println(@errorName(err)); return 1;
         };
         var passed = true;
-        owner.check() catch |err| {
+        const checked = if (argument(ctx.argsRaw(), "/TRANSITIONS")) owner.checkTransitions() else owner.check();
+        checked catch |err| {
             owner.log("FAIL stage={s} error={s}", .{ owner.stage, @errorName(err) }); passed = false;
         };
         if (!owner.destroy()) { ctx.println("DESKTOP offscreen: FAIL retirement-held"); return 1; }
         if (!passed) return 1;
     }
-    ctx.println("DESKTOP offscreen: PASS productive-painter layers+primitives readback present=none");
+    ctx.println(if (argument(ctx.argsRaw(), "/TRANSITIONS"))
+        "DESKTOP transitions: PASS producer-commands window/fullscreen/resize/occlusion queues=bounded present=none"
+    else "DESKTOP offscreen: PASS productive-painter layers+primitives readback present=none");
     return 0;
 }
 
@@ -129,6 +132,7 @@ const Owner = struct {
     frames: u64 = 0,
     compared: u64 = 0,
     max_error: u32 = 0,
+    queue_peak: usize = 0,
     reference_case: ?Reference = null,
     large_source: []u32 = &.{},
 
@@ -210,6 +214,9 @@ const Owner = struct {
         while (true) {
             const value = self.engine.advance(&self.cache, self.now());
             self.polls += 1;
+            var held: usize = 0;
+            for (self.engine.jobs) |job| if (job != null) { held += 1; };
+            self.queue_peak = @max(self.queue_peak, held);
             if (value != .pending) {
                 if (value != expected) {
                     self.log("engine result={s} reason={s}", .{ @tagName(value), if (self.engine.fault) |err| @errorName(err) else "none" });
@@ -312,6 +319,48 @@ const Owner = struct {
         try self.frame("reconstructed", full);
         self.log("PASS frames={d} pixels={d} max-LSB={d} polls={d} CPU-scene=untouched idle-jobs=0 present=none", .{
             self.frames, self.compared, self.max_error, self.polls });
+    }
+    fn checkTransitions(self: *Owner) !void {
+        // Generic GUI commands use the ordinary frame-snapshot/painter path.
+        // These are private frames, not a Window-registered application or a
+        // display-capability override. Window geometry uses its real owner.
+        const window = &self.fixture.windows[2];
+        window.normal_x = window.x; window.normal_y = window.y;
+        window.normal_w = window.w; window.normal_h = window.h;
+        const original = window.geometry();
+        const work = surface.workArea(width, height, @import("theme.zig").taskbar_h);
+        self.fixture.commands[2][0].rgb = 0x804020;
+        try self.frame("producer-window-a", full);
+        self.fixture.commands[2][0].rgb = 0x2060a0;
+        self.fixture.commands[2][1].rgb = 0xcc8040;
+        try self.frame("producer-window-b", full);
+        if (!window.setFullscreen(true, full, work) or !std.meta.eql(window.geometry(), full)) return error.Geometry;
+        try self.frame("producer-fullscreen", full);
+        self.fixture.menu_open = true;
+        try self.frame("producer-fullscreen-menu", full);
+        self.fixture.menu_open = false;
+        if (!window.setFullscreen(false, full, work) or !std.meta.eql(window.geometry(), original)) return error.Geometry;
+        try self.frame("producer-restored", full);
+        window.w += 48; window.h += 32;
+        try self.frame("producer-resized", full);
+        const cover = &self.fixture.windows[3];
+        cover.visible = true;
+        if (!cover.setFullscreen(true, full, work)) return error.Geometry;
+        self.fixture.active = 3;
+        try self.frame("producer-occluded", full);
+        cover.visible = false; self.fixture.active = 2;
+        try self.frame("producer-revealed", full);
+        window.visible = false; self.fixture.active = 1;
+        try self.frame("producer-closed", full);
+        const reserved = self.engine.reserved_bytes;
+        const draws = self.engine.render_jobs;
+        const uploads = self.engine.uploaded_bytes;
+        for (0..16) |_| if (self.engine.advance(&self.cache, self.now()) != .copied) return error.Idle;
+        if (self.queue_peak == 0 or self.queue_peak > self.engine.jobs.len or
+            self.engine.reserved_bytes != reserved or self.engine.render_jobs != draws or self.engine.uploaded_bytes != uploads)
+            return error.Idle;
+        self.log("PASS transitions frames={d} pixels={d} max-LSB={d} queue-peak={d}/{d} idle-allocation=0 idle-jobs=0 present=none", .{
+            self.frames, self.compared, self.max_error, self.queue_peak, self.engine.jobs.len });
     }
     fn sampleColor(x: usize, y: usize) u32 {
         return (@as(u32, @intCast(x % 256)) << 16) | (@as(u32, @intCast(y)) * 64 << 8) | 0x33;

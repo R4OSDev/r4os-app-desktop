@@ -298,3 +298,14 @@ Aktuelle Grenzen: 64 Ebenen, 512 Kompositionsbereiche, 128 MB CPU-Ebenenbudget,
 Fortschrittsbudget inzwischen 64 Schritte oder 250 us; lineares FP16-Working,
 Ausgabepuffer und Metadaten gehoeren ebenfalls zur aktuellen Ressourcenbilanz.
 Gemessene Diagnosezeiten sind keine ausgegebenen FPS.
+
+Produzentenwechsel (0.82.12 / R4DESK 0.1.93)
+------------------------------------------
+/COMPOSITIONVERIFY /TRANSITIONS nutzt normale GUI-Framekommandos und den
+Window-Geometriebesitzer fuer wechselnde Inhalte, Vollbild, Menue, Restore,
+Resize, Verdeckung, Wiederaufdecken und Schliessen. Jeder private native
+Frame wird gegen denselben produktiven Softwarepainter gelesen. Die Probe
+erfasst die hoechste Zahl gehaltener CE-/GR-Jobs und verlangt bei Idle
+unveraenderte Ressourcen und keine neuen Jobs oder Uploads. Sie meldet keine
+Window-App an und fuehrt keinen Displayflip aus. Die echte Window-/Swapchain-
+Integration und modellierten Present-/Retirementregeln werden separat geprueft.
