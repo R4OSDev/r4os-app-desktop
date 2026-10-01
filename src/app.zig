@@ -556,7 +556,7 @@ pub const App = struct {
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
         if (hasSmokeArg(self.ctx.argsRaw())) self.runSmokeAndPoweroff();
 
-        while (true) {
+        while (!self.ctx.sys.programShouldClose()) {
             if (self.headless_acceptance_terminal) {
                 self.ctx.sleepTicks(self.loop_sleep_ticks);
                 continue;
@@ -614,6 +614,7 @@ pub const App = struct {
             @import("presentation_profile.zig").finish();
             @import("startup_diagnosis.zig").flush();
         }
+        return 0;
     }
 
     // 0.56.28: Im aktiven Fall kurz schlafen (Responsiveness fuer

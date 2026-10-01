@@ -31,6 +31,19 @@ fn argument(args: [*:0]const u8, wanted: []const u8) bool {
 }
 
 pub fn run(ctx: *api.Context, raw: *const r4os.abi.R4XStartContext) i32 {
+    if (argument(ctx.argsRaw(), "/CAPTURE")) {
+        const owner = Owner.create(ctx, raw, true) catch |err| {
+            ctx.write("DESKTOP capture-verify: FAIL create="); ctx.println(@errorName(err)); return 1;
+        };
+        var passed = true;
+        owner.checkPublishedCapture(argument(ctx.argsRaw(), "/CLIENT")) catch |err| {
+            owner.log("FAIL capture stage={s} error={s}", .{ owner.stage, @errorName(err) }); passed = false;
+        };
+        if (!owner.destroy()) { ctx.println("DESKTOP capture-verify: FAIL retirement-held"); return 1; }
+        if (!passed) return 1;
+        ctx.println("DESKTOP capture-verify: PASS native-pixels screenshot publication retirement present=none");
+        return 0;
+    }
     if (argument(ctx.argsRaw(), "/COMPOSITIONREFERENCES")) {
         for (std.enums.values(Reference)) |kind| {
             const owner = Owner.create(ctx, raw, true) catch |err| {
@@ -76,6 +89,7 @@ const Fixture = struct {
     wallpaper: [192 * 132]u32 = undefined,
     active: usize = 2,
     menu_open: bool = false,
+    cursor_visible: bool = true,
     pixel: u32 = 0x55aa88,
     fn init(self: *Fixture) void {
         self.menu = @import("start_menu.zig").Menu.initDefault();
@@ -98,7 +112,7 @@ const Fixture = struct {
             @import("desktop_items.zig").no_selection, self.menu_open, &self.menu, 0, false, 0, 0, false, 0, 0,
             .none, .{}, false, "Terminal", "", "", &.{}, &.{},
             .{ .width = 192, .height = 132, .pixels = &self.wallpaper }, .{}, 8, 437, false, false,
-            600, 300, true, .none, .none, damage);
+            600, 300, self.cursor_visible, .none, .none, damage);
         // A tiny independent desktop overlay supplies alpha/mask/clip cases
         // and a one-pixel update outside windows, menus and the taskbar.
         if (ctx.beginLayer(31, .{ .x = 552, .y = 32, .w = 48, .h = 48 })) |target| {
@@ -472,6 +486,94 @@ const Owner = struct {
         }
         try capture_owner.close();
         self.log("remote-demand off=no-storage on=64-matching-pixels CE=256B off=retired publication=none", .{});
+    }
+    fn checkPublishedCapture(self: *Owner, client: bool) !void {
+        const verification = @import("capture_verify.zig");
+        var session = try verification.Session.init(self.ctx, client);
+        defer session.close();
+        self.fixture.cursor_visible = false;
+        const capture_owner = &self.remote;
+        const count: usize = if (client) 3 else 7;
+        for (0..count) |phase| {
+            self.stage = "capture-scene";
+            if (phase == 1) { self.fixture.windows[2].x += 47; self.fixture.windows[2].y -= 19; }
+            if (phase == 2) {
+                self.fixture.menu_open = true;
+                if (client) self.fixture.windows[2].w -= 53;
+            }
+            if (phase == 3) { self.fixture.menu_open = false; self.fixture.windows[2].w -= 53; }
+            const detached = phase == 6 or (client and phase == 2);
+            if (detached) {
+                // Inject a source detach through the real capture owner, not
+                // a physical connector event. Old CPU leases stay valid.
+                capture_owner.invalidate();
+                if (self.ctx.desk.remoteFrameSourceReset() != 0) return error.SourceReset;
+                self.fixture.cursor_visible = true;
+            }
+            try self.frame("capture", full);
+            var view: @import("output_geometry.zig").topology.Viewport = .{ .pixel_w = width, .pixel_h = height };
+            if (phase == 4) view.scale = 150;
+            if (phase == 5) view.rotation = .clockwise90;
+            const bounds = try @import("output_geometry.zig").logical(view);
+            const pointer: @import("remote_capture.zig").Cursor = .{
+                .x = if (detached) 600 else if (phase == 1) -3 else if (phase == 2) bounds.w - 5 else 320,
+                .y = if (detached) 300 else if (phase == 1) -2 else if (phase == 2) bounds.h - 6 else 160,
+                .visible = true, .separate = !detached,
+            };
+            const source = self.engine.outputs[self.engine.output_index].resource;
+            if (phase == 0) {
+                capture_owner.record(0, self.cache.frame, bounds, view, pointer);
+                capture_owner.complete(0, source, self.now());
+                if (capture_owner.reader.stats.frames != 0 or capture_owner.reader.staging.slot != 0) return error.UnwantedCapture;
+                try session.acquire();
+            }
+            capture_owner.setDemand(self.ctx.remoteFrameConsumers() != 0);
+            try capture_owner.prepare(view, self.engine.output_format, self.engine.output_color);
+            capture_owner.record(0, self.cache.frame, bounds, view, pointer);
+            capture_owner.complete(0, source, self.now());
+            for (capture_owner.reader.jobs) |job| if (job) |value| {
+                self.log("capture CE timeline={d} point={d} device={d} reset={d} bytes={d}", .{
+                    value.fence.timeline, value.fence.point, value.fence.device_generation, value.fence.reset_generation, value.bytes });
+            };
+            const deadline = self.now() + timeout;
+            while (!capture_owner.ready) {
+                capture_owner.poll(self.now()); self.ctx.taskYield();
+                if (self.now() >= deadline) return error.CaptureFailed;
+            }
+            if (capture_owner.reader.sourceHeld() or capture_owner.reader.pending()) return error.CaptureRetention;
+            var image = capture_owner.image() orelse return error.CaptureFailed;
+            // Inverse orientation reference, independent of nativeIndex():
+            // normal, 125% center samples, or a quarter-turn permutation.
+            var maximum: u32 = 0;
+            for (image.pixels.?, 0..) |actual, i| {
+                const x = i % @as(usize, @intCast(image.width));
+                const y = i / @as(usize, @intCast(image.width));
+                const index = if (phase == 5) (height - 1 - x) * width + y else if (phase == 4)
+                    ((2 * y + 1) * 5 / 8) * width + (2 * x + 1) * 5 / 8 else i;
+                const expected = self.reference.pixels.?[index];
+                for ([_]u5{ 0, 8, 16 }) |shift| maximum = @max(maximum,
+                    @abs(@as(i32, @intCast((actual >> shift) & 255)) - @as(i32, @intCast((expected >> shift) & 255))));
+            }
+            if (maximum > 1) return error.OrientedPixels;
+            self.stage = "capture-publication";
+            try session.publish(&image, pointer, phase);
+            capture_owner.acknowledge(true);
+            self.log("capture phase={d} geometry={d}x{d} pixels={d} max-LSB={d} copy-bytes={d} cpu-read={d} oriented={d} source-held=false", .{
+                phase, image.width, image.height, image.pixels.?.len, maximum,
+                capture_owner.reader.stats.copy_bytes, capture_owner.reader.stats.cpu_read_bytes, capture_owner.oriented_bytes });
+            try session.waitClient(phase);
+        }
+        try session.finish();
+        const frames = capture_owner.reader.stats.frames;
+        const bytes = capture_owner.reader.stats.copy_bytes;
+        capture_owner.setDemand(false);
+        capture_owner.poll(self.now());
+        try capture_owner.close();
+        capture_owner.record(0, self.cache.frame + 1, full, .{ .pixel_w = width, .pixel_h = height }, .{});
+        capture_owner.complete(0, self.engine.outputs[self.engine.output_index].resource, self.now());
+        if (capture_owner.reader.stats.frames != frames or capture_owner.reader.stats.copy_bytes != bytes or
+            capture_owner.reader.staging.slot != 0 or capture_owner.reader.pixels.len != 0) return error.UnwantedCapture;
+        self.log("capture last-reader=0 off-jobs=0 off-storage=0 frames={d} copy-bytes={d}", .{ frames, bytes });
     }
     fn destroy(self: *Owner) bool {
         self.remote.setDemand(false);

@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.93`
+- Version: `0.1.97`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -38,9 +38,37 @@ checks fractional nearest sampling, transported image boundaries, the 16-draw
 batch limit, 1-MB staging, budget rejection, Busy and demand-driven capture.
 The capture test has no RemoteFrame publication or visibility claim.
 
-Both commands require native R4GFX render/copy operations and reject missing
-capabilities. Physical GA106 results and software lifecycle evidence belong
-to roadmap 0.82.11; active output and visible operation remain 0.82.37/38.
+`/COMPOSITIONVERIFY /CAPTURE` follows private native scenes through the
+productive capture owner, public immutable snapshots and Print Screen BMP
+worker. It checks file pixels, window changes, 125% capture scaling, rotation,
+separate and embedded cursors, held snapshots across source reset, the
+per-program lease limit and demand retirement. It requires no existing capture
+readers and temporarily owns the public capture source until process exit.
+These are diagnostic publications; no display visibility is asserted.
+
+Adding `/CLIENT` runs three frames with a bounded external-client handshake.
+The final frame resizes a window and resets the capture source while an
+external client may still be receiving the previous immutable image.
+`C:\TEMP\CAPVERIFY.TXT` names each completed phase and BMP; writing the next
+phase number (1, 2, then 3) to `C:\TEMP\CAPVERIFY.NEXT` advances it. Both files
+must be absent before starting. Each wait is limited to 60 seconds. The client
+must disconnect before acknowledging the final phase so retirement can be
+checked. No client or network transport is silently simulated.
+SFTP acknowledgments use new files; remove only the preceding acknowledged
+`CAPVERIFY.NEXT` before uploading its successor.
+
+The normal Desktop event loop observes its generation-bound Close request
+and returns through the existing resource destructors and process retirement.
+Normal startup first claims its exact Desktop generation in WindowService,
+before creating display owners or replacing capture state. A second Desktop
+cannot displace the active host. A normally spawned replacement requires
+Kernel 0.1.238 and WindowService 0.1.11; it owns the desktop without waiting
+to be attached as an application window.
+
+These commands require native R4GFX render/copy operations and reject missing
+capabilities. Physical GA106 composition evidence belongs to 0.82.11/12;
+capture and process lifecycle evidence belongs to 0.82.14. Active output and
+visible operation remain 0.82.37/38.
 
 Settings > Display opens the existing Appearance application with `/DISPLAY`
 for common SDR mode selection and confirmation. Both the built-in menu and

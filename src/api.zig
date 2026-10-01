@@ -364,6 +364,29 @@ pub const Context = struct {
         return self.desk.consolePushInput(instance_id, data);
     }
 
+    /// Claim the exact host generation before creating output owners or
+    /// resetting public capture/window state. A second Desktop exits without
+    /// touching the running host. Ordinary service recovery remains in App.
+    pub fn claimDesktopOwner(self: *Context) i32 {
+        const until = self.ticks() +| self.sys.ticksFromMilliseconds(2000);
+        while (self.ticks() < until and !self.sys.programShouldClose()) {
+            if (self.openWindowService()) {
+                const request: r4os.abi.TrayDesktopExchange = .{ .desktop_owner = self.self_handle };
+                var response: r4os.abi.TrayDesktopExchange = .{};
+                const rc = self.trayDesktopExchange(r4os.abi.tray_service_op_desktop_sync, &request, &response);
+                if (rc == r4os.abi.service_api_result_ok) {
+                    if (response.magic != r4os.abi.tray_desktop_exchange_magic or
+                        response.version != r4os.abi.tray_desktop_exchange_version or
+                        response.size != @sizeOf(r4os.abi.TrayDesktopExchange) or
+                        !std.meta.eql(response.desktop_owner, self.self_handle)) return r4os.abi.tray_result_bad_request;
+                    return response.result;
+                }
+            }
+            self.sleepTicks(1);
+        }
+        return r4os.abi.service_api_result_no_endpoint;
+    }
+
     pub fn trayDesktopExchange(
         self: *Context,
         op: u16,

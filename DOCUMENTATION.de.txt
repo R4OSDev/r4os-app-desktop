@@ -3,6 +3,29 @@
 
 R4DESK ist die externe Desktop-Anwendung und der Desktop-Host von R4OS.
 
+0.1.97 ergaenzt /COMPOSITIONVERIFY /CAPTURE: private native Szenen durchlaufen
+den produktiven Capturebesitzer, oeffentliche unveraenderliche Snapshots und
+den Print-Screen-BMP-Worker. Geprueft werden Dateipixel, Fensterwechsel,
+125-Prozent-Aufnahmeskalierung, Drehung, separate/eingebrannte Cursor,
+gehaltene Bilder ueber Quellreset, Leihgrenze und Bedarfsabbau. Der Einstieg
+verlangt anfangs keine aktiven Captureleser und uebernimmt bis zum Prozessende
+den oeffentlichen Publisher. Die Publikation belegt keine physische Ausgabe.
+/CLIENT begrenzt dies auf drei Frames mit Dateihandshake: CAPVERIFY.TXT unter
+C:\TEMP nennt Phase und BMP; CAPVERIFY.NEXT erwartet die Nummer 1, 2 oder 3.
+Der letzte Frame kombiniert Fenstergroessenaenderung und Capture-Quellreset
+mit einem moeglicherweise noch langsamen externen Leser des vorherigen Bilds.
+Beide Dateien muessen anfangs fehlen. Jede Wartephase endet nach 60 Sekunden;
+vor Quittung der letzten Phase muss der externe Client geschlossen sein.
+Dieser Einstieg aktiviert weder einen TV noch eine simulierte Netzwerksitzung.
+SFTP-Quittungen legen neue Dateien an; nur die vorherige, bereits bestaetigte
+CAPVERIFY.NEXT vor dem Upload ihres Nachfolgers entfernen.
+Die normale Ereignisschleife beachtet jetzt den instanzgebundenen Close-Auftrag
+und kehrt ueber vorhandene Ressourcendestruktoren und den Prozessabbau zurueck.
+Vor Ausgabe- und Capturebesitzern quittiert WINSVC die genaue Desktopinstanz.
+Ein zweiter Desktop beendet sich, bevor er Zustand des laufenden Hosts
+veraendert. Normale Ersatzprozesse benoetigen Kernel 0.1.238 und WINSVC 0.1.11;
+sie warten nicht auf die Einbindung als eigenes Anwendungsfenster.
+
 Ab 0.1.45 oeffnet Settings -> Display APPEARANCE.R4X /DISPLAY fuer die
 gemeinsame SDR-Moduswahl. Standardmenue und MENU.R4S verwenden denselben
 Starteintrag. Der bestehende Output-Revisionspfad uebernimmt nach quittiertem

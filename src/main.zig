@@ -17,6 +17,11 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
     defer ctx.closeWindowService();
     if (@import("composition_verify.zig").requested(ctx.argsRaw()))
         return @import("composition_verify.zig").run(&ctx, r4_app.startContext());
+    const desktop_owner = ctx.claimDesktopOwner();
+    if (desktop_owner != r4os.abi.tray_result_ok) {
+        ctx.write("R4DESK host unavailable: result="); ctx.printI32(desktop_owner); ctx.println("");
+        return desktop_owner;
+    }
     ctx.graphics = gfx_renderer.Renderer.create(ctx.allocator(), r4_app.startContext());
     defer if (ctx.graphics) |graphics| {
         ctx.write("R4DESK gfx: batches=");
