@@ -4,13 +4,37 @@
 
 ## Package
 
-- Version: `0.1.89`
+- Version: `0.1.92`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+## Offscreen composition diagnostics
+
+`/COMPOSITIONVERIFY` runs bounded desktop scenes through the productive
+compositor, painter, layer cache and GPU engine. An explicit readback
+destination completes after CE/GR retirement without receiver queries,
+swapchain creation, presentation or Window service registration. Normal
+Desktop startup retains its display destination.
+
+The diagnostic compares 640x400 software and native frames for cold/warm
+resources, one-pixel damage, menus, window moves/close, occlusion and full
+reconstruction after cancellation. Warm resources must not upload again;
+the GPU canvas must remain untouched by CPU composition. These timings
+include diagnostic capture/admission and do not measure displayed FPS.
+
+`/COMPOSITIONREFERENCES` reuses the original glyph/indexed/alpha/ARGB and
+curve/shadow/large-image fixtures from the existing render tests. It also
+checks fractional nearest sampling, transported image boundaries, the 16-draw
+batch limit, 1-MB staging, budget rejection, Busy and demand-driven capture.
+The capture test has no RemoteFrame publication or visibility claim.
+
+Both commands require native R4GFX render/copy operations and reject missing
+capabilities. Physical GA106 results and software lifecycle evidence belong
+to roadmap 0.82.11; active output and visible operation remain 0.82.37/38.
 
 Settings > Display opens the existing Appearance application with `/DISPLAY`
 for common SDR mode selection and confirmation. Both the built-in menu and

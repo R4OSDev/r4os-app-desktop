@@ -44,6 +44,9 @@ pub const Engine = struct {
     output_index: usize = 0,
     chain: gfx.R4GfxSwapchain = std.mem.zeroes(gfx.R4GfxSwapchain),
     presentation: ?gfx.R4GfxPresentationInfo = null,
+    // Explicit render-only consumer. Completion proves retired CE/GR work,
+    // never visibility. Normal desktop owners retain the display destination.
+    destination: enum { display, readback } = .display,
     chain_status: ?gfx.R4GfxSwapchainStatus = null,
     acquired: ?gfx.R4GfxSwapchainFrame = null,
     chain_frames: [gfx.swapchain_image_capacity]u64 = @splat(0),
@@ -105,6 +108,7 @@ pub const Engine = struct {
     snapshot_assets: [primitive_assets.texture_capacity]u64 = @splat(0),
     reuse_layers: [layers.capacity]bool = @splat(false),
     reserved_bytes: u64 = 0,
+    primitive_batch_peak: usize = 0,
     budget_bytes: u64 = 256 * 1024 * 1024,
 
     pub fn init(client: *const gfx.DeviceV1Client, colors: *const gfx.ColorV1Client, device: *const gfx.R4GfxDevice) Engine { return .{ .client = client, .colors = colors, .device = device }; }
@@ -132,7 +136,8 @@ pub const Engine = struct {
         self.color_output = !std.meta.eql(description, color.description(false, true));
     }
     pub fn requiredOperations(self: *const Engine) u32 {
-        return gfx.device_gpu_render | gfx.device_gpu_present | gfx.device_gpu_copy_rows |
+        return gfx.device_gpu_render | gfx.device_gpu_copy_rows |
+            @as(u32, if (self.destination == .display) gfx.device_gpu_present else 0) |
             @as(u32, if (self.color_output) gfx.device_gpu_color else 0);
     }
     pub fn active(self: *const Engine) bool { return self.phase != .idle; }
@@ -304,7 +309,7 @@ pub const Engine = struct {
         try self.stateResource(&self.blit, gfx.resource_pipeline, gfx.render_operation_blit);
         try self.stateResource(&self.sampler, gfx.resource_sampler, gfx.render_sampler_nearest);
         var presentation: ?gfx.R4GfxPresentationInfo = null;
-        for (0..8) |head| {
+        for (0..if (self.destination == .display) @as(usize, 8) else 0) |head| {
             if (self.head) |selected| if (selected != head) continue;
             var value: gfx.R4GfxPresentationInfo = undefined;
             if (self.client.presentation_info(self.device, @intCast(head), &value) != gfx.status_ok or
@@ -811,6 +816,7 @@ pub const Engine = struct {
                 try self.track(slot, handle, null, 0, 0);
                 self.next_primitive += count; self.render_jobs +|= 1;
                 self.primitive_jobs +|= 1; self.primitive_draws +|= count;
+                self.primitive_batch_peak = @max(self.primitive_batch_peak, count);
             },
             .upload => {
                 if (self.stage_job != null) return error.Busy;
@@ -893,7 +899,7 @@ pub const Engine = struct {
                 } else try accepted(self.client.render_submit(self.device, &request, &handle));
                 try self.track(slot, handle, null, 0, 0);
                 self.render_jobs +|= 1;
-                self.phase = .present;
+                self.phase = if (self.destination == .display) .present else .drain;
             },
             .present => {
                 if (self.chain.slot != 0) {

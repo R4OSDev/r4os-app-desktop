@@ -15,6 +15,8 @@ pub fn r4_app_main(r4_app: *r4os.App) i32 {
     var colors = @import("r4gfx").ColorV1Client.init(r4_app.startContext()) catch return startupFailure(r4_app, "R4GFX/COLOR_V1");
     var ctx = desktop_api.Context.init(r4_app) orelse return startupFailure(r4_app, "desktop context");
     defer ctx.closeWindowService();
+    if (@import("composition_verify.zig").requested(ctx.argsRaw()))
+        return @import("composition_verify.zig").run(&ctx, r4_app.startContext());
     ctx.graphics = gfx_renderer.Renderer.create(ctx.allocator(), r4_app.startContext());
     defer if (ctx.graphics) |graphics| {
         ctx.write("R4DESK gfx: batches=");

@@ -265,3 +265,36 @@ Remote-Klicks ueberschreiben noch den Bildschirmruhe-Timer erneuern.
 Kumulative Bewegung, latched Press/Release, Paketzaehlerwechsel und
 unveraenderte Hardwaremeldungen sind in der vorhandenen Eingabegruppe
 geprueft. Lokale und entfernte Tastenzustaende bleiben getrennt.
+
+
+Anzeigeunabhaengige GPU-Abnahme (0.82.11 / R4DESK 0.1.92)
+--------------------------------------------------------
+/COMPOSITIONVERIFY verwendet compositor.zig, die normalen Painter,
+Quellcaches und composition_gpu.Engine fuer begrenzte private Bilder.
+Nur dieser ausdrueckliche Diagnoseverbraucher waehlt das Ziel readback.
+Er fragt keinen Empfaenger ab, meldet keinen Window-Desktop an und erzeugt
+weder Swapchain noch Present. copied bestaetigt hier nur den vollstaendigen
+CE-/GR-Abbau. Der normale Desktop behaelt unveraendert das Ziel display.
+
+Die Szenen umfassen Fenster, Hintergrund, Menue, Text, Alpha, Verdeckung,
+Verschieben/Schliessen, kalte/warme Ressourcen, Ein-Pixel-Damage und einen
+vollen Wiederaufbau nach Abbruch. Der GPU-Canvas bleibt CPU-seitig unveraendert;
+die getrennte Softwarekomposition dient ausschliesslich als Pixelreferenz.
+Idle darf keine Jobs erzeugen, warme Quellen keine erneuten Uploads.
+
+/COMPOSITIONREFERENCES teilt die urspruenglichen Glyph-/Masken-/Indexed8-/
+ARGB- und Kurven-/Schatten-/Grossbild-Fixtures mit dem bestehenden render-test.
+Die bisherigen Grenzen bleiben 1 LSB fuer den Grundfall und 3 LSB fuer die
+mehrfachen Maskenmischungen. Separate ganzzahlige Orakel pruefen gebrochene
+Nearest-Skalierung ganzer Bilder und die alte Kantenabbildung transportierter
+128-Pixel-Bloecke ohne Farbtoleranz. Weitere Faelle pruefen 16 Draws je Gruppe,
+1 MB Staging, Nullbudget, Busy und den Capture-Owner mit/ohne Leser.
+Die private Capture-Abnahme veroeffentlicht kein RemoteFrame und behauptet
+keine Sichtbarkeit. Ausgabe-/Flip-Integration bleibt 0.82.37, Sichttest 0.82.38.
+
+Aktuelle Grenzen: 64 Ebenen, 512 Kompositionsbereiche, 128 MB CPU-Ebenenbudget,
+8192 Primitive, 2048 Quelleintraege, acht 512x512-Atlanten, 24 Einzelbilder,
+64 MB CPU-Quellbudget und 256 MB GPU-Budget. Gegenueber 0.79.20 betraegt das
+Fortschrittsbudget inzwischen 64 Schritte oder 250 us; lineares FP16-Working,
+Ausgabepuffer und Metadaten gehoeren ebenfalls zur aktuellen Ressourcenbilanz.
+Gemessene Diagnosezeiten sind keine ausgegebenen FPS.
