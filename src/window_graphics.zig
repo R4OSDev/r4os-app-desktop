@@ -79,7 +79,10 @@ pub const Window = struct {
                     reply.frame.config_revision == self.config.revision and reply.frame.flags == 0;
                 slot.state = .live;
                 if (!valid) { slot.frame.failed = true; slot.frame.retired = true; self.disconnect(); }
-                else slot.frame.open(memory, reply.frame) catch { slot.frame.failed = true; slot.frame.retired = true; };
+                else {
+                    slot.frame.open(memory, reply.frame) catch { slot.frame.failed = true; slot.frame.retired = true; };
+                    slot.frame.software_consumer = self.config.backend.binding.adapter_id == 0;
+                }
                 if (self.closing or self.removed or self.config.flags & a.window_graphics_visible == 0) slot.frame.retired = true;
                 if (!slot.frame.failed and !slot.frame.retired and slot.frame.isCpu()) {
                     slot.state = .preparing;
@@ -263,7 +266,17 @@ pub const Window = struct {
         // deadline. Retry admission when it opens, even without another IPC
         // revision; the following empty Take returns to ordinary idle waits.
         self.retry_take = !spec.consumer_ready;
-        if (self.retry_take) return;
+        if (self.retry_take) {
+            // Output admission only pauses new frames. A sampled last frame
+            // can still hold a producer fence after Device/Swapchain close;
+            // inspect its exact lease while recovery prevents the empty Take
+            // from observing the broker revision and triggering this check.
+            if (self.current) |current| {
+                self.inspect_slot = current;
+                self.inspect(desktop, transport);
+            }
+            return;
+        }
         const index = for (&self.slots, 0..) |*slot, i| { if (slot.state == .empty) break i; } else return;
         if (self.nextRequest(a.window_graphics_take, index, desktop)) self.consume(transport, memory);
     }

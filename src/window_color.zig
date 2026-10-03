@@ -45,6 +45,9 @@ pub fn publish(config: *abi.WindowGraphicsConfig) void {
     config.formats[7] = .{ .format = gfx.format_xrgb2101010, .color = @bitCast(pq(true)) };
 }
 pub fn publishCpu(config: *abi.WindowGraphicsConfig) void {
+    // Headless capture retains the source precision in the shared FP16
+    // compositor; its final SDR encoding does not constrain source formats.
+    if (config.flags & abi.window_graphics_headless != 0) return publish(config);
     config.format_count = 2;
     config.formats = @splat(.{});
     config.formats[0] = .{ .format = gfx.format_xrgb8888, .color = @bitCast(sdr(false, true)) };

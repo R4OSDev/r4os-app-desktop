@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.97`
+- Version: `0.1.101`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -74,6 +74,16 @@ Settings > Display opens the existing Appearance application with `/DISPLAY`
 for common SDR mode selection and confirmation. Both the built-in menu and
 the distribution menu include this entry. The output revision path updates
 Desktop layout and mouse bounds after acknowledged mode changes and rollback.
+
+Roadmap 0.82.27 qualifies actual GA106 WSI pixel/depth readbacks, regular
+Desktop window/fullscreen/resize/occlusion, source FP16/PQ capture, retained
+producer fences beyond Deviceclose, full Desktop restart with surviving GUI,
+and real MMU/FLR followed by fresh same-GUI pixels and exact warm retirement.
+Headless windows explicitly use an all-zero output and portable system BOs;
+the native producer's DeviceExecution fence keeps its actual GPU identity.
+Old contract layouts and slots remain unchanged. Active TV/output integration
+and manual variants stay in0.82.37/38. Evidence: GrafikVulkan07937.txt/.json
+in Docs. Existing failed results and original software/model limits remain.
 
 ## Build
 

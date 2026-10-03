@@ -37,6 +37,7 @@ pub const Frame = struct {
     receipt: ?Receipt = null,
     mapping: a.GfxBufferMap = .{},
     cpu_consumed: bool = false,
+    software_consumer: bool = false,
 
     /// The receiver owns an independent import before publishing a front.
     /// Partial failure retains any returned handle for the same close path.
@@ -55,22 +56,31 @@ pub const Frame = struct {
             memory.describe(&self.reference.reference, &actual) != a.gfx_buffer_result_ok or
             !std.meta.eql(actual, message.descriptor)) return error.Stale;
     }
-    pub fn isCpu(self: *const Frame) bool { return self.message.ready.adapter_id == 0; }
+    /// The published window transport selects the consumer. Native GPU
+    /// production does not change a software surface into a GPU output.
+    pub fn isCpu(self: *const Frame) bool {
+        return self.software_consumer or self.message.ready.adapter_id == 0;
+    }
     /// Never block the desktop on a producer. A pending frame keeps the
     /// previous front visible; ordinary read mapping then excludes writers.
     pub fn prepareCpu(self: *Frame, memory: anytype) !bool {
         if (!self.isCpu()) return true;
         if (self.mapping.lease.id != 0) return true;
         const desc = self.message.descriptor;
+        const pixel_bytes: u64 = switch (desc.format) {
+            gfx.format_xrgb8888, gfx.format_argb8888,
+            gfx.format_xrgb2101010, gfx.format_argb2101010 => 4,
+            gfx.format_abgr16161616f => 8,
+            else => return error.Invalid,
+        };
         if (desc.location != a.gfx_buffer_location_system or desc.modifier != 0 or desc.plane_count != 1 or
             desc.usage & a.gfx_buffer_usage_cpu_read == 0 or desc.plane_offsets[0] != 0 or
-            (desc.format != gfx.format_xrgb8888 and desc.format != gfx.format_argb8888) or
-            desc.plane_pitches[0] < @as(u64, desc.width) * 4 or
+            desc.plane_pitches[0] < @as(u64, desc.width) * pixel_bytes or
             desc.byte_length < try std.math.mul(u64, desc.plane_pitches[0], desc.height)) return error.Invalid;
         var status: a.GfxFenceStatus = .{};
         if (memory.query(&self.message.ready, &status) != a.gfx_queue_ok or status.version != 1 or
             status.size != @sizeOf(a.GfxFenceStatus) or !std.meta.eql(status.fence, self.message.ready) or
-            status.milestone != a.gfx_queue_milestone_cpu_stores) return error.Graphics;
+            status.milestone != (if (self.message.ready.adapter_id == 0) a.gfx_queue_milestone_cpu_stores else a.gfx_queue_milestone_device_execution)) return error.Graphics;
         if (status.result == a.gfx_queue_result_pending) return false;
         if (status.result != a.gfx_queue_result_complete) return error.Graphics;
         const rc = memory.map(&self.reference.reference, desc.byte_length, &self.mapping);

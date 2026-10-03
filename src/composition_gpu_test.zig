@@ -26,7 +26,7 @@ const WindowMemory = struct {
     var unmap_busy = false;
     var mapped: usize = 0;
     pub fn query(_: @This(), fence: *const a.GfxFence, out: *a.GfxFenceStatus) i32 {
-        out.* = .{ .fence = fence.*, .milestone = a.gfx_queue_milestone_cpu_stores,
+        out.* = .{ .fence = fence.*, .milestone = if (fence.adapter_id == 0) a.gfx_queue_milestone_cpu_stores else a.gfx_queue_milestone_device_execution,
             .result = if (cpu_failed) a.gfx_queue_result_failed else if (cpu_ready) a.gfx_queue_result_complete else a.gfx_queue_result_pending };
         return a.gfx_queue_ok;
     }
@@ -682,12 +682,89 @@ const WindowTransport = struct {
     }
 };
 fn checkCpuWindow(graphics: anytype) !void {
+    try checkSoftwareWindow(graphics, false);
+    try checkSoftwareWindow(graphics, true);
+    try checkSoftwareWindowOnOutput(graphics, true, true);
+    try checkSoftwarePrecisionWindow(graphics);
+}
+fn checkSoftwarePrecisionWindow(graphics: anytype) !void {
+    const color = @import("window_color.zig");
+    var config: a.WindowGraphicsConfig = .{};
+    color.publishCpu(&config);
+    try t.expectEqual(@as(u32, 2), config.format_count);
+    config.flags = a.window_graphics_headless;
+    color.publishCpu(&config);
+    try t.expectEqual(@as(u32, 8), config.format_count);
+    for ([_]u32{ c.format_abgr16161616f, c.format_xrgb2101010, c.format_argb2101010 }) |format| {
+        const half = format == c.format_abgr16161616f;
+        const pitch: u64 = if (half) 32 else 16;
+        WindowMemory.descriptor = .{ .byte_length = pitch * 2, .width = 3, .height = 2, .format = format,
+            .plane_count = 1, .plane_pitches = .{ pitch, 0, 0, 0 }, .usage = 31 };
+        WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+        WindowMemory.cpu_ready = true; WindowMemory.cpu_failed = false;
+        @memset(&WindowMemory.pixels, 0);
+        for (0..2) |y| for (0..3) |x| {
+            if (half) {
+                const values = std.mem.bytesAsSlice(u16, std.mem.sliceAsBytes(&WindowMemory.pixels));
+                const at = y * 16 + x * 4;
+                for ([_]f16{ -0.25, 0.5, 2, 1 }, 0..) |value, channel| values[at + channel] = @bitCast(value);
+            } else WindowMemory.pixels[y * 4 + x] = (@as(u32, 3) << 30) | 1023;
+        };
+        var message = windowMessage();
+        message.format.color = @bitCast(if (half) color.scrgb(true) else color.pq(true));
+        var frame: window_image.Frame = .{};
+        try frame.open(WindowMemory{}, message);
+        frame.software_consumer = true;
+        // A FP16 image cannot use an 8-bit row pitch, even with ample backing.
+        if (half) {
+            frame.message.descriptor.plane_pitches[0] = 16;
+            try t.expectError(error.Invalid, frame.prepareCpu(WindowMemory{}));
+            try t.expectEqual(@as(usize, 0), WindowMemory.mapped);
+            frame.message.descriptor.plane_pitches[0] = pitch;
+        }
+        try t.expect(try frame.prepareCpu(WindowMemory{}));
+        const image = frame.cpuImage().?;
+        try t.expectEqual(format, image.image.format);
+        try t.expectEqual(pitch, image.image.pitch);
+        try t.expectEqual(@intFromPtr(&WindowMemory.pixels), image.image.cpu_address);
+        if (half) {
+            const values: [*]const f16 = @ptrFromInt(image.image.cpu_address);
+            try t.expectEqual(@as(f16, -0.25), values[0]);
+            try t.expectEqual(@as(f16, 2), values[2]);
+        } else {
+            const values: [*]const u32 = @ptrFromInt(image.image.cpu_address);
+            try t.expectEqual(@as(u32, 1023), values[0] & 1023);
+        }
+        var cpu: @import("composition_software.zig").Owner = .{};
+        var pixels: [6]u32 = @splat(0);
+        var canvas: scene.SceneBuffer = .{};
+        try t.expect(canvas.attach(std.mem.sliceAsBytes(&pixels), 3, 2));
+        try cpu.begin(t.allocator, &canvas);
+        try cpu.cache.?.external(1, canvas.fullRect(), canvas.fullRect(), &frame);
+        try cpu.finish(&graphics.colors, &canvas);
+        for (pixels) |pixel| {
+            // scRGB 0.5 is 40 nits, encoded to SDR's 100-nit white as 0xaa;
+            // both formats retain black red and a full blue endpoint.
+            try t.expectEqual(@as(u32, if (half) 0x00aaff else 0x0000ff), pixel);
+        }
+        cpu.deinit();
+        try t.expect(frame.closeAcknowledged(WindowMemory{}));
+        try t.expectEqual(@as(usize, 0), WindowMemory.mapped);
+        try t.expectEqual(a.gfx_buffer_result_ok, WindowMemory.release(.{}, &WindowMemory.source().reference));
+    }
+    std.debug.print("[desktop-cpu-window-hdr] real COLOR_V1: original FP16 extended range and 10-bit/PQ BO precision retained through final SDR composition, exact pitch/lease close: OK\n", .{});
+}
+fn checkSoftwareWindow(graphics: anytype, native: bool) !void {
+    try checkSoftwareWindowOnOutput(graphics, native, false);
+}
+fn checkSoftwareWindowOnOutput(graphics: anytype, native: bool, headless: bool) !void {
     const transport = @import("window_graphics.zig");
     var owner: transport.Window = .{};
-    var server: WindowTransport = .{ .cpu = true, .lose_publish = false, .lose_take = false, .lose_return = true };
+    var server: WindowTransport = .{ .cpu = !native, .lose_publish = false, .lose_take = false, .lose_return = true };
     const desktop: a.ProgramProcessHandle = .{ .instance_id = 5, .generation = 7 };
     var spec: transport.Spec = .{ .owner = .{ .instance_id = 17, .generation = 3 },
         .config = .{ .width = 8, .height = 8, .flags = a.window_graphics_visible } };
+    if (headless) spec.config.flags |= a.window_graphics_headless;
     WindowMemory.descriptor = .{ .byte_length = 256, .width = 8, .height = 8, .format = c.format_argb8888,
         .plane_count = 1, .plane_pitches = .{32, 0, 0, 0}, .usage = 31 };
     WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
@@ -703,7 +780,10 @@ fn checkCpuWindow(graphics: anytype) !void {
     WindowMemory.map_busy = false;
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
     const front = owner.front().?;
+    try t.expectEqual(spec.config.flags, owner.config.flags);
+    if (headless) try t.expectEqual(a.GfxOutputId{}, owner.config.output);
     try t.expect(WindowMemory.mapped == 1 and !owner.needsPolling());
+    try t.expect(front.isCpu() and front.message.ready.adapter_id == @as(u32, if (native) 9 else 0));
     var cpu: @import("composition_software.zig").Owner = .{}; defer cpu.deinit();
     var pixels: [64]u32 = @splat(0x123456);
     var canvas: scene.SceneBuffer = .{};
@@ -742,9 +822,11 @@ fn checkCpuWindow(graphics: anytype) !void {
     // A producer may close its chain while its window remains visible. Even
     // an occluded, never-composited front must retire, without ending readers
     // early or dropping an uncertain Return reply.
+    for ([_]bool{false, true}) |already_composited| {
     owner = .{};
-    server = .{ .cpu = true, .lose_publish = false, .lose_take = false, .lose_return = true };
+    server = .{ .cpu = !native, .lose_publish = false, .lose_take = false, .lose_return = true };
     spec.config.width = 8;
+    spec.consumer_ready = true;
     WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
     WindowMemory.cpu_ready = true;
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
@@ -752,6 +834,12 @@ fn checkCpuWindow(graphics: anytype) !void {
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
     const retained = owner.front().?;
     retained.readers = 1;
+    if (already_composited) {
+        // A completed CPU sampling loan does not make the retained producer
+        // image immortal while output admission is paused during recovery.
+        retained.cpu_consumed = true;
+        spec.consumer_ready = false;
+    }
     server.chain_closed = true; server.revision += 1; server.lose_inspect = true;
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
     try t.expect(owner.front() == retained and owner.needsPolling() and server.returns == 0);
@@ -764,8 +852,11 @@ fn checkCpuWindow(graphics: anytype) !void {
     try t.expect(server.returns == 1 and owner.request != null and WindowMemory.mapped == 0);
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
+    spec.consumer_ready = true;
+    owner.poll(desktop, 1, spec, &server, WindowMemory{});
     try t.expect(server.returns == 1 and WindowMemory.count() == 1 and !owner.needsPolling());
     try t.expectEqual(a.gfx_buffer_result_ok, WindowMemory.release(.{}, &WindowMemory.source().reference));
+    }
     std.debug.print("[desktop-cpu-window] producer fence, read lease, linear alpha, sparse damage, pending replacement, resize and lost Return: OK\n", .{});
 }
 fn checkWindowTransport(graphics: anytype, device: *const c.R4GfxDevice) !void {
@@ -774,7 +865,8 @@ fn checkWindowTransport(graphics: anytype, device: *const c.R4GfxDevice) !void {
     var server: WindowTransport = .{};
     const desktop: a.ProgramProcessHandle = .{ .instance_id = 5, .generation = 7 };
     var spec: transport.Spec = .{ .owner = .{ .instance_id = 17, .generation = 3 },
-        .config = .{ .width = 8, .height = 8, .flags = a.window_graphics_visible } };
+        .config = .{ .width = 8, .height = 8, .flags = a.window_graphics_visible,
+            .backend = .{ .binding = .{ .adapter_id = 1 } } } };
     WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
     owner.poll(desktop, 1, spec, &server, WindowMemory{});
     try t.expect(owner.publication != null and owner.surface.serial == 0 and server.publishes == 1);

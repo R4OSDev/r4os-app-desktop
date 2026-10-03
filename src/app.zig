@@ -535,6 +535,7 @@ pub const App = struct {
         _ = self.syncVolume();
         _ = self.syncTrayBroker();
         _ = self.updateTrayLayout();
+        _ = self.syncProgramWindows();
         self.invalidateFull();
         self.redraw();
         _ = self.ctx.bootReady();
@@ -7164,6 +7165,7 @@ pub const App = struct {
         if (client.isEmpty() or client.w > 32768 or client.h > 32768) return null;
         var target: r4os.abi.GfxOutputTarget = .{};
         var ready = true;
+        var headless = false;
         if (self.managedOutputs()) {
             const manager = self.outputs.?;
             var chosen: ?*output_manager.Slot = null; var area: u64 = 0;
@@ -7184,7 +7186,16 @@ pub const App = struct {
                 if (self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision)) return null;
                 ready = !worker.blocksCapture();
             }
-            if (self.ctx.draw.displayOutputTarget(0, 0, &target) != r4os.abi.gfx_output_ok) return null;
+            const result = self.ctx.draw.displayOutputTarget(0, 0, &target);
+            if (result != r4os.abi.gfx_output_ok) {
+                // An absent active output does not remove logical windows.
+                // Publish no connector/scanout identity and retain the real
+                // CPU consumer. Busy/reconfiguration remains a retry.
+                if (self.output_revision == 0 or (result != r4os.abi.gfx_output_error_stale and
+                    result != r4os.abi.gfx_output_error_unavailable and result != r4os.abi.gfx_output_error_unsupported)) return null;
+                target = .{};
+                headless = true;
+            }
         }
         var backend: r4os.abi.GfxBackendInfo = .{};
         if (self.ctx.draw.queues().backendInfo(0, &backend) != r4os.abi.gfx_queue_ok or backend.binding.adapter_id != 0 or
@@ -7192,11 +7203,12 @@ pub const App = struct {
         // Software outputs compose in logical pixels before their shared
         // scaling/rotation step. Every intersecting output reads the same BO.
         var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(client.w), .height = @intCast(client.h),
-            .flags = if (win.visible and !win.minimized and !self.terminal_mode) r4os.abi.window_graphics_visible else 0,
+            .flags = (if (win.visible and !win.minimized and !self.terminal_mode) @as(u32, r4os.abi.window_graphics_visible) else 0) |
+                (if (headless) @as(u32, r4os.abi.window_graphics_headless) else 0),
             .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3,
             .backend = backend, .output = .{ .adapter_id = target.adapter_id, .connector_id = target.connector_id,
                 .device_generation = target.device_generation, .connection_generation = target.connection_generation },
-            .display_generation = target.display_generation };
+            .display_generation = if (headless) self.output_revision else target.display_generation };
         @import("window_color.zig").publishCpu(&config);
         return .{ .owner = handle, .config = config, .consumer_ready = ready };
     }
@@ -7567,7 +7579,57 @@ pub const App = struct {
             if (self.active_window == i) self.focusFirstVisibleWindow();
             changed = true;
         }
+        changed = self.adoptAttachedGuiWindows() or changed;
         if (changed) self.invalidateTaskbar();
+        return changed;
+    }
+
+    fn adoptAttachedGuiWindows(self: *App) bool {
+        // This host has already claimed its exact WINSVC generation. Only a
+        // complete program snapshot may restore applications whose previous
+        // host assigned a window; an unattached GUI is still in admission.
+        var changed = false;
+        for (self.program_instances.items) |snapshot| {
+            const info = snapshot.info;
+            if (!processHandleValid(snapshot.handle) or info.id != snapshot.handle.instance_id or
+                info.app_class != @intFromEnum(r4os.abi.ProgramInstanceClass.gui) or
+                info.state != @intFromEnum(r4os.abi.ProgramInstanceState.running) or
+                info.flags & (r4os.abi.ProgramInstanceFlag.close_requested | r4os.abi.ProgramInstanceFlag.desktop_host) != 0 or
+                info.window_id < @as(i32, @intCast(app_window_first)) or
+                info.window_id >= @as(i32, @intCast(self.windows.len))) continue;
+            var already_bound = false;
+            for (self.window_process_handles) |handle| {
+                if (sameProcessHandle(handle, snapshot.handle)) { already_bound = true; break; }
+            }
+            if (already_bound) continue;
+            const previous_index: usize = @intCast(info.window_id);
+            const index = if (self.windows[previous_index].instance_id == 0 and !self.windows[previous_index].close_requested)
+                previous_index else self.findFreeAppWindow() orelse continue;
+            // Revalidate the generation before any GUI metadata or WINSVC
+            // publication. A dead/reused ID never acquires the old binding.
+            var current: r4os.abi.ProgramInstanceInfo = .{};
+            if (self.ctx.programHandleStatus(&snapshot.handle, &current) != r4os.abi.program_handle_ok or
+                current.state != @intFromEnum(r4os.abi.ProgramInstanceState.running) or
+                current.window_id != info.window_id or
+                current.flags & r4os.abi.ProgramInstanceFlag.close_requested != 0) continue;
+            if (self.ctx.programSetWindowHandle(&snapshot.handle, @intCast(index)) != r4os.abi.program_handle_ok) continue;
+            self.window_process_handles[index] = snapshot.handle;
+            self.gui_frame_caches[index].releaseSharedRasters(self.ctx);
+            self.gui_frame_caches[index].bind(self.ctx.allocator(), snapshot.handle);
+            self.windows[index].bindApp(snapshot.handle.instance_id, "R4X App");
+            self.clearWindowLaunch(index);
+            _ = self.syncGuiTitle(index);
+            _ = self.syncGuiMinSize(index);
+            self.windows[index].gui_revision = self.ctx.guiRevision(snapshot.handle.instance_id);
+            self.updateGuiWindowInfo(index);
+            self.pushGuiEvent(index, .resize);
+            self.activateWindow(index, true);
+            self.keyboard_focus = self.windowTargetForIndex(index);
+            self.mirrorWindowRegister(index);
+            self.mirrorWindowFocus(index);
+            self.invalidateWindow(index);
+            changed = true;
+        }
         return changed;
     }
 
@@ -10529,7 +10591,7 @@ fn remoteKeyboardSource(input: r4os.abi.RemoteInputEvent, key: u32) model.EventS
 
 fn remoteInputKey(key: u32) ?u32 {
     if (key == 0) return null;
-    if (isAppKey(key)) return key;
+    if (isAppKey(key) or key == r4os.gui.Key.start_menu) return key;
     return null;
 }
 
