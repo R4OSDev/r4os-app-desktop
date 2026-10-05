@@ -10,7 +10,10 @@ const pixels = @import("r4enc_recording_pixels");
 const mux = @import("r4enc_recording_mux");
 pub const directory = "C:\\RECORDINGS";
 pub const interval_ns = std.time.ns_per_s / 30;
-const work_ns = 2 * std.time.ns_per_s;
+// The first native frame includes storage, GR preparation and cold engine
+// setup. GA106 takes just over2s with a live capture publisher. Keep that
+// startup inside a finite worker budget; the desktop thread never waits here.
+const work_ns = 5 * std.time.ns_per_s;
 const memory_limit = 256 * 1024 * 1024;
 const packet_limit = 8 * 1024 * 1024;
 pub const Result = struct { ok: bool, parts: u32, frames: u64, bytes: u64, fallback: bool, max_work_ns: u64 };

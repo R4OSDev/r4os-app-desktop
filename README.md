@@ -118,6 +118,12 @@ holds neither a capture snapshot nor a display buffer. No capture or encoder
 work starts until requested. R4ENC's process runtime survives repeated
 recordings and finishes only at Desktop shutdown.
 
+The recording worker gives each encode job a finite five-second budget,
+including cold native storage and engine setup. The GA106 capture path takes
+just over two seconds for its first frame; the previous two-second budget
+caused an unnecessary software fallback. Packet waits allow one additional
+second for the exact input-retirement acknowledgement.
+
 Since 0.1.74, AMD AVC input uses a 256-byte pitch and neutral initialized
 16-row coded padding. Visible capture dimensions remain unchanged. The
 native encoder borrows this unmapped system buffer until its own completion;
