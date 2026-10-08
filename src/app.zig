@@ -6365,12 +6365,15 @@ pub const App = struct {
 
     fn syncCursor(self: *App) bool {
         var wanted = !self.terminal_mode;
-        if (self.outputs) |manager| if (manager.active()) {
+        // An empty managed layout has no admitted clean-frame owner. Keep
+        // the plane hidden while its output retires or cannot be recreated;
+        // failed CPU presents cannot satisfy or continually retry that work.
+        if (self.outputs) |manager| {
             var info: r4os.abi.DisplayCursorInfo = .{};
             wanted = wanted and self.screen_w > 0 and self.screen_h > 0 and
                 self.ctx.draw.displayCursorInfo(&info) == r4os.abi.gfx_output_ok and
                 manager.cursorTarget(info, @intCast(self.screen_w), @intCast(self.screen_h)) != null;
-        };
+        }
         const changed = self.cursor_controller.poll(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0,
             self.cursor_x, self.cursor_y, wanted);
         if (changed) self.invalidateCursor();

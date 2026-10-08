@@ -93,6 +93,15 @@ pub fn check() !void {
     var managed: Model = .{}; var exact: controller.Controller = .{};
     _ = exact.poll(&managed, 1, 10, 20, true); managed.finish();
     _ = exact.poll(&managed, 2, 10, 20, true);
+    // Losing the admitted output while its clean frame is still pending
+    // withdraws that request without showing the plane or inventing a
+    // successful Present. Idle polls stay quiet; recovery needs a new frame.
+    try t.expect(exact.clean_pending and !exact.software);
+    try t.expect(exact.poll(&managed, 3, 10, 20, false));
+    try t.expect(!exact.clean_pending and !exact.clean_ready and exact.software and managed.calls == 1);
+    for (4..8) |now| try t.expect(!exact.poll(&managed, now, 10, 20, false) and managed.calls == 1);
+    try t.expect(exact.poll(&managed, 8, 10, 20, true));
+    try t.expect(exact.clean_pending and !exact.clean_ready and managed.calls == 1);
     const key: controller.CleanFrame = .{ .target=.{.adapter_id=1,.connector_id=2,.device_generation=3,
         .connection_generation=4,.display_generation=7},.device_address=0x1000,.device_generation=11,.frame=19 };
     exact.captured(key);
@@ -107,13 +116,13 @@ pub fn check() !void {
             else => unreachable,
         }
         try t.expect(!exact.completed(wrong, true));
-        _ = exact.poll(&managed, 3 + change, 10, 20, true);
+        _ = exact.poll(&managed, 10 + change, 10, 20, true);
         try t.expect(!exact.clean_ready and managed.calls == 1);
     }
     try t.expect(exact.completed(key, false) and !exact.clean_ready and exact.clean_frame == null);
-    _ = exact.poll(&managed, 10, 10, 20, true); try t.expect(managed.calls == 1);
+    _ = exact.poll(&managed, 20, 10, 20, true); try t.expect(managed.calls == 1);
     var retry = key; retry.frame += 1; exact.captured(retry);
     try t.expect(exact.completed(retry, true));
-    _ = exact.poll(&managed, 11, 10, 20, true);
+    _ = exact.poll(&managed, 21, 10, 20, true);
     try t.expect(managed.calls == 2 and managed.request.operation == a.display_cursor_operation_show);
 }
