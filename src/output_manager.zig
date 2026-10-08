@@ -38,6 +38,15 @@ pub const Slot = struct {
     pub fn bounds(self: *const Slot) surface.Rect { return geometry.logical(self.view) catch unreachable; }
     pub fn dirty(self: *const Slot) bool { return self.logical_index != null and !self.failed and !self.paused and !self.sleeping and self.damage.active; }
     pub fn invalidate(self: *Slot) void { self.damage.invalidate(self.bounds()); }
+    pub fn cursorCompatible(self: *const Slot, info: a.DisplayCursorInfo, width: u32, height: u32) bool {
+        return self.logical_index != null and !self.disabled and !self.paused and !self.sleeping and !self.failed and !self.reconfiguring and
+            self.view.origin.x == 0 and self.view.origin.y == 0 and self.view.rotation == .normal and self.view.scale == topology.scale_unit and
+            self.view.pixel_w == width and self.view.pixel_h == height and width != 0 and height != 0 and
+            info.version == 1 and info.flags & 15 == 15 and info.display_generation != 0 and
+            self.target.connector_id != 0 and self.target.device_generation != 0 and info.backend.reset_generation != 0 and
+            self.target.adapter_id == info.backend.adapter_id and self.target.device_generation == info.backend.device_generation and
+            self.target.display_generation == info.display_generation and self.target.head_id == info.head_id;
+    }
 };
 pub const Manager = struct {
     allocator: std.mem.Allocator,
@@ -65,7 +74,7 @@ pub const Manager = struct {
     cursor: topology.Point = .{},
 
     pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, sys: r4os.r4sys.Context, draw: r4os.r4draw.Context) ?*Manager {
-        @import("startup_diagnosis.zig").initialize(sys);
+
         const self = allocator.create(Manager) catch return null;
         self.* = .{ .allocator = allocator, .raw = raw, .sys = sys, .draw = draw };
         self.loadPreferences();
@@ -193,6 +202,16 @@ pub const Manager = struct {
         self.desired = layout; self.reconcile = true;
     }
     pub fn active(self: *const Manager) bool { return self.layout.count != 0; }
+    pub fn cursorTarget(self: *const Manager, info: a.DisplayCursorInfo, width: u32, height: u32) ?a.GfxOutputTarget {
+        if (self.layout.count != 1 or self.layout.primary != 0 or !self.layout.outputs[0].enabled) return null;
+        for (&self.slots) |*slot| {
+            if (slot.logical_index != 0 or slot.gpu == null or !slot.cursorCompatible(info, width, height)) continue;
+            for (self.snapshot.entries[0..self.snapshot.count]) |entry|
+                if (entry.active() and entry.info.flags & a.gfx_output_flag_active != 0 and
+                    std.meta.eql(entry.target, slot.target)) return slot.target;
+        }
+        return null;
+    }
     pub fn refresh(self: *Manager, revision: u64) bool {
         self.poll();
         const now = self.sys.monotonicNanoseconds() orelse 0;
@@ -206,7 +225,9 @@ pub const Manager = struct {
             return false;
         };
         self.discovery_error = null;
-        if (next.sameOutputs(&self.snapshot) and !self.reconcile) return false;
+        const catalog_changed = !next.sameOutputs(&self.snapshot);
+        if (!catalog_changed and !self.reconcile) return false;
+
         var values: [topology.capacity]topology.Output = undefined;
         var owners: [topology.capacity]*Slot = undefined;
         var count: usize = 0;
@@ -293,6 +314,11 @@ pub const Manager = struct {
                 break :blk topology.Layout.init(values[0..count], next.revision) catch unreachable;
             };
         }
+        // Retiring a failed worker can require reconciliation without changing
+        // the output set or desktop coordinates. App capture ownership must
+        // survive that maintenance; real generation/layout changes still reset.
+        const output_changed = catalog_changed or !std.meta.eql(self.layout, layout) or
+            !std.meta.eql(self.translation, translation);
         self.translation = translation; self.layout = layout;
         self.snapshot = next; self.revision = next.revision;
         self.reconcile = false;
@@ -303,7 +329,7 @@ pub const Manager = struct {
             slot.logical_index = i; slot.disabled = !value.enabled; slot.invalidate();
         }
         self.poll();
-        return true;
+        return output_changed;
     }
     fn normalize(values: []topology.Output, selected: usize) !topology.Point {
         const origin = values[selected].view.origin;
@@ -320,8 +346,8 @@ pub const Manager = struct {
     }
     fn acquire(self: *Manager, entry: catalog.Entry, view: topology.Viewport) ?*Slot {
         const slot = for (&self.slots) |*current| {
-            if (!current.failed and !current.reconfiguring and std.meta.eql(current.target, entry.target) and
-                current.color_revision == (if (entry.color) |value| value.revision else @as(u64, 0)) and
+            if (current.logical_index != null and !current.failed and !current.reconfiguring and std.meta.eql(current.target, entry.target) and
+                self.sameEncoding(current, entry) and
                 current.view.pixel_w == view.pixel_w and current.view.pixel_h == view.pixel_h) break current;
         } else for (&self.slots) |*current| { if (!current.occupied()) break current; } else return null;
         if (slot.occupied()) {
@@ -332,8 +358,14 @@ pub const Manager = struct {
             if (slot.software) |owner| if (owner.acquired != null or owner.mapping.lease.id != 0) {
                 self.fail(slot); return null;
             };
+            slot.color_revision = if (entry.color) |value| value.revision else 0;
             return slot;
             }
+        }
+        for (&self.slots) |*previous| {
+            if (previous.logical_index == null or previous.failed or
+                previous.target.adapter_id != entry.target.adapter_id or previous.target.connector_id != entry.target.connector_id) continue;
+
         }
         slot.target = entry.target; slot.view = view;
         slot.color_revision = if (entry.color) |value| value.revision else 0;
@@ -351,17 +383,16 @@ pub const Manager = struct {
         const accelerated = if (slot.gpu) |owner| blk: {
             const info = owner.graphics.info() orelse break :blk false;
             const needed = owner.engine.requiredOperations();
-            @import("startup_diagnosis.zig").record("candidate head={d} display={d} backend={d} operations={x} required={x}",
-                .{entry.target.head_id, entry.target.display_generation, info.backend, info.gpu_operations, needed});
+
             break :blk info.gpu_operations & needed == needed;
         } else false;
-        @import("startup_diagnosis.zig").record("select head={d} display={d} flags={x} worker={} accelerated={} failed-target={} icc={} size={d}x{d}",
-            .{entry.target.head_id, entry.target.display_generation, entry.presentation.flags, slot.gpu != null, accelerated,
-                software_only, profile_enabled, view.pixel_w, view.pixel_h});
+
         if (!accelerated) {
             if (slot.gpu) |owner| if (owner.tryDestroy()) { slot.gpu = null; };
-            if (slot.gpu == null and entry.presentation.format == a.gfx_buffer_format_xrgb8888 and
-                (entry.color == null or profile_supported) and entry.presentation.flags & a.display_presentation_info_system_source != 0)
+            const cpu_admitted = slot.gpu == null and entry.presentation.format == a.gfx_buffer_format_xrgb8888 and
+                (entry.color == null or profile_supported) and entry.presentation.flags & a.display_presentation_info_system_source != 0;
+
+            if (cpu_admitted)
                 slot.software = cpu.Output.create(self.allocator, self.raw, self.draw, self.sys, view, entry.target);
             if (slot.software == null or slot.software.?.lost) {
                 if (!std.meta.eql(self.reported_failure, entry.target)) {
@@ -382,9 +413,25 @@ pub const Manager = struct {
         }
         return slot;
     }
+    fn sameEncoding(self: *const Manager, slot: *const Slot, entry: catalog.Entry) bool {
+        // Store.colorAt stamps the global catalog revision, including changes
+        // to other receivers. Reuse requires the exact prior binding and all
+        // original encoding fields; that catalog stamp alone owns no images.
+        for (self.snapshot.entries[0..self.snapshot.count]) |previous| {
+            if (!std.meta.eql(previous.target, slot.target) or
+                slot.color_revision != (if (previous.color) |value| value.revision else @as(u64, 0))) continue;
+            if (previous.presentation.format != entry.presentation.format or
+                previous.presentation.buffer_count != entry.presentation.buffer_count) return false;
+            const left = previous.color orelse return entry.color == null;
+            const right = entry.color orelse return false;
+            var normalized = left;
+            normalized.revision = right.revision;
+            return std.meta.eql(normalized, right);
+        }
+        return false;
+    }
     pub fn fail(self: *Manager, slot: *Slot) void {
-        if (!slot.failed) @import("startup_diagnosis.zig").record("manager-fail head={d} display={d} gpu={} cpu={} reconfiguring={}",
-            .{slot.target.head_id, slot.target.display_generation, slot.gpu != null, slot.software != null, slot.reconfiguring});
+
         slot.failed = true;
         if (slot.gpu != null) {
             const index = for (self.software_targets, 0..) |target, i| {
@@ -401,7 +448,51 @@ pub const Manager = struct {
             self.reconcile = true;
         }
     }
+    fn retireSupersededOutputs(self: *Manager) void {
+        // Native modes can replace geometry and encoding while retaining the
+        // output target. Discover that replacement before the old swapchain
+        // is polled; normal retirement is not a physical GPU-epoch fault.
+        var revision: a.GfxDisplayRevision = .{};
+        const catalog_changed = self.draw.outputs().revision(&revision) == a.gfx_output_ok and
+            revision.revision != self.snapshot.revision;
+        const changed = catalog_changed or changed_output: for (&self.slots) |*slot| {
+            if (slot.logical_index == null or slot.failed or slot.reconfiguring or slot.sleeping) continue;
+            var target: a.GfxOutputTarget = .{};
+            const rc = self.draw.displayOutputTarget(slot.target.adapter_id, slot.target.head_id, &target);
+            if (rc == a.gfx_output_ok) {
+                if (!std.meta.eql(target, slot.target)) break true;
+                var presentation: a.DisplayPresentationInfo = .{};
+                if (self.draw.displayOutputPresentationInfo(&target, &presentation) == a.gfx_output_ok) {
+                    if (presentation.width != slot.view.pixel_w or presentation.height != slot.view.pixel_h) break true;
+                    for (self.snapshot.entries[0..self.snapshot.count]) |entry| {
+                        if (!std.meta.eql(entry.target, slot.target)) continue;
+                        if (presentation.format != entry.presentation.format or
+                            presentation.buffer_count != entry.presentation.buffer_count) break :changed_output true;
+                    }
+                }
+            } else if (rc == a.gfx_output_error_unsupported or rc == a.err_no_fn or rc == a.err_no_group) break true;
+        } else false;
+        if (!changed) return;
+        // Failed or mixed discovery owns no withdrawal. Keep all original
+        // workers and leases until a complete current catalog proves it.
+        const next = catalog.Snapshot.read(&self.draw) catch return;
+        for (&self.slots) |*slot| {
+            if (slot.logical_index == null or slot.failed or slot.reconfiguring) continue;
+            const current = for (next.entries[0..next.count]) |entry| {
+                if (entry.info.flags & a.gfx_output_flag_sleeping != 0 and
+                    entry.info.identity.adapter_id == slot.target.adapter_id and
+                    entry.info.identity.connector_id == slot.target.connector_id and
+                    entry.info.identity.device_generation == slot.target.device_generation) break true;
+                if (entry.active() and std.meta.eql(entry.target, slot.target) and self.sameEncoding(slot, entry) and
+                    entry.presentation.width == slot.view.pixel_w and entry.presentation.height == slot.view.pixel_h) break true;
+            } else false;
+            if (current) continue;
+
+            slot.reconfiguring = true; slot.logical_index = null; self.reconcile = true;
+        }
+    }
     pub fn poll(self: *Manager) void {
+        self.retireSupersededOutputs();
         const now = self.sys.monotonicNanoseconds() orelse 0;
         for (&self.slots) |*slot| {
             if (!slot.occupied()) continue;

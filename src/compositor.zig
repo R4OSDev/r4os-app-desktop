@@ -715,3 +715,7 @@ fn drawOverlay(
 test { _ = @import("output_damage.zig"); }
 
 test { _ = @import("composition_tiles.zig"); }
+
+test "output owner collection preserves capture until the actual catalog changes" {
+    try @import("output_manager_test.zig").check();
+}

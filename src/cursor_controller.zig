@@ -3,6 +3,12 @@
 const std = @import("std");
 const a = @import("r4os").abi;
 const asset = @import("cursor_asset.zig");
+pub const CleanFrame = struct {
+    target: a.GfxOutputTarget,
+    device_address: u64,
+    device_generation: u64,
+    frame: u64,
+};
 pub const Controller = struct {
     software: bool = true,
     disabled: bool = false,
@@ -13,6 +19,7 @@ pub const Controller = struct {
     pending_operation: u32 = 0,
     clean_pending: bool = false,
     clean_ready: bool = false,
+    clean_frame: ?CleanFrame = null,
     retry_at: u64 = 0,
     reference: a.GfxBufferReference = .{},
     mapping: a.GfxBufferMap = .{},
@@ -25,6 +32,20 @@ pub const Controller = struct {
     }
     pub fn presented(self: *Controller, success: bool) void {
         if (self.clean_pending and success) self.clean_ready = true;
+    }
+    pub fn captured(self: *Controller, key: CleanFrame) void {
+        if (!self.clean_pending or self.clean_ready or self.software or self.clean_frame != null or
+            key.device_address == 0 or key.device_generation == 0 or key.frame == 0 or
+            key.target.display_generation != self.info.display_generation or key.target.head_id != self.info.head_id or
+            key.target.adapter_id != self.info.backend.adapter_id or key.target.device_generation != self.info.backend.device_generation) return;
+        self.clean_frame = key;
+    }
+    pub fn completed(self: *Controller, key: CleanFrame, visible: bool) bool {
+        const captured_frame = self.clean_frame orelse return false;
+        if (!std.meta.eql(captured_frame, key)) return false;
+        self.clean_frame = null;
+        self.presented(visible);
+        return true;
     }
     pub fn retryPending(self: *const Controller) bool {
         return self.pending_sequence != 0 or self.clean_pending or self.mapping.lease.id != 0;
@@ -58,7 +79,7 @@ pub const Controller = struct {
         const allowed = wanted and (!known or status.flags & a.display_cursor_state_suspended == 0) and
             (self.info.display_generation == 0 or (x >= self.info.min_x and x <= self.info.max_x and y >= self.info.min_y and y <= self.info.max_y));
         if (self.disabled or !allowed) {
-            self.clean_pending = false; self.clean_ready = false;
+            self.clean_pending = false; self.clean_ready = false; self.clean_frame = null;
             self.software = !shown;
             if (self.acquired and (shown or self.disabled)) {
                 _ = self.send(api, if (self.disabled) a.display_cursor_operation_release else a.display_cursor_operation_hide, 0, 0);
@@ -79,7 +100,7 @@ pub const Controller = struct {
         }
         self.discardSource(api);
         if (shown) {
-            self.software = false; self.clean_pending = false; self.clean_ready = false;
+            self.software = false; self.clean_pending = false; self.clean_ready = false; self.clean_frame = null;
             if (status.x != x or status.y != y) _ = self.send(api, a.display_cursor_operation_move, x, y);
             return;
         }

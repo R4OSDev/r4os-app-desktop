@@ -121,25 +121,47 @@ fn isOpaque(cache: *const layers.Cache, command: layers.Command, area: Rect) boo
     return true;
 }
 
-/// A final opaque internal SDR layer needs neither the covered destination
-/// nor an sRGB -> FP16 -> sRGB round trip. External images retain COLOR_V1
-/// metadata handling. A partial or translucent top layer uses normal blending.
+const SdrPixels = struct { pixels: [*]align(1) const u32, pitch: usize, opaque_alpha: bool };
+/// Only canonical SDR encoding can bypass COLOR_V1. The external source is
+/// the existing producer-complete read lease; this acquires no new mapping.
+fn sdrPixels(entry: *const layers.Entry) ?SdrPixels {
+    const frame = entry.external orelse return .{
+        .pixels = entry.pixels.ptr, .pitch = @intCast(entry.bounds.w), .opaque_alpha = false,
+    };
+    const source = frame.cpuImage() orelse return null;
+    if (source.image.format != gfx.format_xrgb8888 and source.image.format != gfx.format_argb8888) return null;
+    const opaque_alpha = source.description.alpha == gfx.color_alpha_opaque;
+    if (!std.meta.eql(source.description, description(false, opaque_alpha)) or
+        !std.meta.eql(source.profile, std.mem.zeroes(gfx.R4GfxColorProfile)) or
+        source.image.pitch % 4 != 0) return null;
+    return .{ .pixels = @ptrFromInt(source.image.cpu_address), .pitch = @intCast(source.image.pitch / 4),
+        .opaque_alpha = opaque_alpha or source.image.format == gfx.format_xrgb8888 };
+}
+
+/// A final opaque canonical SDR layer needs neither the covered destination
+/// nor an sRGB -> FP16 -> sRGB round trip. Partial, translucent and other
+/// color encodings retain normal COLOR_V1 blending.
 fn copyOpaqueTile(cache: *const layers.Cache, tile: Rect, target: *scene.SceneBuffer, candidates: *const tiles.Mask) bool {
     var ordered = candidates.iterator(.{ .direction = .reverse });
     while (ordered.next()) |index| {
         const command = cache.commands[index];
         const clip = layers.intersect(tile, command.scissor) orelse continue;
         const entry = &cache.entries[command.entry];
-        if (!std.meta.eql(clip, tile) or entry.external != null) return false;
+        if (!std.meta.eql(clip, tile)) return false;
+        const source_pixels = sdrPixels(entry) orelse return false;
         const width: usize = @intCast(tile.w);
-        const source_pitch: usize = @intCast(entry.bounds.w);
+        const source_pitch = source_pixels.pitch;
         const source_start = @as(usize, @intCast(tile.y - entry.bounds.y)) * source_pitch + @as(usize, @intCast(tile.x - entry.bounds.x));
-        if (!isOpaque(cache, command, tile)) return false;
+        if (!source_pixels.opaque_alpha) {
+            for (0..@intCast(tile.h)) |row| for (source_pixels.pixels[source_start + row * source_pitch ..][0..width]) |pixel| {
+                if (pixel >> 24 != 255) return false;
+            };
+        }
         const destination = target.pixels.?;
         const target_pitch: usize = @intCast(target.width);
         const target_start = @as(usize, @intCast(tile.y - target.origin_y)) * target_pitch + @as(usize, @intCast(tile.x - target.origin_x));
         for (0..@intCast(tile.h)) |row| {
-            const source = entry.pixels[source_start + row * source_pitch ..][0..width];
+            const source = source_pixels.pixels[source_start + row * source_pitch ..][0..width];
             const output = destination[target_start + row * target_pitch ..][0..width];
             for (source, output) |pixel, *out| out.* = pixel & 0x00ffffff;
         }

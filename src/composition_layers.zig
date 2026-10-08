@@ -42,6 +42,9 @@ pub const Cache = struct {
     screen: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     frame: u64 = 0,
     collecting: bool = false,
+    // Only a complete scene capture can identify absent ordinary layers.
+    // Partial damage omits live layers that must retain their GPU contents.
+    complete_scene: bool = false,
     failure: ?anyerror = null,
     changed_bytes: u64 = 0,
     unchanged_layers: u64 = 0,
@@ -103,6 +106,7 @@ pub const Cache = struct {
         if (self.recording) |recording| try recording.start(self.frame);
         self.screen = bounds; self.logical_screen = logical_bounds;
         self.command_count = 0; self.failure = null; self.collecting = true;
+        self.complete_scene = false;
         self.replay_commands = &.{}; self.replay_layers = @splat(false);
     }
     pub fn finish(self: *Cache) ![]const Command {

@@ -24,7 +24,9 @@ pub const Worker = struct {
     capture_damage: ?@import("surface.zig").Rect = null,
     thread: ?r4os.JoinHandle = null,
     done: u32 = 0,
+    preparation_stop: u32 = 0,
     preparation_error: ?gpu.Error = null,
+    preparation_completed_ns: u64 = 0,
     deadline: u64 = 0,
     revision: u64 = 0,
     failed_revision: ?u64 = null,
@@ -45,14 +47,13 @@ pub const Worker = struct {
     pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context,
         adapter: u32, head: ?u32, encoding: ?r4os.abi.GfxOutputColorState, format: u32) ?*Worker
     {
-        @import("startup_diagnosis.zig").initialize(sys);
+
         if (encoding) |value| if (value.identity.adapter_id != adapter) return null;
         const graphics = renderer.Renderer.createForAdapter(allocator, raw, adapter) orelse {
-            @import("startup_diagnosis.zig").record("worker-create adapter={d} renderer=null", .{adapter}); return null;
+            return null;
         };
         var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
-        engine.configureOutput(encoding, format) catch |err| {
-            @import("startup_diagnosis.zig").record("worker-create adapter={d} color-error={s}", .{adapter, @errorName(err)});
+        engine.configureOutput(encoding, format) catch {
             graphics.destroy(); return null;
         };
         const self = allocator.create(Worker) catch { graphics.destroy(); return null; };
@@ -63,6 +64,7 @@ pub const Worker = struct {
         self.cache.recording = &self.primitives;
         self.engine.head = head;
         self.engine.clock = .{ .context = @intFromPtr(self), .read = readClock };
+        self.engine.preparation_cancel = &self.preparation_stop;
         return self;
     }
     fn readClock(raw: usize) u64 {
@@ -117,7 +119,9 @@ pub const Worker = struct {
         if (self.thread != null or self.engine.active() or self.awaiting_visible) return false;
         const now = self.sys.monotonicNanoseconds() orelse return false;
         self.deadline = std.math.add(u64, now, 5 * std.time.ns_per_s) catch return false;
-        self.failure_reported = false; self.preparation_error = null;
+
+        self.failure_reported = false; self.preparation_error = null; self.preparation_completed_ns = 0;
+        @atomicStore(u32, &self.preparation_stop, 0, .release);
         self.capture.setDemand(self.capture_demand);
         self.prepare_capture = self.capture_demand and now >= self.capture.retry_ns;
         if (self.engine.prepared(&self.cache) and (!self.prepare_capture or
@@ -136,8 +140,12 @@ pub const Worker = struct {
     }
     fn prepare(raw: u64) callconv(.c) i32 {
         const self: *Worker = @ptrFromInt(raw);
-        defer @atomicStore(u32, &self.done, 1, .release);
+        defer {
+            self.preparation_completed_ns = self.sys.monotonicNanoseconds() orelse self.deadline;
+            @atomicStore(u32, &self.done, 1, .release);
+        }
         while (true) {
+            self.checkPreparation() catch |err| { self.preparation_error = err; return -1; };
             self.capture.poll(self.sys.monotonicNanoseconds() orelse self.deadline);
             self.engine.readback_pin = self.capture.reader.source;
             self.engine.prepare(&self.cache, self.deadline) catch |err| {
@@ -145,6 +153,7 @@ pub const Worker = struct {
                 if (err == error.Busy and now < self.deadline) { self.sys.sleepTicks(1); continue; }
                 self.preparation_error = err; return -1;
             };
+            self.checkPreparation() catch |err| { self.preparation_error = err; return -1; };
             if (self.prepare_capture) self.capture.prepare(self.captureView(), self.engine.output_format, self.engine.output_color) catch {
                 // Capture admission failure cannot fail the local compositor.
                 self.capture.redraw = true;
@@ -152,6 +161,10 @@ pub const Worker = struct {
             };
             return 0;
         }
+    }
+    fn checkPreparation(self: *const Worker) gpu.Error!void {
+        if (@atomicLoad(u32, &self.preparation_stop, .acquire) != 0) return error.State;
+        if ((self.sys.monotonicNanoseconds() orelse self.deadline) >= self.deadline) return error.Deadline;
     }
     fn collectThread(self: *Worker) bool {
         const handle = if (self.thread) |*value| value else return true;
@@ -165,11 +178,10 @@ pub const Worker = struct {
         return true;
     }
     fn fail(self: *Worker, reason: gpu.Error) void {
-        if (self.failed_revision != self.revision) @import("startup_diagnosis.zig").record(
-            "worker-fail reason={s} phase={s} revision={d} preparation={s} thread={} visible={d} frames={d} commands={d} ops={x}",
-            .{@errorName(reason), @tagName(self.engine.phase), self.revision,
-                if (self.preparation_error) |err| @errorName(err) else "none", self.thread != null,
-                self.frames_visible, self.cache.frame, self.cache.command_count, self.gpu_operations});
+        if (self.failed_revision != self.revision) {
+
+
+        }
         self.capture.reader.cancel(error.Stale);
         self.failed_revision = self.revision;
         self.awaiting_visible = false;
@@ -206,9 +218,11 @@ pub const Worker = struct {
                 self.capture.complete(done.status.frame.slot - 1, done.status.frame.image, now);
                 self.engine.readback_pin = self.capture.reader.source;
             }
+
             if (done.status.result == 1) { self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible; }
             if (done.status.result == 2) { self.frames_completed +|= 1; return .discarded; }
             if (done.status.result == 3) return .discarded;
+
             self.fail(error.Graphics);
         }
         if (self.awaiting_visible) {
@@ -225,6 +239,7 @@ pub const Worker = struct {
                     self.capture.complete(self.engine.output_index, self.engine.outputs[self.engine.output_index].resource, now);
                     self.engine.readback_pin = self.capture.reader.source;
                     self.completed_frame = self.engine.frame; self.completed_status = null;
+
                     self.awaiting_visible = false; self.frames_visible +|= 1; self.frames_completed +|= 1; return .visible;
                 }
             }
@@ -237,6 +252,7 @@ pub const Worker = struct {
         return if (self.busy()) .pending else .idle;
     }
     pub fn destroy(self: *Worker) void {
+        @atomicStore(u32, &self.preparation_stop, 1, .release);
         while (!self.collectThread()) self.sys.sleepTicks(1);
         self.capture_demand = false; self.capture.setDemand(false);
         if (self.engine.active()) self.engine.cancel(error.State);
@@ -262,18 +278,28 @@ pub const Worker = struct {
         const allocator = self.graphics.allocator;
         self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
     }
-    pub fn tryDestroy(self: *Worker) bool {
+    /// Park the legacy primary worker when explicit outputs take ownership.
+    /// Its stable device/caller remains alive; exact thread, readback and GPU
+    /// retirement precede freeing any private frame resource.
+    pub fn park(self: *Worker) bool {
+        @atomicStore(u32, &self.preparation_stop, 1, .release);
         if (!self.collectThread()) return false;
         self.capture_demand = false;
         self.pollCapture(self.sys.monotonicNanoseconds() orelse self.deadline);
         self.capture.close() catch return false;
-        if (self.engine.active()) {
+        if (self.engine.active() or self.awaiting_visible) {
             if (self.engine.fault == null) self.engine.cancel(error.State);
+            self.awaiting_visible = false;
             _ = self.engine.advance(&self.cache, self.sys.monotonicNanoseconds() orelse self.deadline);
             if (self.engine.active()) return false;
         }
         if (!self.engine.discardCapture(&self.cache)) return false;
         self.engine.close() catch return false;
+        return true;
+    }
+    pub fn tryDestroy(self: *Worker) bool {
+        if (!self.park()) return false;
+
         const allocator = self.graphics.allocator;
         self.cache.deinit(); self.primitives.deinit(); self.graphics.destroy(); allocator.destroy(self);
         return true;

@@ -83,9 +83,13 @@ const Model = struct {
     var retained_count: usize = 0;
     var retained_peak: usize = 0;
     var native_allocations: u32 = 0;
+    var cancel_during_create: ?*u32 = null;
     var presents: u32 = 0;
     var present_enabled = true;
     var presentation_queries: u32 = 0;
+    var presentation_result: i32 = c.status_ok;
+    var presentation_width: u32 = 8;
+    var presentation_height: u32 = 8;
     var busy_count: u32 = 0;
     var reject_draw = false;
     var batches: usize = 0;
@@ -123,9 +127,10 @@ const Model = struct {
     };
     fn presentationInfo(_: *const c.R4GfxDevice, head: u32, out: *c.R4GfxPresentationInfo) callconv(.c) i32 {
         presentation_queries += 1;
+        if (presentation_result != c.status_ok) return presentation_result;
         if (!chain_enabled or head != 0) return c.status_unsupported;
         out.* = std.mem.zeroes(c.R4GfxPresentationInfo);
-        out.version = 1; out.size = @sizeOf(c.R4GfxPresentationInfo); out.width = 8; out.height = 8;
+        out.version = 1; out.size = @sizeOf(c.R4GfxPresentationInfo); out.width = presentation_width; out.height = presentation_height;
         out.format = chain_format;
         out.flags = c.present_native | c.present_synchronized | c.present_visibility | c.present_active;
         out.device_generation = 1; out.reset_generation = 1;
@@ -269,7 +274,10 @@ const Model = struct {
             else p.createResource(device,&desc,out);
         if (rc == 0) {
             buffers[out.slot-1] = memory;
-            if (input.source_kind == c.source_create_native) native_allocations += 1;
+            if (input.source_kind == c.source_create_native) {
+                native_allocations += 1;
+                if (cancel_during_create) |stop| @atomicStore(u32, stop, 1, .release);
+            }
         } else t.allocator.free(memory);
         return rc;
     }
@@ -558,12 +566,63 @@ pub fn check() !void {
     try t.expectEqual(@as(u32, 0xbcbcbc), Model.visible[3 * 8 + 3]);
     try t.expectEqual(@as(u32, 0), Model.visible[0]);
     try checkReadback(graphics, device, &engine, &cache);
+    // Closing an ordinary layer must retire its actual provider image/view
+    // after a complete capture. Partial damage is not an owner-close proof.
+    const overlay_index = for (&cache.entries, 0..) |*entry, i| {
+        if (entry.key == 2) break i;
+    } else unreachable;
+    const background_index = for (&cache.entries, 0..) |*entry, i| {
+        if (entry.key == 1) break i;
+    } else unreachable;
+    const old_overlay = engine.images[overlay_index].resource;
+    const old_view = engine.images[overlay_index].color_view;
+    const old_background = engine.images[background_index].resource;
+    const overlay_charge = engine.images[overlay_index].charge;
+    const with_overlay = engine.reserved_bytes;
+    const visible_before_partial = Model.visible;
+    const corner: surface.Rect = .{ .x = 0, .y = 0, .w = 1, .h = 1 };
+    try cache.start(full);
+    const partial_background = (try cache.begin(1, full, corner)).?;
+    partial_background.fillRect(corner, 0x112233); try cache.end(1);
+    _ = try cache.finish();
+    try engine.prepare(&cache, 1000);
+    var resource_info: c.R4GfxResourceInfo = undefined;
+    try t.expectEqual(c.status_ok, Model.resourceInfo(device, @ptrCast(&old_overlay), &resource_info));
+    try t.expectEqual(with_overlay, engine.reserved_bytes);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    try t.expectEqual(visible_before_partial[3 * 8 + 3], Model.visible[3 * 8 + 3]);
+    try cache.start(full);
+    const closed_background = (try cache.begin(1, full, full)).?;
+    closed_background.fillRect(full, 0x203040); try cache.end(1);
+    _ = try cache.finish(); cache.complete_scene = true;
+    const incorrectly_prepared = engine.prepared(&cache);
+    try engine.prepare(&cache, 1000);
+    try t.expect(Model.resourceInfo(device, @ptrCast(&old_overlay), &resource_info) != c.status_ok);
+    try t.expect(Model.resourceInfo(device, @ptrCast(&old_view), &resource_info) != c.status_ok);
+    try t.expect(Model.buffers[old_overlay.slot - 1] == null);
+    try t.expectEqual(with_overlay - overlay_charge, engine.reserved_bytes);
+    try t.expectEqual(c.status_ok, Model.resourceInfo(device, @ptrCast(&old_background), &resource_info));
+    try t.expect(!incorrectly_prepared);
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
+    try t.expectEqualSlices(u32, &expected, &Model.visible);
+    // Reopening the same CPU cache key must allocate/upload a new GPU image.
+    const allocations_before_reopen = Model.native_allocations;
+    try capture(&cache, full, 0x882244); cache.complete_scene = true;
+    try engine.prepare(&cache, 1000);
+    try t.expectEqual(allocations_before_reopen + 1, Model.native_allocations);
+    try t.expect(!std.meta.eql(old_overlay, engine.images[overlay_index].resource));
+    try engine.begin(&cache, 1000); try pump(&engine, &cache, device, .copied);
+    _ = try @import("composition_software.zig").paint(&graphics.colors, &cache, &target);
+    try t.expectEqualSlices(u32, &expected, &Model.visible);
     try engine.close();
     for(&Model.jobs) |*job| try t.expect(job.*==null);
     for(&Model.buffers) |*buffer| try t.expect(buffer.*==null);
     try t.expect(engine.reserved_bytes==0);
     try checkDependencyPressure(graphics, device);
     try checkAdmissionBudget(graphics, device);
+    try checkPreparationCancellation(graphics);
+    try checkWorkerSuspension(graphics);
     try checkPrimitives(graphics, device);
     try checkSwapchain(graphics, device);
     try checkHdrOutput(graphics, device);
@@ -572,6 +631,119 @@ pub fn check() !void {
     try checkWindowTransport(graphics, device);
     try checkCpuWindow(graphics);
     try checkOffscreen(graphics, device);
+}
+
+fn checkPreparationCancellation(graphics: *@import("gfx_renderer.zig").Renderer) !void {
+    const Clock = struct { fn read(_: usize) u64 { return 1000; } };
+    var cache = layers.Cache.init(t.allocator, 1024 * 1024);
+    defer cache.deinit();
+    try capture(&cache, .{ .x = 0, .y = 0, .w = 8, .h = 8 }, 0x112233);
+    var engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device);
+    defer engine.close() catch unreachable;
+    var stop: u32 = 1;
+    engine.preparation_cancel = &stop;
+    const before = Model.native_allocations;
+    try t.expectError(error.State, engine.prepare(&cache, 1000));
+    try t.expectEqual(before, Model.native_allocations);
+    @atomicStore(u32, &stop, 0, .release);
+    engine.clock = .{ .context = 0, .read = Clock.read };
+    try t.expectError(error.Deadline, engine.prepare(&cache, 1000));
+    try t.expectEqual(before, Model.native_allocations);
+    engine.clock = null;
+    // The exact native output may be borrowed by a mode owner. No failed
+    // query supplies presentation bytes or revokes the current GPU epoch.
+    engine.head = 0;
+    Model.presentation_result = c.status_busy;
+    defer Model.presentation_result = c.status_ok;
+    try t.expectError(error.Busy, engine.prepare(&cache, 1000));
+    try t.expectEqual(before, Model.native_allocations);
+    try t.expect(engine.phase == .idle and engine.fault == null and engine.chain.slot == 0);
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    @atomicStore(u32, &stop, 1, .release);
+    try t.expectError(error.State, engine.prepare(&cache, 1000));
+    @atomicStore(u32, &stop, 0, .release);
+    engine.clock = .{ .context = 0, .read = Clock.read };
+    try t.expectError(error.Deadline, engine.prepare(&cache, 1000));
+    engine.clock = null;
+    Model.presentation_result = c.status_ok;
+    const original_chain = Model.chain_enabled;
+    Model.chain_enabled = true;
+    defer { Model.chain_enabled = original_chain; Model.presentation_width = 8;
+        Model.presentation_height = 8; Model.chain_format = c.format_xrgb8888; }
+    for (0..3) |changed| {
+        Model.presentation_width = if (changed == 0) 4 else 8;
+        Model.presentation_height = if (changed == 1) 4 else 8;
+        Model.chain_format = if (changed == 2) c.format_xrgb2101010 else c.format_xrgb8888;
+        try t.expectError(error.Busy, engine.prepare(&cache, 1000));
+        try t.expectEqual(before, Model.native_allocations);
+        try t.expect(engine.phase == .idle and engine.fault == null and engine.chain.slot == 0);
+        for (&Model.jobs) |*job| try t.expect(job.* == null);
+    }
+    Model.presentation_width = 8; Model.presentation_height = 8;
+    Model.chain_format = c.format_xrgb8888; Model.chain_enabled = original_chain;
+    Model.presentation_result = c.status_lost;
+    try t.expectError(error.Stale, engine.prepare(&cache, 1000));
+    try t.expectEqual(before, Model.native_allocations);
+    Model.presentation_result = c.status_ok;
+    engine.head = null;
+    Model.cancel_during_create = &stop;
+    defer Model.cancel_during_create = null;
+    // The real provider has already created the first image when retirement
+    // requests cancellation. Keep it tracked and refuse the next allocation.
+    try t.expectError(error.State, engine.prepare(&cache, 1000));
+    try t.expectEqual(before + 1, Model.native_allocations);
+    try t.expect(engine.outputs[0].resource.slot != 0 and engine.reserved_bytes != 0);
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    try engine.close();
+    try t.expectEqual(@as(u64, 0), engine.reserved_bytes);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-preparation] cancelled/expired owner admits no new images; partial creation retained until exact close: OK\n", .{});
+}
+
+fn checkWorkerSuspension(graphics: *@import("gfx_renderer.zig").Renderer) !void {
+    const Worker = @import("composition_worker.zig").Worker;
+    const device: *const c.R4GfxDevice = @ptrCast(&graphics.device);
+    const raw: a.R4XStartContext = .{};
+    const bundle: r4os.program.Bundle = .{ .raw = &raw };
+    var worker: Worker = .{ .graphics = graphics, .sys = r4os.r4sys.Context.init(&bundle),
+        .cache = layers.Cache.init(t.allocator, 1024 * 1024),
+        .engine = gpu.Engine.init(&graphics.client, &graphics.colors, &graphics.device),
+        .primitives = try @import("primitive_frame.zig").Frame.init(t.allocator),
+        .capture = @import("remote_capture.zig").Capture.init(t.allocator, &graphics.client, &graphics.colors, &graphics.device) };
+    defer worker.cache.deinit();
+    defer worker.primitives.deinit();
+    defer {
+        Model.hold_terminal = false;
+        if (worker.engine.active()) worker.engine.cancel(error.State);
+        for (0..64) |_| {
+            Model.complete(device);
+            _ = worker.engine.advance(&worker.cache, 1);
+        }
+        worker.engine.close() catch unreachable;
+    }
+    worker.engine.preparation_cancel = &worker.preparation_stop;
+    try capture(&worker.cache, .{ .x = 0, .y = 0, .w = 8, .h = 8 }, 0x112233);
+    try worker.engine.prepare(&worker.cache, 1000);
+    try worker.engine.begin(&worker.cache, 1000);
+    Model.hold_terminal = true;
+    defer Model.hold_terminal = false;
+    _ = worker.engine.advance(&worker.cache, 1);
+    const reserved = worker.engine.reserved_bytes;
+    try t.expect(reserved != 0 and worker.engine.active() and worker.engine.last != null);
+    try t.expect(!worker.park());
+    try t.expectEqual(reserved, worker.engine.reserved_bytes);
+    try t.expect(@atomicLoad(u32, &worker.preparation_stop, .acquire) == 1 and worker.engine.active() and worker.engine.last != null);
+    Model.hold_terminal = false;
+    var closed = false;
+    for (0..32) |_| {
+        Model.complete(device);
+        if (worker.park()) { closed = true; break; }
+    }
+    try t.expect(closed and !worker.busy());
+    try t.expectEqual(@as(u64, 0), worker.engine.reserved_bytes);
+    for (&Model.jobs) |*job| try t.expect(job.* == null);
+    for (&Model.buffers) |*buffer| try t.expect(buffer.* == null);
+    std.debug.print("[desktop-worker] explicit outputs park legacy worker; held GPU receipt keeps images until exact drain/close: OK\n", .{});
 }
 
 fn checkOffscreen(graphics: anytype, device: *const c.R4GfxDevice) !void {
@@ -686,6 +858,86 @@ fn checkCpuWindow(graphics: anytype) !void {
     try checkSoftwareWindow(graphics, true);
     try checkSoftwareWindowOnOutput(graphics, true, true);
     try checkSoftwarePrecisionWindow(graphics);
+    try checkOpaqueSoftwareWindow(graphics);
+}
+fn checkOpaqueSoftwareWindow(graphics: anytype) !void {
+    const software = @import("composition_software.zig");
+    const color = @import("r4gfx");
+    const original = WindowMemory.descriptor;
+    defer WindowMemory.descriptor = original;
+    for (0..6) |variant| {
+        const xrgb = variant == 1;
+        const opaque_alpha = xrgb or variant == 2;
+        const translucent = variant == 3;
+        const other_color = variant == 4;
+        const partial = variant == 5;
+        WindowMemory.descriptor = .{ .byte_length = 320, .width = 8, .height = 8,
+            .format = if (xrgb) c.format_xrgb8888 else c.format_argb8888,
+            .plane_count = 1, .plane_pitches = .{40, 0, 0, 0}, .usage = 31 };
+        WindowMemory.refs = @splat(false); WindowMemory.refs[0] = true; WindowMemory.generations[0] = 1;
+        WindowMemory.cpu_ready = true; WindowMemory.cpu_failed = false;
+        var message = windowMessage();
+        var encoding = software.description(false, opaque_alpha);
+        if (other_color) encoding.primaries = c.color_primaries_bt2020;
+        message.format.color = @bitCast(encoding);
+        var frame: window_image.Frame = .{};
+        try frame.open(WindowMemory{}, message);
+        frame.software_consumer = true;
+        try t.expect(try frame.prepareCpu(WindowMemory{}));
+        var cpu: software.Owner = .{};
+        defer cpu.deinit();
+        var pixels: [64]u32 = undefined;
+        var expected: [64]u32 = undefined;
+        var linear: [64 * 4]u16 = undefined;
+        var canvas: scene.SceneBuffer = .{};
+        try t.expect(canvas.attach(std.mem.sliceAsBytes(&pixels), 8, 8));
+        canvas.origin_x = -3; canvas.origin_y = 5;
+        const damage = if (partial) surface.Rect{ .x = -2, .y = 6, .w = 3, .h = 2 } else canvas.fullRect();
+        for (0..4) |batch| {
+            @memset(&WindowMemory.pixels, 0xffff00ff); // Row padding must never enter the image.
+            for (0..8) |y| for (0..8) |x| {
+                const value: u32 = @intCast(batch * 64 + y * 8 + x);
+                const alpha: u32 = if (opaque_alpha) value else if (translucent) 128 else 255;
+                WindowMemory.pixels[y * 10 + x] = (alpha << 24) | (value << 16) | ((255 - value) << 8) | ((value * 73) % 256);
+            };
+            // The independent oracle runs the real COLOR_V1 conversions,
+            // including linear-light Over, even for the direct-copy cases.
+            @memset(&expected, 0);
+            const output: color.R4GfxColorImage = .{ .version = 1, .size = @sizeOf(color.R4GfxColorImage),
+                .image = .{ .cpu_address = @intFromPtr(&expected), .byte_length = 256, .pitch = 32, .width = 8, .height = 8, .format = c.format_xrgb8888, .reserved = 0 },
+                .description = software.description(false, true), .profile = std.mem.zeroes(color.R4GfxColorProfile) };
+            const working: color.R4GfxColorImage = .{ .version = 1, .size = @sizeOf(color.R4GfxColorImage),
+                .image = .{ .cpu_address = @intFromPtr(&linear), .byte_length = 512, .pitch = 64, .width = 8, .height = 8, .format = c.format_abgr16161616f, .reserved = 0 },
+                .description = software.description(true, false), .profile = std.mem.zeroes(color.R4GfxColorProfile) };
+            var operation: color.R4GfxColorTransform = .{ .version = 1, .size = @sizeOf(color.R4GfxColorTransform),
+                .source_rect = .{ .x = 0, .y = 0, .width = 8, .height = 8 }, .target_rect = .{ .x = 0, .y = 0, .width = 8, .height = 8 },
+                .sampler = c.render_sampler_nearest, .operation = c.render_operation_blit, .opacity = 65535, .flags = 0, .pixel_budget = 64 };
+            var stats: color.R4GfxCpuStats = undefined;
+            try t.expectEqual(c.status_ok, graphics.colors.color_image_transform(&output, &working, &operation, &stats));
+            operation.operation = c.render_operation_over;
+            const source = frame.cpuImage().?;
+            try t.expectEqual(c.status_ok, graphics.colors.color_image_transform(&source, &working, &operation, &stats));
+            operation.operation = c.render_operation_blit;
+            try t.expectEqual(c.status_ok, graphics.colors.color_image_transform(&working, &output, &operation, &stats));
+            @memset(&pixels, 0x123456);
+            try cpu.begin(t.allocator, &canvas);
+            const base = (try cpu.cache.?.begin(1, canvas.fullRect(), damage)).?;
+            base.fillRect(canvas.fullRect(), 0); try cpu.cache.?.end(1);
+            try cpu.cache.?.external(2, canvas.fullRect(), damage, &frame);
+            const before_direct = cpu.stats.direct_pixels;
+            try cpu.finish(&graphics.colors, &canvas);
+            try t.expectEqual(@as(u64, if (translucent or other_color or partial) 0 else 64), cpu.stats.direct_pixels - before_direct);
+            for (pixels, 0..) |value, i| {
+                const touched = !partial or (i % 8 >= 1 and i % 8 <= 3 and i / 8 >= 1 and i / 8 <= 2);
+                try t.expectEqual(@as(u32, if (touched) expected[i] else 0x123456), value);
+            }
+            try t.expect(frame.readers == 0 and frame.cpu_consumed and WindowMemory.mapped == 1);
+        }
+        try t.expect(frame.closeAcknowledged(WindowMemory{}));
+        try t.expectEqual(a.gfx_buffer_result_ok, WindowMemory.release(.{}, &WindowMemory.source().reference));
+        try t.expect(WindowMemory.mapped == 0 and WindowMemory.count() == 0);
+    }
+    std.debug.print("[desktop-cpu-window-sdr] padded read lease, 256 colors, opaque/XRGB alpha, nonzero origin, sparse damage and COLOR_V1 fallback: OK\n", .{});
 }
 fn checkSoftwarePrecisionWindow(graphics: anytype) !void {
     const color = @import("window_color.zig");

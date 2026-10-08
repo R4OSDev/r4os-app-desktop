@@ -15,7 +15,8 @@ const Model = struct {
     pixels: [asset.width * asset.height]u32 = undefined,
     pub fn supportsDisplayCursor(self: *Model) bool { return self.supported; }
     pub fn displayCursorInfo(_: *Model, out: *a.DisplayCursorInfo) i32 {
-        out.* = .{ .display_generation=7,.flags=15,.max_width=256,.max_height=256,.min_x=-32768,.min_y=-32768,.max_x=32767,.max_y=32767 }; return 1;
+        out.* = .{ .display_generation=7,.flags=15,.backend=.{.adapter_id=1,.device_generation=3,.reset_generation=1},
+            .max_width=256,.max_height=256,.min_x=-32768,.min_y=-32768,.max_x=32767,.max_y=32767 }; return 1;
     }
     pub fn displayCursorStatus(self: *Model, out: *a.DisplayCursorStatus) i32 { out.* = self.status; return 1; }
     pub fn displayCursorSubmit(self: *Model, request: *const a.DisplayCursorRequest, out: *a.DisplayCursorStatus) i32 {
@@ -88,4 +89,31 @@ pub fn check() !void {
     model.status.flags &= ~a.display_cursor_state_unknown; model.finish(); _ = cursor.poll(&model, 19, 22, 29, false);
     try t.expect(model.calls == 7 and model.request.operation == a.display_cursor_operation_hide and !cursor.software);
     model.finish(); _ = cursor.poll(&model, 20, 22, 29, false); try t.expect(cursor.software);
+
+    var managed: Model = .{}; var exact: controller.Controller = .{};
+    _ = exact.poll(&managed, 1, 10, 20, true); managed.finish();
+    _ = exact.poll(&managed, 2, 10, 20, true);
+    const key: controller.CleanFrame = .{ .target=.{.adapter_id=1,.connector_id=2,.device_generation=3,
+        .connection_generation=4,.display_generation=7},.device_address=0x1000,.device_generation=11,.frame=19 };
+    exact.captured(key);
+    for (0..5) |change| {
+        var wrong = key;
+        switch (change) {
+            0 => wrong.target.connection_generation += 1,
+            1 => wrong.target.head_id += 1,
+            2 => wrong.device_generation += 1, // Same allocation address is a different Device owner.
+            3 => wrong.frame -= 1,
+            4 => wrong.device_address += 1,
+            else => unreachable,
+        }
+        try t.expect(!exact.completed(wrong, true));
+        _ = exact.poll(&managed, 3 + change, 10, 20, true);
+        try t.expect(!exact.clean_ready and managed.calls == 1);
+    }
+    try t.expect(exact.completed(key, false) and !exact.clean_ready and exact.clean_frame == null);
+    _ = exact.poll(&managed, 10, 10, 20, true); try t.expect(managed.calls == 1);
+    var retry = key; retry.frame += 1; exact.captured(retry);
+    try t.expect(exact.completed(retry, true));
+    _ = exact.poll(&managed, 11, 10, 20, true);
+    try t.expect(managed.calls == 2 and managed.request.operation == a.display_cursor_operation_show);
 }

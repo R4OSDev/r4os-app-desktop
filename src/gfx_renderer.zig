@@ -58,6 +58,7 @@ pub const Renderer = struct {
         return self;
     }
     fn failed(raw: *const r4os.abi.R4XStartContext, stage: []const u8, result: i32) ?*Renderer {
+
         const bundle = r4os.program.bundleValueFromR4XStart(raw) orelse return null;
         const sys = r4os.r4sys.Context.init(&bundle);
         sys.write("R4DESK gfx: initialization failed stage="); sys.write(stage);
