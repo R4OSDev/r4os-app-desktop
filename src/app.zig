@@ -1354,7 +1354,6 @@ pub const App = struct {
         ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\FONTS.R4X") and ok;
         ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X") and ok;
         ok = smokeExists(self.ctx, "C:\\R4OS\\CONFIG\\ASSOC.R4S") and ok;
-        ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X") and ok;
         ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\DEVMGR.R4X") and ok;
         ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\SERVICES.R4X") and ok;
         ok = smokeExists(self.ctx, "C:\\R4OS\\SOFTWARE\\DESKTOP\\LOGCENTER.R4X") and ok;
@@ -1468,24 +1467,6 @@ pub const App = struct {
         ok = ok and paint_window != null;
         _ = self.printSmokeRenderStats("paint-open", render_snap);
         if (paint_window) |index| {
-            _ = self.requestWindowProcessClose(index);
-            self.smokePumpFrames(2);
-        }
-
-        self.launchGuiPath("C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X", "", "MemView", .gui);
-        self.smokePumpFrames(6);
-        if (self.hasDamage()) self.redraw();
-        const memview_window = self.findSingleInstanceGuiWindow("C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X");
-        self.ctx.print("MemView window: ");
-        if (memview_window) |index| {
-            self.ctx.printI32(@intCast(index));
-            self.ctx.println(" ok");
-        } else {
-            self.ctx.println("FAILED");
-        }
-        ok = ok and memview_window != null;
-        _ = self.printSmokeRenderStats("memview-open", render_snap);
-        if (memview_window) |index| {
             _ = self.requestWindowProcessClose(index);
             self.smokePumpFrames(2);
         }
@@ -1768,7 +1749,7 @@ pub const App = struct {
             self.ctx.systemPoweroff();
         }
         const editor_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\APPDEF.R4X";
-        const timer_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X";
+        const timer_path = "C:\\R4OS\\SOFTWARE\\DESKTOP\\CLOCK.R4X";
         self.ctx.println("DESKTOP window-idle smoke");
         var render_sample = self.printSmokeRenderStats("window-idle-initial", .{});
         self.smokePumpFrames(12);
@@ -1800,7 +1781,7 @@ pub const App = struct {
         render_sample = self.printSmokeRenderStats("window-idle-geometry", render_sample);
         if (self.managedOutputs()) self.smokeOutputWindow(index);
         if (argsContain(self.ctx.argsRaw(), "/OUTPUTS")) self.smokeDisplayPreferences();
-        self.launchGuiPath(timer_path, "", "MemView", .gui);
+        self.launchGuiPath(timer_path, "", "Clock", .gui);
         self.smokePumpFrames(20);
         const timer_index = self.findWindowByLaunchPath(timer_path) orelse self.windowIdleSmokeFailed("timer-launch");
         const timer_revision = self.ctx.guiRevision(self.windows[timer_index].instance_id);
@@ -10387,9 +10368,6 @@ fn isCalcPath(path: []const u8) bool {
     return endsWithIgnoreCase(path, "calc.r4x");
 }
 
-fn isMemViewPath(path: []const u8) bool {
-    return endsWithIgnoreCase(path, "memview.r4x");
-}
 
 fn isAppDefPath(path: []const u8) bool {
     return endsWithIgnoreCase(path, "appdef.r4x");
@@ -10400,7 +10378,7 @@ fn isLogCenterPath(path: []const u8) bool {
 }
 
 fn isSingleInstanceGuiPath(path: []const u8) bool {
-    return isNetCfgPath(path) or isClockPath(path) or isTimeSettingsPath(path) or isRegEditPath(path) or isCalcPath(path) or isMemViewPath(path) or isAppDefPath(path) or isLogCenterPath(path);
+    return isNetCfgPath(path) or isClockPath(path) or isTimeSettingsPath(path) or isRegEditPath(path) or isCalcPath(path) or isAppDefPath(path) or isLogCenterPath(path);
 }
 
 fn sameSingleInstanceGuiPath(a: []const u8, b: []const u8) bool {
@@ -10409,7 +10387,6 @@ fn sameSingleInstanceGuiPath(a: []const u8, b: []const u8) bool {
         (isTimeSettingsPath(a) and isTimeSettingsPath(b)) or
         (isRegEditPath(a) and isRegEditPath(b)) or
         (isCalcPath(a) and isCalcPath(b)) or
-        (isMemViewPath(a) and isMemViewPath(b)) or
         (isAppDefPath(a) and isAppDefPath(b)) or
         (isLogCenterPath(a) and isLogCenterPath(b));
 }

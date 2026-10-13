@@ -12,7 +12,6 @@ pub const DefaultLink = enum(u8) {
     notepad,
     r4synth,
     devices,
-    memview,
     computer,
 };
 
@@ -21,7 +20,6 @@ pub const default_links = [_]DefaultLink{
     .notepad,
     .r4synth,
     .devices,
-    .memview,
     .computer,
 };
 
@@ -31,7 +29,6 @@ pub fn fileName(spec: DefaultLink) []const u8 {
         .notepad => "NOTEPAD.LNK",
         .r4synth => "R4SYNTH.LNK",
         .devices => "DEVICES.LNK",
-        .memview => "MEMVIEW.LNK",
         .computer => "COMPUTER.LNK",
     };
 }
@@ -42,7 +39,6 @@ pub fn title(spec: DefaultLink) []const u8 {
         .notepad => "Notepad",
         .r4synth => "R4Synth",
         .devices => "Devices",
-        .memview => "MemView",
         .computer => "Computer",
     };
 }
@@ -53,7 +49,6 @@ pub fn target(spec: DefaultLink) []const u8 {
         .notepad => "C:\\R4OS\\SOFTWARE\\DESKTOP\\NOTEPAD.R4X",
         .r4synth => "C:\\R4OS\\SOFTWARE\\TERMINAL\\SYNTH.R4X",
         .devices => "C:\\R4OS\\SOFTWARE\\DESKTOP\\DEVMGR.R4X",
-        .memview => "C:\\R4OS\\SOFTWARE\\DESKTOP\\MEMVIEW.R4X",
         .computer => "C:\\R4OS\\SOFTWARE\\DESKTOP\\EXPLORER.R4X",
     };
 }
@@ -68,7 +63,7 @@ pub fn args(spec: DefaultLink) []const u8 {
 pub fn policy(spec: DefaultLink) r4os.abi.LaunchPolicy {
     return switch (spec) {
         .terminal, .r4synth => .console,
-        .notepad, .devices, .memview, .computer => .gui,
+        .notepad, .devices, .computer => .gui,
     };
 }
 
@@ -77,7 +72,7 @@ pub fn icon(spec: DefaultLink) []const u8 {
         .terminal => "C:\\R4OS\\Media\\Icons\\Terminal.ico",
         .notepad => "C:\\R4OS\\Media\\Icons\\Notepad.ico",
         .r4synth => "C:\\R4OS\\Media\\Icons\\Synth.ico",
-        .devices, .memview => "C:\\R4OS\\Media\\Icons\\Config.ico",
+        .devices => "C:\\R4OS\\Media\\Icons\\Config.ico",
         .computer => "C:\\R4OS\\Media\\Icons\\Computer.ico",
     };
 }
@@ -126,7 +121,7 @@ fn appendByte(out: []u8, pos: *usize, value: u8) bool {
 
 test "default desktop folder links are canonical R4LNK files" {
     try @import("r4std_test").ensure();
-    try std.testing.expectEqual(@as(usize, 6), default_links.len);
+    try std.testing.expectEqual(@as(usize, 5), default_links.len);
     inline for (default_links) |spec| {
         var bytes: [max_link_bytes]u8 = .{0} ** max_link_bytes;
         const link_bytes = try writeDefaultLink(spec, bytes[0..]);
