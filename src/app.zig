@@ -117,8 +117,9 @@ const CursorDamage = struct {
 
     fn add(self: *CursorDamage, old_rect: surface.Rect, new_rect: surface.Rect) void {
         if (self.active) {
-            self.old_rect = self.old_rect.merged(old_rect); self.new_rect = new_rect;
-        } else self.* = .{ .active=true, .old_rect=old_rect, .new_rect=new_rect };
+            self.old_rect = self.old_rect.merged(old_rect);
+            self.new_rect = new_rect;
+        } else self.* = .{ .active = true, .old_rect = old_rect, .new_rect = new_rect };
     }
 
     fn reset(self: *CursorDamage) void {
@@ -565,17 +566,14 @@ pub const App = struct {
 
             self.pollComposition();
 
-
             const platform_now = self.ctx.sys.monotonicNanoseconds() orelse 0;
             if (self.platform_input.poll(&self.ctx.sys, &self.ctx.draw, &self.screen_power, platform_now)) self.last_input_ns = platform_now;
             self.screen_power.tick(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.config.screen_off_seconds);
-
 
             var needs_redraw = self.syncDesktopFolder();
             if (self.syncOutputRevision()) needs_redraw = true;
             if (self.syncTrayBroker()) needs_redraw = true;
             if (self.pollRemoteFrameDemand()) needs_redraw = true;
-
 
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
@@ -597,7 +595,6 @@ pub const App = struct {
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
 
-
             self.flushWindowGeometry(false);
             if (self.syncWindowModes()) needs_redraw = true;
             if (self.syncGraphicsWindows()) needs_redraw = true;
@@ -605,15 +602,10 @@ pub const App = struct {
             if (self.hasDamage()) needs_redraw = true;
             self.syncRefreshPolicy();
 
-
             if (needs_redraw) self.redraw();
             if (self.capture_cursor_damage.active and self.remote_frame_consumers != 0) _ = self.publishRemoteScene(&.{});
 
-
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
-
-
-
         }
         return 0;
     }
@@ -639,7 +631,9 @@ pub const App = struct {
             if (!overlay_blocked) for (&self.windows, 0..) |*win, index| {
                 if (!win.visible or win.minimized or win.instance_id == 0 or index != self.active_window) continue;
                 const rect: surface.Rect = if (self.terminal_mode and index == 0)
-                    .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h } else win.clientSurface().rect;
+                    .{ .x = 0, .y = 0, .w = self.screen_w, .h = self.screen_h }
+                else
+                    win.clientSurface().rect;
                 if (rect.x <= bounds.x and rect.y <= bounds.y and @as(i64, rect.x) + rect.w >= @as(i64, bounds.x) + bounds.w and
                     @as(i64, rect.y) + rect.h >= @as(i64, bounds.y) + bounds.h) fullscreen = true;
             };
@@ -701,10 +695,22 @@ pub const App = struct {
         if (!self.win_service_gate.available) _ = self.retryWindowServiceIfDue();
         const immediate = (if (self.outputs) |manager| manager.immediateWork() else false) or
             (if (self.composition) |worker| worker.immediateWork() else false);
-        if (immediate) { self.ctx.sleepTicks(0); return; }
-        if (self.win_service_gate.available) for (&self.graphics_windows) |*owner| if (owner.needsPolling()) { self.waitForGraphics(); return; };
-        if (self.outputs) |manager| if (manager.needsPolling()) { self.waitForGraphics(); return; };
-        if (self.composition) |worker| if (worker.needsPolling()) { self.waitForGraphics(); return; };
+        if (immediate) {
+            self.ctx.sleepTicks(0);
+            return;
+        }
+        if (self.win_service_gate.available) for (&self.graphics_windows) |*owner| if (owner.needsPolling()) {
+            self.waitForGraphics();
+            return;
+        };
+        if (self.outputs) |manager| if (manager.needsPolling()) {
+            self.waitForGraphics();
+            return;
+        };
+        if (self.composition) |worker| if (worker.needsPolling()) {
+            self.waitForGraphics();
+            return;
+        };
         if (active) {
             // A freshly launched GUI task must get a turn immediately. A
             // timer wait here can miss the child's first revision wake while
@@ -747,8 +753,7 @@ pub const App = struct {
             const owner = self.window_process_handles[index];
             if (win.kind != .app or !processHandleValid(owner) or win.close_requested) continue;
             const cached = &self.window_modes[index];
-            if (!sameProcessHandle(cached.identity.owner, owner)) cached.* = .{
-                .identity = .{ .desktop = self.ctx.self_handle, .owner = owner, .window_id = @intCast(index) } };
+            if (!sameProcessHandle(cached.identity.owner, owner)) cached.* = .{ .identity = .{ .desktop = self.ctx.self_handle, .owner = owner, .window_id = @intCast(index) } };
             // One publication and, when needed, one immediate acknowledgement.
             // A lost reply retains the exact identity and acknowledgement ID.
             for (0..2) |_| {
@@ -784,7 +789,8 @@ pub const App = struct {
             request.flags = 1;
             var reply: r4os.abi.WindowModeReply = .{};
             if (!self.ctx.windowModeExchange(&request, &reply) or
-                (reply.result != 0 and reply.result != -3 and reply.result != -4)) {
+                (reply.result != 0 and reply.result != -3 and reply.result != -4))
+            {
                 // Unknown removal is resolved by the existing acknowledged
                 // service reset before publishing any replacement window.
                 self.markWindowServiceUnavailable();
@@ -1222,8 +1228,7 @@ pub const App = struct {
     }
 
     fn captureCursor(self: *const App) @import("remote_capture.zig").Cursor {
-        return .{ .x = self.cursor_x, .y = self.cursor_y, .visible = !self.terminal_mode,
-            .separate = !self.cursor_controller.software };
+        return .{ .x = self.cursor_x, .y = self.cursor_y, .visible = !self.terminal_mode, .separate = !self.cursor_controller.software };
     }
 
     fn startScreenshot(self: *App) void {
@@ -1236,17 +1241,24 @@ pub const App = struct {
     fn toggleRecording(self: *App) void {
         if (self.recorder) |recorder| {
             if (recorder.active()) {
-                recorder.stop(); self.ctx.recording_state = 2;
-                self.invalidateTaskbar(); return;
+                recorder.stop();
+                self.ctx.recording_state = 2;
+                self.invalidateTaskbar();
+                return;
             }
             var adapter: u32 = 0;
-            if (self.ctx.graphics) |graphics| if (graphics.info()) |info| { adapter = info.adapter_id; };
+            if (self.ctx.graphics) |graphics| if (graphics.info()) |info| {
+                adapter = info.adapter_id;
+            };
             if (recorder.start(adapter)) {
-                self.ctx.recording_state = 1; self.invalidateTaskbar(); return;
+                self.ctx.recording_state = 1;
+                self.invalidateTaskbar();
+                return;
             }
         }
         if (self.dialog == .none) {
-            self.dialog = .message_window_info; self.dialog_focus = .message_ok;
+            self.dialog = .message_window_info;
+            self.dialog_focus = .message_ok;
             self.setMessageBox(.@"error", .ok, "Recording", "Screen recording is unavailable.");
             self.invalidateFull();
         }
@@ -1257,7 +1269,8 @@ pub const App = struct {
         if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 0 or stats.leases != 0 or stats.live_bytes != 0)
             self.windowIdleSmokeFailed("capture-no-demand");
         if (self.ctx.remoteFrameAcquire() != 1) self.windowIdleSmokeFailed("capture-acquire");
-        _ = self.pollRemoteFrameDemand(); self.invalidateFull();
+        _ = self.pollRemoteFrameDemand();
+        self.invalidateFull();
         var info: r4os.abi.RemoteFrameInfo = .{};
         const deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s;
         while (self.ctx.remoteFrameInfo(&info) != 0) {
@@ -1295,10 +1308,12 @@ pub const App = struct {
         for ([_]r4os.abi.RemoteFrameLease{ first, third, fourth }) |lease| if (self.ctx.desk.remoteFrameSnapshotRelease(&lease) != 0)
             self.windowIdleSmokeFailed("capture-release");
         if (self.ctx.remoteFrameRelease() != 0) self.windowIdleSmokeFailed("capture-last-reader");
-        _ = self.pollRemoteFrameDemand(); self.pollComposition();
+        _ = self.pollRemoteFrameDemand();
+        self.pollComposition();
         if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.leases != 0 or stats.live_bytes != 0 or stats.snapshot_bytes != 0)
             self.windowIdleSmokeFailed("capture-retirement");
-        self.invalidateFull(); self.startScreenshot();
+        self.invalidateFull();
+        self.startScreenshot();
         const save_deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 15 * std.time.ns_per_s;
         while (self.screenshot_job != null) {
             if ((self.ctx.sys.monotonicNanoseconds() orelse save_deadline) >= save_deadline) self.windowIdleSmokeFailed("capture-screenshot-timeout");
@@ -1309,13 +1324,18 @@ pub const App = struct {
         if (saved.code != 0 or self.ctx.sys.fileReadAt(&saved.path, 0, &header) != header.len or header[0] != 'B' or header[1] != 'M' or
             std.mem.readInt(u32, header[2..6], .little) != saved.bytes or saved.bytes != 54 + @as(u64, @intCast(self.screen_w)) * @as(u64, @intCast(self.screen_h)) * 4)
             self.windowIdleSmokeFailed("capture-screenshot-file");
-        _ = self.pollRemoteFrameDemand(); self.pollComposition();
+        _ = self.pollRemoteFrameDemand();
+        self.pollComposition();
         self.ctx.println("DESKTOP capture: OK bounded snapshots resize source-reset process-exit screenshot-BMP no-demand-retirement");
         if (self.outputs) |manager| for (&manager.slots) |*slot| if (slot.logical_index == manager.layout.primary) {
             const reader = if (slot.gpu) |owner| &owner.capture.reader else if (slot.software) |owner| &owner.capture.reader else continue;
-            self.ctx.write("DESKTOP readback: copy-bytes="); self.ctx.printU64(reader.stats.copy_bytes);
-            self.ctx.write(" cpu-read-bytes="); self.ctx.printU64(reader.stats.cpu_read_bytes);
-            self.ctx.write(" max-latency-ns="); self.ctx.printU64(reader.stats.max_latency_ns); self.ctx.println("");
+            self.ctx.write("DESKTOP readback: copy-bytes=");
+            self.ctx.printU64(reader.stats.copy_bytes);
+            self.ctx.write(" cpu-read-bytes=");
+            self.ctx.printU64(reader.stats.cpu_read_bytes);
+            self.ctx.write(" max-latency-ns=");
+            self.ctx.printU64(reader.stats.max_latency_ns);
+            self.ctx.println("");
         };
     }
 
@@ -1718,9 +1738,9 @@ pub const App = struct {
             if (self.screen_power.want_off or self.screen_power.wake_pending or self.screen_power.count != 0 or
                 self.screen_power.input(&self.ctx.draw, now)) self.windowIdleSmokeFailed("screen-power-fallback-owner");
             self.screen_power.tick(&self.ctx.draw, now + std.time.ns_per_s, 0);
-            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/RECEIVERS",
-                "screen-power=unsupported", "DISPLAYD receivers: complete")) self.windowIdleSmokeFailed("screen-power-diagnostics");
-            self.invalidateFull(); self.redraw();
+            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/RECEIVERS", "screen-power=unsupported", "DISPLAYD receivers: complete")) self.windowIdleSmokeFailed("screen-power-diagnostics");
+            self.invalidateFull();
+            self.redraw();
             self.ctx.println("DESKTOP screen power fallback: OK unsupported input=preserved render=available system=running");
         }
         if (argsContain(self.ctx.argsRaw(), "/OUTPUTS")) {
@@ -1728,17 +1748,18 @@ pub const App = struct {
             if (!self.managedOutputs() or self.outputs.?.layout.count < 2) self.windowIdleSmokeFailed("two-native-outputs-unavailable");
         }
         if (argsContain(self.ctx.argsRaw(), "/SWAPCHAIN")) {
-            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/SWAPCHAIN /TEST",
-                "DISPLAYD swapchain: OK", "cleanup=complete")) self.windowIdleSmokeFailed("swapchain");
-            self.invalidateFull(); self.redraw();
+            if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\DISPLAYD.R4X", "/SWAPCHAIN /TEST", "DISPLAYD swapchain: OK", "cleanup=complete")) self.windowIdleSmokeFailed("swapchain");
+            self.invalidateFull();
+            self.redraw();
         }
         if (argsContain(self.ctx.argsRaw(), "/CURSOR")) {
-            var info: r4os.abi.DisplayCursorInfo = .{ .display_generation=79 };
+            var info: r4os.abi.DisplayCursorInfo = .{ .display_generation = 79 };
             if (!self.ctx.draw.supportsDisplayCursor() or self.ctx.draw.displayCursorInfo(&info) != r4os.abi.gfx_output_error_unsupported or
                 info.display_generation != 79) self.windowIdleSmokeFailed("cursor-fallback-api");
             _ = self.syncCursor();
             if (!self.cursor_controller.software or self.cursor_controller.acquired) self.windowIdleSmokeFailed("cursor-fallback-owner");
-            _ = self.updateCursor(8, 0); self.redraw();
+            _ = self.updateCursor(8, 0);
+            self.redraw();
             _ = self.updateCursor(9, 0);
             if (!self.cursor_damage.active) self.windowIdleSmokeFailed("cursor-fallback-damage");
             self.redraw();
@@ -1861,45 +1882,59 @@ pub const App = struct {
         if (graphics.rejected_batches != 0 or (!self.managedOutputs() and
             (self.cpu_composition.frames == 0 or self.cpu_composition.stats.pixels == 0)))
             self.windowIdleSmokeFailed("gfx-color-composition");
-        self.ctx.write("DESKTOP graphics resources: OK DEVICE_V1 backend="); self.ctx.printU64(info.backend);
-        self.ctx.write(" batches="); self.ctx.printU64(graphics.batches);
-        self.ctx.write(" fills="); self.ctx.printU64(graphics.fills);
-        self.ctx.write(" imports="); self.ctx.printU64(info.imports);
-        self.ctx.write(" linear-frames="); self.ctx.printU64(self.cpu_composition.frames);
-        self.ctx.write(" direct-sdr-pixels="); self.ctx.printU64(self.cpu_composition.stats.direct_pixels);
+        self.ctx.write("DESKTOP graphics resources: OK DEVICE_V1 backend=");
+        self.ctx.printU64(info.backend);
+        self.ctx.write(" batches=");
+        self.ctx.printU64(graphics.batches);
+        self.ctx.write(" fills=");
+        self.ctx.printU64(graphics.fills);
+        self.ctx.write(" imports=");
+        self.ctx.printU64(info.imports);
+        self.ctx.write(" linear-frames=");
+        self.ctx.printU64(self.cpu_composition.frames);
+        self.ctx.write(" direct-sdr-pixels=");
+        self.ctx.printU64(self.cpu_composition.stats.direct_pixels);
         self.ctx.println(" rejected=0");
         self.smokeCompositionResources();
     }
 
     fn smokeCompositionResources(self: *App) void {
-        if (self.managedOutputs()) { self.smokeManagedOutputs(); return; }
+        if (self.managedOutputs()) {
+            self.smokeManagedOutputs();
+            return;
+        }
         const worker = self.composition orelse self.windowIdleSmokeFailed("composition-owner");
         if (worker.busy() or worker.available(self.output_revision)) return;
-        self.invalidateFull(); self.redraw();
-        const expected = std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?));
+        self.invalidateFull();
+        self.redraw();
+        const expected = std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.scene.pixels.?));
         const bounds = self.scene.fullRect();
-        const offsets = self.consoleScrollOffsets(); const views = self.guiFrameViews();
+        const offsets = self.consoleScrollOffsets();
+        const views = self.guiFrameViews();
         // Both passes replay the productive scene. The second starts without
         // any cached layer, as after compositor reconstruction.
         for (0..2) |_| {
             worker.cache.start(bounds) catch self.windowIdleSmokeFailed("composition-capture");
             self.scene.layer_hook = worker.cache.hook();
-            self.ctx.beginSceneClipped(&self.scene,bounds);
-            _ = self.composeDamageRect(bounds,&offsets,&views);
-            self.ctx.endScene(); self.scene.clearPaintClip(); self.scene.layer_hook = null;
+            self.ctx.beginSceneClipped(&self.scene, bounds);
+            _ = self.composeDamageRect(bounds, &offsets, &views);
+            self.ctx.endScene();
+            self.scene.clearPaintClip();
+            self.scene.layer_hook = null;
             _ = worker.cache.finish() catch self.windowIdleSmokeFailed("composition-layers");
-            _ = composition_software.paint(&worker.graphics.colors,&worker.cache,&self.scene) catch
+            _ = composition_software.paint(&worker.graphics.colors, &worker.cache, &self.scene) catch
                 self.windowIdleSmokeFailed("composition-software");
-            if (std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-pixels");
+            if (std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-pixels");
             worker.cache.deinit();
         }
         // Enter the same asynchronous failure branch as a rejected GPU
         // frame, then require full reconstruction from the current sources.
-        @memset(self.scene.pixels.?,0x13579B);
+        @memset(self.scene.pixels.?, 0x13579B);
         worker.engine.cancel(error.Unsupported);
-        self.pollComposition(); self.redraw();
+        self.pollComposition();
+        self.redraw();
         if (!self.cpu_scene_current or worker.busy() or
-            std.hash.Wyhash.hash(0,std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-fallback");
+            std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(self.scene.pixels.?)) != expected) self.windowIdleSmokeFailed("composition-fallback");
         self.ctx.println("DESKTOP composition: OK layers=shared reconstruction=2 fault=software idle=no-gpu-job");
     }
 
@@ -1911,9 +1946,11 @@ pub const App = struct {
         const saved = self.windows[index];
         self.beginDrag(index, saved.x + 20, saved.y + 10);
         _ = self.updateDrag(bounds.x + 40, bounds.y + 30);
-        self.drag = .{}; self.flushWindowGeometry(true);
+        self.drag = .{};
+        self.flushWindowGeometry(true);
         if (self.windows[index].x < bounds.x or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("output-window-crossing");
-        const old_motion = manager.motion; defer manager.motion = old_motion;
+        const old_motion = manager.motion;
+        defer manager.motion = old_motion;
         manager.motion = .{ 100, 200 };
         const sample: r4os.abi.MouseMotion = .{ .mouse = std.mem.zeroes(r4os.abi.Mouse), .motion_x = 150, .motion_y = 200 };
         const point = manager.pointer(sample, .{ .x = bounds.x - 20, .y = bounds.y + 30 });
@@ -1926,7 +1963,8 @@ pub const App = struct {
             if (slot.logical_index == secondary) break slot;
         } else self.windowIdleSmokeFailed("output-fault-owner");
         manager.fail(failed);
-        _ = self.syncOutputRevision(); self.flushWindowGeometry(true);
+        _ = self.syncOutputRevision();
+        self.flushWindowGeometry(true);
         if (manager.layout.count != previous_count - 1 or !self.smokeGeometryMatches(index)) self.windowIdleSmokeFailed("output-fault-withdrawal");
         const win = self.windows[index];
         const primary = manager.layout.outputs[manager.layout.primary];
@@ -1936,35 +1974,44 @@ pub const App = struct {
             self.smokePumpFrames(1);
             if ((self.ctx.sys.monotonicNanoseconds() orelse deadline) >= deadline) self.windowIdleSmokeFailed("output-fault-recovery");
         }
-        self.windows[index] = saved; self.updateGuiWindowInfo(index); self.mirrorWindowUpdate(index); self.flushWindowGeometry(true);
-        self.invalidateFull(); self.redraw();
+        self.windows[index] = saved;
+        self.updateGuiWindowInfo(index);
+        self.mirrorWindowUpdate(index);
+        self.flushWindowGeometry(true);
+        self.invalidateFull();
+        self.redraw();
         self.ctx.println("DESKTOP output topology: OK window-crossing pointer-coalescing detached-window-rescue");
     }
     fn smokeManagedOutputs(self: *App) void {
         const manager = self.outputs orelse self.windowIdleSmokeFailed("output-owner");
-        self.invalidateFull(); self.redraw();
+        self.invalidateFull();
+        self.redraw();
         const deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s;
         while (true) {
             self.pollComposition();
-            var complete = true; var count: usize = 0;
+            var complete = true;
+            var count: usize = 0;
             for (&manager.slots) |*slot| if (slot.logical_index != null) {
                 count += 1;
                 if (slot.failed) self.windowIdleSmokeFailed("output-present");
                 if (slot.reported == 0) complete = false;
-                if (slot.software) |owner| if (owner.pending) { complete = false; };
+                if (slot.software) |owner| if (owner.pending) {
+                    complete = false;
+                };
             };
             if (complete and count == manager.layout.count) break;
             if ((self.ctx.sys.monotonicNanoseconds() orelse deadline) >= deadline) self.windowIdleSmokeFailed("output-progress");
             self.ctx.sleepTicks(1);
         }
-        self.ctx.write("DESKTOP output presentation: OK active="); self.ctx.printU64(manager.layout.count);
+        self.ctx.write("DESKTOP output presentation: OK active=");
+        self.ctx.printU64(manager.layout.count);
         self.ctx.println(" separate-queues owned-images no-global-framebuffer");
     }
 
     fn smokeDisplayClient(self: *App) @import("r4gfx_desktop_outputs").control.Client {
-        var client: @import("r4gfx_desktop_outputs").control.Client = .{ .owner = self.ctx.self_handle,
-            .next_request = self.display_settings.state.request_id + 1 };
-        self.display_settings.next_sync_ns = 0; self.smokeServiceFrame();
+        var client: @import("r4gfx_desktop_outputs").control.Client = .{ .owner = self.ctx.self_handle, .next_request = self.display_settings.state.request_id + 1 };
+        self.display_settings.next_sync_ns = 0;
+        self.smokeServiceFrame();
         if (!client.poll(&self.ctx.sys) or client.state.flags & 1 == 0) self.windowIdleSmokeFailed("display-control-discovery");
         return client;
     }
@@ -1975,9 +2022,13 @@ pub const App = struct {
             _ = if (client.pending != null) client.retry(&self.ctx.sys) else client.poll(&self.ctx.sys);
             if (client.state.phase == phase and client.pending == null) return;
             if (client.state.phase == 6 or (self.ctx.sys.monotonicNanoseconds() orelse deadline) >= deadline) {
-                self.ctx.write("DESKTOP display wait: expected="); self.ctx.printU64(phase);
-                self.ctx.write(" phase="); self.ctx.printU64(client.state.phase);
-                self.ctx.write(" error="); self.ctx.printI32(client.last_error); self.ctx.println("");
+                self.ctx.write("DESKTOP display wait: expected=");
+                self.ctx.printU64(phase);
+                self.ctx.write(" phase=");
+                self.ctx.printU64(client.state.phase);
+                self.ctx.write(" error=");
+                self.ctx.printI32(client.last_error);
+                self.ctx.println("");
                 self.windowIdleSmokeFailed("display-control-progress");
             }
         }
@@ -2016,11 +2067,13 @@ pub const App = struct {
         const restored = reloaded.saved.find(chosen.key);
         manager.allocator.destroy(reloaded);
         if (restored == null or !std.meta.eql(restored.?, chosen)) self.windowIdleSmokeFailed("display-preferences-reload");
-        var disabled = manager.layout; disabled.outputs[secondary].enabled = false;
+        var disabled = manager.layout;
+        disabled.outputs[secondary].enabled = false;
         if (!client.request(&self.ctx.sys, 1, &disabled)) self.windowIdleSmokeFailed("display-disable-submit");
         self.smokeDisplayWait(&client, 2, 5);
-        const slot = for (&manager.slots) |*slot| { if (slot.logical_index == secondary) break slot; }
-            else self.windowIdleSmokeFailed("display-disable-owner");
+        const slot = for (&manager.slots) |*slot| {
+            if (slot.logical_index == secondary) break slot;
+        } else self.windowIdleSmokeFailed("display-disable-owner");
         if (!slot.disabled) self.windowIdleSmokeFailed("display-disable-desktop");
         const owner = slot.software orelse self.windowIdleSmokeFailed("display-disable-readback-owner");
         const last = owner.last_submitted orelse self.windowIdleSmokeFailed("display-disable-image");
@@ -2030,7 +2083,10 @@ pub const App = struct {
             self.windowIdleSmokeFailed("display-disable-map");
         const pixels: [*]const u32 = @ptrFromInt(mapping.cpu_address);
         var black = true;
-        for (pixels[0..@intCast(bytes / 4)]) |pixel| if (pixel & 0xffffff != 0) { black = false; break; };
+        for (pixels[0..@intCast(bytes / 4)]) |pixel| if (pixel & 0xffffff != 0) {
+            black = false;
+            break;
+        };
         if (self.ctx.draw.gfxBufferUnmap(&mapping.lease) != r4os.abi.gfx_buffer_result_ok or !black) self.windowIdleSmokeFailed("display-disable-black");
         // This is the actual fifteen-second Desktop deadline. There is no
         // synthetic clock or confirmation injected into the timeout path.
@@ -2039,7 +2095,8 @@ pub const App = struct {
         var after: [output_manager.preferences.max_bytes]u8 = undefined;
         const after_count = self.ctx.sys.fileRead(output_manager.preferences.path, &after);
         if (after_count != count or !std.mem.eql(u8, after[0..@intCast(after_count)], saved[0..@intCast(count)])) self.windowIdleSmokeFailed("display-timeout-persistence");
-        _ = self.requestWindowProcessClose(appearance_index); self.smokePumpFrames(20);
+        _ = self.requestWindowProcessClose(appearance_index);
+        self.smokePumpFrames(20);
         if (self.windows[appearance_index].instance_id != 0) self.windowIdleSmokeFailed("display-ui-close");
         self.ctx.println("DESKTOP display UI: OK created closed");
         self.ctx.println("DESKTOP display settings: OK IPC fractional rotation keep persistent timeout disabled-black");
@@ -3232,16 +3289,26 @@ pub const App = struct {
             for (&self.outputs.?.slots) |*slot| {
                 const index = slot.logical_index orelse continue;
                 if (slot.software) |output| {
-                    self.ctx.write("DESKTOP output render "); self.ctx.write(label);
-                    self.ctx.write(": index="); self.ctx.printU64(index);
-                    self.ctx.write(" submitted="); self.ctx.printU64(output.serial);
-                    self.ctx.write(" completed="); self.ctx.printU64(output.completed);
-                    self.ctx.write(" visible="); self.ctx.printU64(output.visible);
-                    self.ctx.write(" failed="); self.ctx.printU64(output.failed);
-                    self.ctx.write(" direct-sdr-pixels="); self.ctx.printU64(output.color_composition.stats.direct_pixels);
-                    self.ctx.write(" scratch-bytes="); self.ctx.printU64(output.scratch.len);
-                    self.ctx.write(" frame-submit-ns="); self.ctx.printU64(output.frame_submit_last_ns);
-                    self.ctx.write("/"); self.ctx.printU64(output.frame_submit_max_ns);
+                    self.ctx.write("DESKTOP output render ");
+                    self.ctx.write(label);
+                    self.ctx.write(": index=");
+                    self.ctx.printU64(index);
+                    self.ctx.write(" submitted=");
+                    self.ctx.printU64(output.serial);
+                    self.ctx.write(" completed=");
+                    self.ctx.printU64(output.completed);
+                    self.ctx.write(" visible=");
+                    self.ctx.printU64(output.visible);
+                    self.ctx.write(" failed=");
+                    self.ctx.printU64(output.failed);
+                    self.ctx.write(" direct-sdr-pixels=");
+                    self.ctx.printU64(output.color_composition.stats.direct_pixels);
+                    self.ctx.write(" scratch-bytes=");
+                    self.ctx.printU64(output.scratch.len);
+                    self.ctx.write(" frame-submit-ns=");
+                    self.ctx.printU64(output.frame_submit_last_ns);
+                    self.ctx.write("/");
+                    self.ctx.printU64(output.frame_submit_max_ns);
                     self.ctx.println(" scope=per-output-cpu-to-submit");
                 }
             }
@@ -3250,8 +3317,10 @@ pub const App = struct {
         const font_cache = paint.currentFontCacheStats();
         self.ctx.print("DESKTOP render ");
         self.ctx.write(label);
-        self.ctx.print(": items="); self.ctx.printU64(self.desktop_items.count);
-        self.ctx.print(" folder-failed="); self.ctx.printU64(@intFromBool(self.desktop_folder_failed));
+        self.ctx.print(": items=");
+        self.ctx.printU64(self.desktop_items.count);
+        self.ctx.print(" folder-failed=");
+        self.ctx.printU64(@intFromBool(self.desktop_folder_failed));
         self.ctx.print(" redraws=");
         self.ctx.printU64(after.redraws);
         self.ctx.print(" delta_redraws=");
@@ -4676,7 +4745,9 @@ pub const App = struct {
             if (manager.active() and self.ctx.desk.mouseMotion(&sample) == 0) {
                 if (!self.physical_mouse_activity.changed(sample.mouse, .{ sample.motion_x, sample.motion_y })) return false;
                 const point = manager.pointer(sample, .{ .x = self.cursor_x, .y = self.cursor_y });
-                self.event_mouse = sample.mouse; self.event_mouse.x = point.x; self.event_mouse.y = point.y;
+                self.event_mouse = sample.mouse;
+                self.event_mouse.x = point.x;
+                self.event_mouse.y = point.y;
             } else {
                 self.ctx.mouseState(&self.event_mouse);
                 if (!self.physical_mouse_activity.changed(self.event_mouse, null)) return false;
@@ -4699,7 +4770,6 @@ pub const App = struct {
 
         self.remote_input_events +%= 1;
         self.last_remote_input_sequence = input.sequence;
-
 
         if (input.kind == r4os.abi.remote_input_kind_key_down) {
             self.remote_input_keys +%= 1;
@@ -5585,7 +5655,10 @@ pub const App = struct {
     }
 
     fn fitWindowsToWorkArea(self: *App) void {
-        if (self.managedOutputs()) { self.rescueOutputWindows(); return; }
+        if (self.managedOutputs()) {
+            self.rescueOutputWindows();
+            return;
+        }
         var i: usize = 0;
         while (i < self.windows.len) : (i += 1) {
             self.windows[i].fitToWorkArea(self.screen_w, self.screen_h);
@@ -5645,8 +5718,7 @@ pub const App = struct {
         if (self.outputs) |manager| {
             if (manager.active()) {
                 const win = &self.windows[index];
-                const moved = manager.layout.rescue(.{ .x = x - self.drag.grab_x, .y = y - self.drag.grab_y,
-                    .w = @intCast(win.w), .h = @intCast(win.h) }, theme.title_h) catch return false;
+                const moved = manager.layout.rescue(.{ .x = x - self.drag.grab_x, .y = y - self.drag.grab_y, .w = @intCast(win.w), .h = @intCast(win.h) }, theme.title_h) catch return false;
                 win.setNormal(moved.x, moved.y, win.w, win.h);
             } else self.windows[index].moveTo(x - self.drag.grab_x, y - self.drag.grab_y, self.screen_w, self.screen_h);
         } else self.windows[index].moveTo(x - self.drag.grab_x, y - self.drag.grab_y, self.screen_w, self.screen_h);
@@ -5743,8 +5815,9 @@ pub const App = struct {
         const old_frame = self.windows[index].frameSurface().rect;
         var bounds = self.outputWorkArea(index);
         if (self.outputs) |manager| if (manager.active()) {
-            for (manager.layout.outputs[0..manager.layout.count]) |entry| if (entry.enabled)
-                { bounds = bounds.merged(output_geometry.logical(entry.view) catch continue); };
+            for (manager.layout.outputs[0..manager.layout.count]) |entry| if (entry.enabled) {
+                bounds = bounds.merged(output_geometry.logical(entry.view) catch continue);
+            };
         };
         self.windows[index].resizeIn(
             self.resize.start,
@@ -5811,10 +5884,11 @@ pub const App = struct {
         self.presentDamageRegionsTimed((&damage_rect)[0..1], kind, 0);
     }
 
-    fn managedOutputs(self: *const App) bool { return if (self.outputs) |manager| manager.active() else false; }
+    fn managedOutputs(self: *const App) bool {
+        return if (self.outputs) |manager| manager.active() else false;
+    }
     fn cursorRect(self: *const App) surface.Rect {
-        return if (self.managedOutputs()) .{ .x = self.cursor_x, .y = self.cursor_y, .w = surface.cursor_w, .h = surface.cursor_h }
-            else surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
+        return if (self.managedOutputs()) .{ .x = self.cursor_x, .y = self.cursor_y, .w = surface.cursor_w, .h = surface.cursor_h } else surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
     }
     fn outputBounds(self: *const App, index: usize) surface.Rect {
         if (self.outputs) |manager| if (manager.active()) {
@@ -5836,38 +5910,50 @@ pub const App = struct {
     }
     fn rescueOutputWindows(self: *App) void {
         const manager = self.outputs orelse return;
-        if (!manager.active()) { self.fitWindowsToWorkArea(); return; }
-        const shift = manager.translation; manager.translation = .{};
-        self.drag = .{}; self.resize = .{}; self.system_menu_open = false;
+        if (!manager.active()) {
+            self.fitWindowsToWorkArea();
+            return;
+        }
+        const shift = manager.translation;
+        manager.translation = .{};
+        self.drag = .{};
+        self.resize = .{};
+        self.system_menu_open = false;
         for (&self.windows, 0..) |*win, index| {
             const previous = win.geometry();
-            win.x -|= shift.x; win.y -|= shift.y;
-            win.normal_x -|= shift.x; win.normal_y -|= shift.y;
+            win.x -|= shift.x;
+            win.y -|= shift.y;
+            win.normal_x -|= shift.x;
+            win.normal_y -|= shift.y;
             const restored = manager.layout.rescue(.{ .x = win.x, .y = win.y, .w = @intCast(win.w), .h = @intCast(win.h) }, theme.title_h) catch continue;
             if (win.fullscreen) {
                 win.fitFullscreen(self.outputBounds(index), self.outputWorkArea(index));
             } else if (win.maximized) {
                 const bounds = self.outputWorkArea(index);
-                win.x = bounds.x; win.y = bounds.y; win.w = bounds.w; win.h = bounds.h;
+                win.x = bounds.x;
+                win.y = bounds.y;
+                win.w = bounds.w;
+                win.h = bounds.h;
             } else win.setNormal(restored.x, restored.y, win.w, win.h);
             if (!std.meta.eql(previous, win.geometry()) and win.instance_id != 0) {
-                self.updateGuiWindowInfo(index); self.mirrorWindowUpdate(index);
+                self.updateGuiWindowInfo(index);
+                self.mirrorWindowUpdate(index);
                 if (previous.w != win.w or previous.h != win.h) self.pushGuiEvent(index, .resize);
             }
         }
         if (manager.layout.nearest(.{ .x = self.cursor_x -| shift.x, .y = self.cursor_y -| shift.y })) |point| {
-            self.cursor_x = point.point.x; self.cursor_y = point.point.y;
+            self.cursor_x = point.point.x;
+            self.cursor_y = point.point.y;
         }
         self.invalidateFull();
     }
     fn presentOutputRegions(self: *App, regions: []const surface.Rect) void {
-
-
         const manager = self.outputs orelse return;
         self.syncCaptureDemand();
         manager.invalidate(regions);
         self.refreshConsoleSnapshots();
-        const offsets = self.consoleScrollOffsets(); const views = self.guiFrameViews();
+        const offsets = self.consoleScrollOffsets();
+        const views = self.guiFrameViews();
         for (&manager.slots) |*slot| {
             if (!slot.dirty()) continue;
             const bounds = slot.bounds();
@@ -5879,30 +5965,38 @@ pub const App = struct {
                 owner.engine.input_ns = self.last_input_ns;
                 if (!owner.available(manager.revision)) continue;
                 owner.primitives.mirror = false;
-                owner.cache.startOutput(slot.view) catch { owner.rejectCapture(); manager.fail(slot); continue; };
+                owner.cache.startOutput(slot.view) catch {
+                    owner.rejectCapture();
+                    manager.fail(slot);
+                    continue;
+                };
                 owner.engine.reuseCapture(&owner.cache, slot.damage.bounds);
-                var capture: scene_buffer.SceneBuffer = .{ .width = bounds.w, .height = bounds.h,
-                    .origin_x = bounds.x, .origin_y = bounds.y, .layer_hook = owner.cache.hook() };
+                var capture: scene_buffer.SceneBuffer = .{ .width = bounds.w, .height = bounds.h, .origin_x = bounds.x, .origin_y = bounds.y, .layer_hook = owner.cache.hook() };
                 self.ctx.beginSceneClipped(&capture, bounds);
 
                 if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(bounds, &offsets, &views);
                 self.ctx.endScene();
 
-
-
-                _ = owner.cache.finish() catch { owner.rejectCapture(); manager.fail(slot); continue; };
+                _ = owner.cache.finish() catch {
+                    owner.rejectCapture();
+                    manager.fail(slot);
+                    continue;
+                };
                 // Managed GPU capture above traverses the complete output
                 // scene even when only its final composition has damage.
                 owner.cache.complete_scene = true;
                 // Software cursor and output transforms require composition.
                 // Each head still owns its own measured scheduling phase.
-                owner.engine.present_intent = 0; owner.engine.present_blockers = @as(u32, if (self.cursor_controller.software) gfx.present_block_cursor else 0) |
+                owner.engine.present_intent = 0;
+                owner.engine.present_blockers = @as(u32, if (self.cursor_controller.software) gfx.present_block_cursor else 0) |
                     @as(u32, if (owner.capture_demand) gfx.present_block_readers else 0);
-                owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
+                owner.capture_damage = slot.damage.bounds;
+                owner.capture_cursor = self.captureCursor();
                 owner.engine.compositionDamage(slot.view, slot.damage.bounds);
                 captured = owner.start();
             } else if (slot.software) |owner| {
-                owner.capture_damage = slot.damage.bounds; owner.capture_cursor = self.captureCursor();
+                owner.capture_damage = slot.damage.bounds;
+                owner.capture_cursor = self.captureCursor();
                 const canvas = owner.begin(self.last_input_ns) orelse continue;
                 const repair = owner.repaint;
                 self.ctx.beginSceneClipped(canvas, repair);
@@ -5910,14 +6004,10 @@ pub const App = struct {
                 if (slot.disabled) self.paintDisabledOutput(bounds) else _ = self.composeDamageRect(repair, &offsets, &views);
                 self.ctx.endScene();
 
-
-
                 captured = owner.submit((self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s);
             }
             if (captured) {
-                if (slot.gpu) |owner| self.cursor_controller.captured(.{ .target = slot.target,
-                    .device_address = owner.graphics.device.address, .device_generation = owner.graphics.device.generation,
-                    .frame = owner.cache.frame });
+                if (slot.gpu) |owner| self.cursor_controller.captured(.{ .target = slot.target, .device_address = owner.graphics.device.address, .device_generation = owner.graphics.device.generation, .frame = owner.cache.frame });
                 slot.damage = .{};
                 self.render_stats.present_attempts +|= 1;
             }
@@ -6007,13 +6097,21 @@ pub const App = struct {
 
     fn captureGpuFrame(self: *App, regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) bool {
         const worker = self.composition orelse return false;
-        const pending_index = for (&self.gpu_pending, 0..) |*value, i| { if (value.* == null) break i; } else return false;
-        if (!self.ensureSceneBuffer()) { worker.rejectCapture(); return false; }
+        const pending_index = for (&self.gpu_pending, 0..) |*value, i| {
+            if (value.* == null) break i;
+        } else return false;
+        if (!self.ensureSceneBuffer()) {
+            worker.rejectCapture();
+            return false;
+        }
         const start_tick = self.ctx.ticks();
         const start_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         worker.primitives.mirror = false;
         worker.capture_demand = self.remote_frame_consumers != 0;
-        worker.cache.start(surface.desktop(self.screen_w, self.screen_h).rect) catch { worker.rejectCapture(); return false; };
+        worker.cache.start(surface.desktop(self.screen_w, self.screen_h).rect) catch {
+            worker.rejectCapture();
+            return false;
+        };
         self.scene.layer_hook = worker.cache.hook();
         defer self.scene.layer_hook = null;
         self.refreshConsoleSnapshots();
@@ -6025,30 +6123,39 @@ pub const App = struct {
         for (regions) |region| {
             self.ctx.beginSceneClipped(&self.scene, region);
             accumulateCullStats(&cull, self.composeDamageRect(region, &offsets, &views));
-            self.ctx.endScene(); self.scene.clearPaintClip();
-            bounds = bounds.merged(region); pixels +|= rectArea(region);
+            self.ctx.endScene();
+            self.scene.clearPaintClip();
+            bounds = bounds.merged(region);
+            pixels +|= rectArea(region);
         }
-        _ = worker.cache.finish() catch { worker.rejectCapture(); self.cpu_scene_current = false; return false; };
+        _ = worker.cache.finish() catch {
+            worker.rejectCapture();
+            self.cpu_scene_current = false;
+            return false;
+        };
         worker.cache.complete_scene = regions.len == 1 and isFullRect(bounds, self.screen_w, self.screen_h);
-        var frame: GpuFrame = .{ .bounds = bounds, .pixels = @intCast(@min(pixels, std.math.maxInt(u32))),
-            .regions = @intCast(regions.len), .kind = if (regions.len == 1 and isFullRect(bounds,self.screen_w,self.screen_h)) .full else kind,
-            .start_tick = start_tick, .start_ns = start_ns, .composed_tick = self.ctx.ticks(),
-            .composed_ns = self.ctx.sys.monotonicNanoseconds() orelse 0, .cursor_queued_tick = cursor_queued_tick,
-            .cull = cull, .gui_generations = undefined };
+        var frame: GpuFrame = .{ .bounds = bounds, .pixels = @intCast(@min(pixels, std.math.maxInt(u32))), .regions = @intCast(regions.len), .kind = if (regions.len == 1 and isFullRect(bounds, self.screen_w, self.screen_h)) .full else kind, .start_tick = start_tick, .start_ns = start_ns, .composed_tick = self.ctx.ticks(), .composed_ns = self.ctx.sys.monotonicNanoseconds() orelse 0, .cursor_queued_tick = cursor_queued_tick, .cull = cull, .gui_generations = undefined };
         for (views, 0..) |view, index| frame.gui_generations[index] = view.info.committed_generation;
         self.cpu_scene_current = false;
-        worker.capture_damage = bounds; worker.capture_cursor = self.captureCursor();
+        worker.capture_damage = bounds;
+        worker.capture_cursor = self.captureCursor();
         worker.engine.present_intent = 1;
         var blockers: u32 = 0;
         var visible_windows: usize = 0;
-        for (&self.windows) |*entry| if (entry.visible and !entry.minimized) { visible_windows += 1; };
+        for (&self.windows) |*entry| if (entry.visible and !entry.minimized) {
+            visible_windows += 1;
+        };
         if (visible_windows > 1) blockers |= gfx.present_block_windows;
         if (self.remote_frame_consumers != 0) blockers |= gfx.present_block_readers;
         if (self.cursor_controller.software or !self.cursor_controller.acquired or self.cursor_controller.retryPending()) blockers |= gfx.present_block_cursor;
         if (self.start_open or self.system_menu_open or self.time_menu_open or self.dialog != .none or self.menu_submenu_open or self.menu_nested_open)
             blockers |= gfx.present_block_menus;
         worker.engine.present_blockers = blockers;
-        if (!worker.start()) { worker.rejectCapture(); self.cpu_scene_current = false; return false; }
+        if (!worker.start()) {
+            worker.rejectCapture();
+            self.cpu_scene_current = false;
+            return false;
+        }
         self.last_input_ns = 0;
         frame.capture_frame = worker.cache.frame;
         self.gpu_pending[pending_index] = frame;
@@ -6060,19 +6167,19 @@ pub const App = struct {
             self.ctx.recording_state = 0;
             self.invalidateTaskbar();
             if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
-                self.dialog = .message_window_info; self.dialog_focus = .message_ok;
-                if (result.ok) self.setMessageBox(.info, .ok, "Recording", "Saved in C:\\RECORDINGS.")
-                else if (result.parts != 0) self.setMessageBox(.@"error", .ok, "Recording", "Recording stopped after an error. Completed parts are in C:\\RECORDINGS.")
-                else self.setMessageBox(.@"error", .ok, "Recording", "The recording could not be saved.");
+                self.dialog = .message_window_info;
+                self.dialog_focus = .message_ok;
+                if (result.ok) self.setMessageBox(.info, .ok, "Recording", "Saved in C:\\RECORDINGS.") else if (result.parts != 0) self.setMessageBox(.@"error", .ok, "Recording", "Recording stopped after an error. Completed parts are in C:\\RECORDINGS.") else self.setMessageBox(.@"error", .ok, "Recording", "The recording could not be saved.");
                 self.invalidateFull();
             }
         };
         if (self.screenshot_job) |job| if (job.collect()) |result| {
-            self.screenshot_job = null; self.screenshot_last = result;
+            self.screenshot_job = null;
+            self.screenshot_last = result;
             if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
-                self.dialog = .message_window_info; self.dialog_focus = .message_ok;
-                if (result.code == 0) self.setMessageBox(.info, .ok, "Screenshot", "Saved in C:\\SCREENSHOTS.")
-                else self.setMessageBox(.@"error", .ok, "Screenshot", "The screenshot could not be saved.");
+                self.dialog = .message_window_info;
+                self.dialog_focus = .message_ok;
+                if (result.code == 0) self.setMessageBox(.info, .ok, "Screenshot", "Saved in C:\\SCREENSHOTS.") else self.setMessageBox(.@"error", .ok, "Screenshot", "The screenshot could not be saved.");
                 self.invalidateFull();
             }
         };
@@ -6085,21 +6192,24 @@ pub const App = struct {
             manager.poll();
             for (&manager.slots) |*slot| {
                 if (slot.gpu) |owner| if (owner.completed_status) |status| {
-                    const matched = self.cursor_controller.completed(.{ .target = slot.target,
-                        .device_address = owner.graphics.device.address, .device_generation = owner.graphics.device.generation,
-                        .frame = owner.completed_frame }, status.result == 1);
+                    const matched = self.cursor_controller.completed(.{ .target = slot.target, .device_address = owner.graphics.device.address, .device_generation = owner.graphics.device.generation, .frame = owner.completed_frame }, status.result == 1);
                     if (matched and status.result != 1) slot.invalidate();
                 };
-                if (slot.gpu) |owner| { if (owner.thread == null and owner.capture_demand) self.publishCapture(&owner.capture); }
-                else if (slot.software) |owner| { if (owner.capture.wanted) self.publishCapture(&owner.capture); }
+                if (slot.gpu) |owner| {
+                    if (owner.thread == null and owner.capture_demand) self.publishCapture(&owner.capture);
+                } else if (slot.software) |owner| {
+                    if (owner.capture.wanted) self.publishCapture(&owner.capture);
+                }
                 const completed = if (slot.gpu) |owner| owner.frames_completed else if (slot.software) |owner| owner.completed else 0;
                 if (completed <= slot.reported) continue;
 
                 self.render_stats.present_successes +|= completed - slot.reported;
                 if (slot.reported == 0) {
-                    self.ctx.write("R4DESK output: head="); self.ctx.printU64(slot.target.head_id);
+                    self.ctx.write("R4DESK output: head=");
+                    self.ctx.printU64(slot.target.head_id);
                     const visible = if (slot.gpu) |owner| owner.frames_visible != 0 else if (slot.software) |owner| owner.visible != 0 else false;
-                    self.ctx.write(" frame-complete visibility="); self.ctx.println(if (visible) "observed" else "unknown");
+                    self.ctx.write(" frame-complete visibility=");
+                    self.ctx.println(if (visible) "observed" else "unknown");
                 }
                 slot.reported = completed;
             }
@@ -6111,10 +6221,14 @@ pub const App = struct {
         switch (progress) {
             .idle, .pending => {},
             .discarded => {
-                for (&self.gpu_pending) |*entry| if (entry.*) |value| if (value.capture_frame == worker.completed_frame) { entry.* = null; break; };
+                for (&self.gpu_pending) |*entry| if (entry.*) |value| if (value.capture_frame == worker.completed_frame) {
+                    entry.* = null;
+                    break;
+                };
             },
             .failed => {
-                self.gpu_pending = @splat(null); self.cpu_scene_current = false;
+                self.gpu_pending = @splat(null);
+                self.cpu_scene_current = false;
                 self.render_stats.present_backend_fallbacks +%= 1;
                 self.invalidateFull();
                 self.ctx.println("R4DESK composition: software fallback; complete scene reconstruction");
@@ -6125,16 +6239,13 @@ pub const App = struct {
                 } else return;
                 const frame = self.gpu_pending[index].?;
                 self.gpu_pending[index] = null;
-                const now = self.ctx.ticks(); const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                const now = self.ctx.ticks();
+                const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
                 self.last_display_revision = self.ctx.displayRevision();
                 self.cursor_controller.presented(true);
-                if (self.performance_present) |trace| if (frame.cull.rendered_gui_windows & (@as(u8,1) << @intCast(trace.window_index)) != 0)
+                if (self.performance_present) |trace| if (frame.cull.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index)) != 0)
                     trace.record(frame.gui_generations[trace.window_index]);
-                self.recordPresentStats(frame.bounds, frame.pixels, frame.regions, frame.kind,
-                    elapsedTicks(frame.start_tick,now), elapsedTicks(frame.start_tick,frame.composed_tick), elapsedTicks(frame.composed_tick,now),
-                    elapsedNanoseconds(frame.start_ns,now_ns), elapsedNanoseconds(frame.start_ns,frame.composed_ns), elapsedNanoseconds(frame.composed_ns,now_ns),
-                    if (frame.cursor_queued_tick == 0) 0 else elapsedTicks(frame.cursor_queued_tick,now),
-                    frame.cull, 0, false, true, false, frame.remote_result, .{});
+                self.recordPresentStats(frame.bounds, frame.pixels, frame.regions, frame.kind, elapsedTicks(frame.start_tick, now), elapsedTicks(frame.start_tick, frame.composed_tick), elapsedTicks(frame.composed_tick, now), elapsedNanoseconds(frame.start_ns, now_ns), elapsedNanoseconds(frame.start_ns, frame.composed_ns), elapsedNanoseconds(frame.composed_ns, now_ns), if (frame.cursor_queued_tick == 0) 0 else elapsedTicks(frame.cursor_queued_tick, now), frame.cull, 0, false, true, false, frame.remote_result, .{});
                 // The counters above describe CPU copies; this was a native
                 // present whose visibility was independently observed.
                 self.render_stats.present_attempts +%= 1;
@@ -6146,7 +6257,10 @@ pub const App = struct {
     fn presentDamageRegionsTimed(self: *App, damage_regions: []const surface.Rect, kind: compositor.DamageKind, cursor_queued_tick: u64) void {
         if (damage_regions.len == 0) return;
         self.pollComposition();
-        if (self.managedOutputs()) { self.presentOutputRegions(damage_regions); return; }
+        if (self.managedOutputs()) {
+            self.presentOutputRegions(damage_regions);
+            return;
+        }
         if (self.composition) |worker| if (worker.blocksCapture()) {
             for (damage_regions) |region| self.damage.invalidate(region);
             return;
@@ -6161,19 +6275,24 @@ pub const App = struct {
         if (clipped_count == 0) return;
         if (self.composition) |worker| worker.engine.input_ns = self.last_input_ns;
         const gpu_available = if (self.composition) |worker|
-            self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision) else false;
+            self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision)
+        else
+            false;
         if (gpu_available) {
             const worker = self.composition.?;
             if (worker.engine.needsFull(self.screen_w, self.screen_h) or
-                (self.remote_frame_consumers != 0 and !self.cpu_scene_current)) {
-                clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect; clipped_count = 1;
+                (self.remote_frame_consumers != 0 and !self.cpu_scene_current))
+            {
+                clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect;
+                clipped_count = 1;
             }
             if (self.captureGpuFrame(clipped_storage[0..clipped_count], kind, cursor_queued_tick)) return;
         }
         // GPU output and the fallback's CPU scene are separate resources.
         // Reconstruct the entire scene before a backend/fault fallback.
         if (!self.cpu_scene_current) {
-            clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect; clipped_count = 1;
+            clipped_storage[0] = surface.desktop(self.screen_w, self.screen_h).rect;
+            clipped_count = 1;
         }
         const clipped_regions = clipped_storage[0..clipped_count];
         var damage_bounds = clipped_regions[0];
@@ -6191,9 +6310,15 @@ pub const App = struct {
             @intCast(@max(0, damage_bounds.h)),
         );
         const scene_ready = self.ensureSceneBuffer();
-        if (!scene_ready) { self.cpu_scene_current = false; self.invalidateFull(); return; }
+        if (!scene_ready) {
+            self.cpu_scene_current = false;
+            self.invalidateFull();
+            return;
+        }
         self.cpu_composition.begin(self.ctx.allocator(), &self.scene) catch {
-            self.cpu_scene_current = false; self.invalidateFull(); return;
+            self.cpu_scene_current = false;
+            self.invalidateFull();
+            return;
         };
         const console_scroll_offsets = self.consoleScrollOffsets();
         self.refreshConsoleSnapshots();
@@ -6355,8 +6480,7 @@ pub const App = struct {
                 self.ctx.draw.displayCursorInfo(&info) == r4os.abi.gfx_output_ok and
                 manager.cursorTarget(info, @intCast(self.screen_w), @intCast(self.screen_h)) != null;
         }
-        const changed = self.cursor_controller.poll(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0,
-            self.cursor_x, self.cursor_y, wanted);
+        const changed = self.cursor_controller.poll(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.cursor_x, self.cursor_y, wanted);
         if (changed) self.invalidateCursor();
         return changed;
     }
@@ -6526,18 +6650,25 @@ pub const App = struct {
         switch (self.dialog) {
             .confirm_restart => {
                 self.flushDesktopLayoutBeforeSystemAction();
-                self.ctx.systemReboot();
+                self.refusableSystemAction(r4os.abi.power_transition_action_reboot);
             },
             .confirm_poweroff => {
                 self.flushDesktopLayoutBeforeSystemAction();
-                self.ctx.systemPoweroff();
+                self.refusableSystemAction(r4os.abi.power_transition_action_poweroff);
             },
             .confirm_halt => {
                 self.flushDesktopLayoutBeforeSystemAction();
-                self.ctx.systemHalt();
+                self.refusableSystemAction(r4os.abi.power_transition_action_halt);
             },
             else => self.closeTop(),
         }
+    }
+
+    fn refusableSystemAction(self: *App, action: u32) void {
+        const rc = self.ctx.systemPowerTransition(action);
+        _ = rc;
+        self.openDialog(.message_run_failed);
+        self.setMessageBox(.info, .ok, "System transition refused", "CPU requests could not be returned. The system remains running; inspect POWERSVC before retrying.");
     }
 
     fn openConsoleApp(self: *App, launch: start_menu.Launch) void {
@@ -7147,7 +7278,9 @@ pub const App = struct {
 
     const GraphicsTransport = struct {
         ctx: *desk_api.Context,
-        pub fn invalidate(self: @This()) void { self.ctx.closeWindowService(); }
+        pub fn invalidate(self: @This()) void {
+            self.ctx.closeWindowService();
+        }
         pub fn publish(self: @This(), request: *const r4os.abi.WindowGraphicsPublication, reply: *r4os.abi.WindowGraphicsReply) bool {
             return self.ctx.windowGraphicsCall(r4os.abi.window_graphics_op_publish, std.mem.asBytes(request), reply);
         }
@@ -7166,7 +7299,8 @@ pub const App = struct {
     }
     fn graphicsCpuWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
         if (!self.win_service_gate.available or !self.window_service_mirrored[index] or index == 0) return null;
-        const win = &self.windows[index]; const handle = self.window_process_handles[index];
+        const win = &self.windows[index];
+        const handle = self.window_process_handles[index];
         if (win.kind != .app or win.close_requested or !processHandleValid(handle) or handle.instance_id != win.instance_id) return null;
         const client = win.clientSurface().rect;
         if (client.isEmpty() or client.w > 32768 or client.h > 32768) return null;
@@ -7175,7 +7309,8 @@ pub const App = struct {
         var headless = false;
         if (self.managedOutputs()) {
             const manager = self.outputs.?;
-            var chosen: ?*output_manager.Slot = null; var area: u64 = 0;
+            var chosen: ?*output_manager.Slot = null;
+            var area: u64 = 0;
             for (&manager.slots) |*slot| {
                 if (slot.logical_index == null or slot.disabled) continue;
                 const intersection = output_geometry.intersect(client, slot.bounds()) orelse continue;
@@ -7183,7 +7318,10 @@ pub const App = struct {
                 const owner = slot.software orelse return null;
                 if (!owner.ready or owner.lost) return null;
                 const pixels = @as(u64, @intCast(intersection.w)) * @as(u64, @intCast(intersection.h));
-                if (chosen == null or pixels > area) { chosen = slot; area = pixels; }
+                if (chosen == null or pixels > area) {
+                    chosen = slot;
+                    area = pixels;
+                }
             }
             target = (chosen orelse return null).target;
         } else {
@@ -7209,25 +7347,23 @@ pub const App = struct {
             backend.binding.milestone != r4os.abi.gfx_queue_milestone_cpu_stores) return null;
         // Software outputs compose in logical pixels before their shared
         // scaling/rotation step. Every intersecting output reads the same BO.
-        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(client.w), .height = @intCast(client.h),
-            .flags = (if (win.visible and !win.minimized and !self.terminal_mode) @as(u32, r4os.abi.window_graphics_visible) else 0) |
-                (if (headless) @as(u32, r4os.abi.window_graphics_headless) else 0),
-            .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3,
-            .backend = backend, .output = .{ .adapter_id = target.adapter_id, .connector_id = target.connector_id,
-                .device_generation = target.device_generation, .connection_generation = target.connection_generation },
-            .display_generation = if (headless) self.output_revision else target.display_generation };
+        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(client.w), .height = @intCast(client.h), .flags = (if (win.visible and !win.minimized and !self.terminal_mode) @as(u32, r4os.abi.window_graphics_visible) else 0) |
+            (if (headless) @as(u32, r4os.abi.window_graphics_headless) else 0), .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3, .backend = backend, .output = .{ .adapter_id = target.adapter_id, .connector_id = target.connector_id, .device_generation = target.device_generation, .connection_generation = target.connection_generation }, .display_generation = if (headless) self.output_revision else target.display_generation };
         @import("window_color.zig").publishCpu(&config);
         return .{ .owner = handle, .config = config, .consumer_ready = ready };
     }
     fn graphicsGpuWindowSpec(self: *App, index: usize) ?window_graphics.Spec {
         if (!self.win_service_gate.available or !self.window_service_mirrored[index] or index == 0) return null;
-        const win = &self.windows[index]; const handle = self.window_process_handles[index];
+        const win = &self.windows[index];
+        const handle = self.window_process_handles[index];
         if (win.kind != .app or win.close_requested or !processHandleValid(handle) or handle.instance_id != win.instance_id) return null;
         const manager = self.outputs orelse return null;
         if (!manager.active()) return null;
         const client = win.clientSurface().rect;
         if (client.isEmpty()) return null;
-        var chosen: ?*output_manager.Slot = null; var area: u64 = 0; var ready = true;
+        var chosen: ?*output_manager.Slot = null;
+        var area: u64 = 0;
+        var ready = true;
         const required = gfx.device_gpu_render | gfx.device_gpu_render_list | gfx.device_gpu_grid | gfx.device_gpu_color | gfx.device_gpu_color_grid;
         for (&manager.slots) |*slot| {
             // Release old receipt owners before reconfiguration can replace
@@ -7242,7 +7378,10 @@ pub const App = struct {
             if (chosen) |previous| if (previous.target.adapter_id != slot.target.adapter_id) return null;
             ready = ready and !owner.blocksCapture() and owner.thread == null;
             const pixels = @as(u64, @intCast(intersection.w)) * @as(u64, @intCast(intersection.h));
-            if (chosen == null or pixels > area) { chosen = slot; area = pixels; }
+            if (chosen == null or pixels > area) {
+                chosen = slot;
+                area = pixels;
+            }
         }
         const output = chosen orelse return null;
         const owner = output.gpu.?;
@@ -7255,18 +7394,18 @@ pub const App = struct {
             if (queues.backendInfo(@intCast(i), &candidate) != r4os.abi.gfx_queue_ok) continue;
             if (candidate.binding.adapter_id == output.target.adapter_id and candidate.binding.device_generation == owner.device_generation and
                 candidate.binding.reset_generation == owner.reset_generation and candidate.binding.milestone == r4os.abi.gfx_queue_milestone_device_execution and
-                candidate.memory_generation != 0) { backend = candidate; found = true; break; }
+                candidate.memory_generation != 0)
+            {
+                backend = candidate;
+                found = true;
+                break;
+            }
         }
         if (!found) return null;
         const width = (@as(u64, @intCast(client.w)) * output.view.scale + 119) / 120;
         const height = (@as(u64, @intCast(client.h)) * output.view.scale + 119) / 120;
         if (width == 0 or height == 0 or width > 32768 or height > 32768) return null;
-        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(width), .height = @intCast(height),
-            .flags = if (win.visible and !win.minimized and !self.terminal_mode) r4os.abi.window_graphics_visible else 0,
-            .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3,
-            .backend = backend, .output = .{ .adapter_id = output.target.adapter_id, .connector_id = output.target.connector_id,
-                .device_generation = output.target.device_generation, .connection_generation = output.target.connection_generation },
-            .display_generation = output.target.display_generation, .format_count = 4 };
+        var config: r4os.abi.WindowGraphicsConfig = .{ .width = @intCast(width), .height = @intCast(height), .flags = if (win.visible and !win.minimized and !self.terminal_mode) r4os.abi.window_graphics_visible else 0, .present_modes = r4os.abi.window_graphics_fifo | r4os.abi.window_graphics_mailbox, .min_images = 2, .max_images = 3, .backend = backend, .output = .{ .adapter_id = output.target.adapter_id, .connector_id = output.target.connector_id, .device_generation = output.target.device_generation, .connection_generation = output.target.connection_generation }, .display_generation = output.target.display_generation, .format_count = 4 };
         @import("window_color.zig").publish(&config);
         return .{ .owner = handle, .config = config, .consumer_ready = ready };
     }
@@ -7275,12 +7414,14 @@ pub const App = struct {
         for (&self.graphics_windows, 0..) |*owner, index| {
             const before = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
             const wanted = self.graphicsWindowSpec(index);
-            owner.poll(self.ctx.self_handle, @intCast(index), wanted, GraphicsTransport{ .ctx = self.ctx },
-                @import("window_image.zig").Memory{ .draw = self.ctx.draw });
+            owner.poll(self.ctx.self_handle, @intCast(index), wanted, GraphicsTransport{ .ctx = self.ctx }, @import("window_image.zig").Memory{ .draw = self.ctx.draw });
 
             self.ctx.gpu_windows[index] = owner.front();
             const after = if (self.ctx.gpu_windows[index]) |frame| frame.message else r4os.abi.WindowGraphicsFrame{};
-            if (!std.meta.eql(before, after)) { self.damage.invalidate(self.windows[index].frameSurface().rect); changed = true; }
+            if (!std.meta.eql(before, after)) {
+                self.damage.invalidate(self.windows[index].frameSurface().rect);
+                changed = true;
+            }
         }
 
         if (self.win_service_gate.available and self.ctx.window_session.handle == 0) self.markWindowServiceUnavailable();
@@ -7609,12 +7750,17 @@ pub const App = struct {
                 info.window_id >= @as(i32, @intCast(self.windows.len))) continue;
             var already_bound = false;
             for (self.window_process_handles) |handle| {
-                if (sameProcessHandle(handle, snapshot.handle)) { already_bound = true; break; }
+                if (sameProcessHandle(handle, snapshot.handle)) {
+                    already_bound = true;
+                    break;
+                }
             }
             if (already_bound) continue;
             const previous_index: usize = @intCast(info.window_id);
             const index = if (self.windows[previous_index].instance_id == 0 and !self.windows[previous_index].close_requested)
-                previous_index else self.findFreeAppWindow() orelse continue;
+                previous_index
+            else
+                self.findFreeAppWindow() orelse continue;
             // Revalidate the generation before any GUI metadata or WINSVC
             // publication. A dead/reused ID never acquires the old binding.
             var current: r4os.abi.ProgramInstanceInfo = .{};
@@ -7741,7 +7887,11 @@ pub const App = struct {
                 if (next.desktop_bg != requested) return false;
                 if (requested == self.config.desktop_bg) return false;
             },
-            .reload => if (self.outputs) |outputs| { outputs.reloadColors(); outputs.reloadRefresh(); outputs.reloadBrightness(); },
+            .reload => if (self.outputs) |outputs| {
+                outputs.reloadColors();
+                outputs.reloadRefresh();
+                outputs.reloadBrightness();
+            },
         }
         self.config = next;
         self.reloadWallpaper();
@@ -10367,7 +10517,6 @@ fn isRegEditPath(path: []const u8) bool {
 fn isCalcPath(path: []const u8) bool {
     return endsWithIgnoreCase(path, "calc.r4x");
 }
-
 
 fn isAppDefPath(path: []const u8) bool {
     return endsWithIgnoreCase(path, "appdef.r4x");

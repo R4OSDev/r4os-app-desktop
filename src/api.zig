@@ -102,6 +102,11 @@ pub const Context = struct {
         self.sys.systemPoweroff();
     }
 
+    pub fn systemPowerTransition(self: *Context, action: u32) i32 {
+        self.closeWindowService();
+        return self.sys.systemPowerTransition(action, self.sys.ticksFromMilliseconds(5000));
+    }
+
     pub fn programLaunch(self: *const Context, path: [*:0]const u8, args: [*:0]const u8, policy: r4os.abi.LaunchPolicy) i32 {
         return self.sys.programLaunch(path, args, policy);
     }
@@ -526,7 +531,8 @@ pub const Context = struct {
     pub fn windowGraphicsCall(self: *Context, op: u16, request: []const u8, out: *r4os.abi.WindowGraphicsReply) bool {
         const got = self.window_session.call(self, op, request, std.mem.asBytes(out));
         if (got != @sizeOf(r4os.abi.WindowGraphicsReply) or out.version != 1 or out.size != @sizeOf(r4os.abi.WindowGraphicsReply) or out.reserved != 0) {
-            self.closeWindowService(); return false;
+            self.closeWindowService();
+            return false;
         }
         return true;
     }
@@ -700,7 +706,7 @@ pub const Context = struct {
         key: u32 = 0,
         pub fn end(self: *const LayerPaint) void {
             if (self.context.scene) |scene| scene.flushPending();
-            if (self.hook) |hook| hook.end(hook.context,self.key);
+            if (self.hook) |hook| hook.end(hook.context, self.key);
         }
     };
     // Painter order and geometry stay in compositor.zig. A collector can
@@ -710,9 +716,10 @@ pub const Context = struct {
         const scene = self.scene orelse return result;
         const hook = scene.layer_hook orelse return result;
         scene.flushPending();
-        result.context.scene = hook.begin(hook.context,key,bounds,scene.paintBounds()) orelse return null;
+        result.context.scene = hook.begin(hook.context, key, bounds, scene.paintBounds()) orelse return null;
         result.context.graphics = null;
-        result.hook = hook; result.key = key;
+        result.hook = hook;
+        result.key = key;
         return result;
     }
 
