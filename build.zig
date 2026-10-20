@@ -18,10 +18,12 @@ pub fn build(b: *std.Build) void {
             libraries_dep.namedLazyPath("r4enc_zig_binding"),
             libraries_dep.namedLazyPath("r4enc_recording_mux"),
             libraries_dep.namedLazyPath("r4enc_recording_pixels"),
+            libraries_dep.namedLazyPath("r4std_console_text"),
         },
     });
 
     const test_target = b.graph.host;
+    const console_text = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4std_console_text"), .target = test_target });
     const test_optimize: std.builtin.OptimizeMode = .Debug;
     const host_r4os = sdk.createR4osModule(test_target, test_optimize);
     const input_root = b.createModule(.{ .root_source_file = b.path("src/console_input.zig"), .target = test_target, .optimize = test_optimize });
@@ -143,6 +145,7 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     draw_module.addImport("r4os", host_r4os);
+    draw_module.addImport("r4std_console_text", console_text);
     draw_module.addImport("r4gfx", r4gfx);
     draw_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const draw_tests = b.addTest(.{ .root_module = draw_module });
@@ -152,6 +155,7 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     compositor_module.addImport("r4os", host_r4os);
+    compositor_module.addImport("r4std_console_text", console_text);
     compositor_module.addImport("r4std", r4std);
     compositor_module.addImport("r4std_test", r4std_test);
     compositor_module.addImport("r4img", r4img);
@@ -346,6 +350,7 @@ pub fn build(b: *std.Build) void {
     const run_icon_source_tests = b.addRunArtifact(icon_source_tests);
     const run_text_field_tests = b.addRunArtifact(text_field_tests);
     const run_run_command_tests = b.addRunArtifact(run_command_tests);
+    console_scroll_tests.root_module.addImport("r4std_console_text", console_text);
     const run_console_scroll_tests = b.addRunArtifact(console_scroll_tests);
     const run_appearance_signal_tests = b.addRunArtifact(appearance_signal_tests);
     const run_appearance_colors_tests = b.addRunArtifact(appearance_colors_tests);

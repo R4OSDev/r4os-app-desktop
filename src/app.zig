@@ -2483,6 +2483,18 @@ pub const App = struct {
                 }
             }
             if (!ready) return 8;
+            // Inspect the same production snapshots used by the real window.
+            // Font charset does not select the console decoder or cell count.
+            const snapshot = &self.console_snapshots[index];
+            if (!snapshot.valid or !std.unicode.utf8ValidateSlice(snapshot.raw[0..snapshot.raw_len]) or
+                !containsBytes(snapshot.text[0..snapshot.text_len], unicode)) return 12;
+            for (snapshot.lines[0..snapshot.line_count]) |line| {
+                const view = std.unicode.Utf8View.init(snapshot.text[line.offset..][0..line.len]) catch return 13;
+                var iterator = view.iterator();
+                var columns: usize = 0;
+                while (iterator.nextCodepoint() != null) columns += 1;
+                if (columns != line.columns) return 14;
+            }
             if (!self.pushConsoleInputBounded(handle.instance_id, "EXIT\r")) return 9;
             for (0..100) |_| {
                 self.smokePumpFrames(1);

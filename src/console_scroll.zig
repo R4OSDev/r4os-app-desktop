@@ -1,4 +1,5 @@
 const std = @import("std");
+const console_text = @import("r4std_console_text");
 
 pub const Range = struct {
     total_lines: u32,
@@ -13,19 +14,22 @@ pub const Range = struct {
 };
 
 pub fn countLines(text: []const u8, cols_raw: u32, codepage: u16) u32 {
+    _ = codepage;
     const cols = @max(@as(u32, 1), cols_raw);
     var count: u32 = 0;
     var line_len: u32 = 0;
     var i: usize = 0;
-    while (i < text.len and text[i] != 0) : (i += 1) {
-        const ch = text[i];
+    while (i < text.len) {
+        const scalar = console_text.decode(text[i..]) catch break;
+        i += scalar.len;
+        const ch = scalar.value;
+        if (ch == 0) break;
         if (ch == '\r') continue;
         if (ch == '\n' or line_len >= cols) {
-            count += 1;
-            line_len = 0;
+            count += 1; line_len = 0;
             if (ch == '\n') continue;
         }
-        if (printable(ch, codepage)) line_len += 1;
+        if (console_text.printable(ch)) line_len += 1;
     }
     if (line_len > 0 or count == 0) count += 1;
     return count;
@@ -50,11 +54,6 @@ pub fn clampOffset(total_lines: u32, visible_lines_raw: u32, requested_offset: u
     const visible = @max(@as(u32, 1), visible_lines_raw);
     const max_offset = if (total_lines > visible) total_lines - visible else 0;
     return @min(requested_offset, max_offset);
-}
-
-pub fn printable(ch: u8, codepage: u16) bool {
-    if (ch >= 0x20 and ch <= 0x7E) return true;
-    return codepage == 437 and ch >= 0x80;
 }
 
 test "line counting wraps and respects newlines" {
@@ -82,4 +81,12 @@ test "visible range clamps scroll offsets" {
     try std.testing.expectEqual(@as(u32, 0), clamped.start_line);
     try std.testing.expectEqual(@as(u32, 3), clamped.end_line);
     try std.testing.expectEqual(@as(u32, 2), clamped.effective_offset);
+}
+
+test "UTF8 columns do not depend on font codepage and incomplete tails wait" {
+    const text = "1234567\xc3\xbc\xe2\x94\x80";
+    try std.testing.expectEqual(@as(u32,2),countLines(text,8,437));
+    try std.testing.expectEqual(@as(u32,2),countLines(text,8,65001));
+    try std.testing.expectEqual(@as(u32,1),countLines(text[0..8],8,437));
+    try std.testing.expectEqual(@as(u32,1),countLines(text[0..9],8,1252));
 }

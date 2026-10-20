@@ -4,6 +4,7 @@ const desk_api = @import("api.zig");
 const std = @import("std");
 const appearance_colors = @import("appearance_colors.zig");
 const console_scroll = @import("console_scroll.zig");
+const console_text = @import("r4std_console_text");
 const desktop_config = @import("desktop_config.zig");
 const desktop_items = @import("desktop_items.zig");
 const gui_frame_snapshot = @import("gui_frame_snapshot.zig");
@@ -21,7 +22,8 @@ const volume = @import("volume.zig");
 const window = @import("window.zig");
 
 const console_output_render_max: usize = 16 * 1024;
-const terminal_line_max: usize = 512;
+const terminal_line_cells: usize = 512;
+const terminal_line_max: usize = terminal_line_cells * 4 + 1;
 const terminal_snapshot_line_max: usize = 256;
 const terminal_changed_row_words: usize = (terminal_snapshot_line_max + 63) / 64;
 const ico_buffer_max: usize = 8192;
@@ -84,6 +86,7 @@ pub const DamageKind = enum(u8) {
 };
 
 pub const TerminalSnapshotLine = struct {
+    columns: u16 = 0,
     offset: u16 = 0,
     len: u16 = 0,
 };
@@ -106,6 +109,7 @@ pub const TerminalSnapshot = struct {
     text_len: usize = 0,
     raw: [console_output_render_max]u8 = .{0} ** console_output_render_max,
     raw_len: usize = 0,
+    complete_raw_len: usize = 0,
     tail_line_len: u16 = 0,
 
     pub fn matches(self: *const TerminalSnapshot, instance_id: u32, revision: u32, rect: surface.Rect, font_size: u8, codepage: u16, scroll_offset: u32) bool {
@@ -2417,6 +2421,7 @@ pub fn refreshTerminalSnapshotBytes(
 ) TerminalRefreshStats {
     var stats = TerminalRefreshStats{};
     const input = raw_input[0..@min(raw_input.len, snapshot.raw.len)];
+    const complete_len = console_text.completePrefix(input);
     var old_hashes: [terminal_snapshot_line_max]u64 = .{0} ** terminal_snapshot_line_max;
     var old_lengths: [terminal_snapshot_line_max]u16 = .{0} ** terminal_snapshot_line_max;
     const old_line_count = @min(snapshot.line_count, snapshot.lines.len);
@@ -2434,7 +2439,7 @@ pub fn refreshTerminalSnapshotBytes(
     }
 
     const metrics = terminalMetrics(rect, font_size);
-    const max_chars: usize = @intCast(@min(metrics.cols, @as(u32, terminal_line_max - 1)));
+    const max_chars: usize = @intCast(@min(metrics.cols, @as(u32, terminal_line_cells)));
     const visible_limit: usize = @intCast(@min(@max(@as(u32, 1), metrics.rows), @as(u32, terminal_snapshot_line_max)));
     const same_configuration = snapshot.valid and snapshot.instance_id == instance_id and
         snapshot.width == rect.w and snapshot.height == rect.h and snapshot.font_size == font_size and
@@ -2446,10 +2451,10 @@ pub fn refreshTerminalSnapshotBytes(
         snapshot.state.clear_count == state.clear_count and
         snapshot.state.output_dropped_bytes == state.output_dropped_bytes and prefix_preserved;
 
-    if (append_only and appendTerminalSnapshotSuffix(snapshot, input[snapshot.raw_len..], max_chars, visible_limit, codepage)) {
+    if (append_only and appendTerminalSnapshotSuffix(snapshot, input[snapshot.complete_raw_len..complete_len], max_chars, visible_limit, codepage)) {
         stats.incremental = true;
-        stats.parsed_bytes = @intCast(input.len - snapshot.raw_len);
-        stats.parse_skipped_bytes = @intCast(snapshot.raw_len);
+        stats.parsed_bytes = @intCast(complete_len - snapshot.complete_raw_len);
+        stats.parse_skipped_bytes = @intCast(snapshot.complete_raw_len);
         snapshot.valid = true;
         snapshot.has_output = input.len != 0;
         snapshot.instance_id = instance_id;
@@ -2463,6 +2468,7 @@ pub fn refreshTerminalSnapshotBytes(
         snapshot.state = state;
         if (input.len != 0) @memcpy(snapshot.raw[0..input.len], input);
         snapshot.raw_len = input.len;
+        snapshot.complete_raw_len = complete_len;
     } else {
         snapshot.* = .{
             .valid = true,
@@ -2481,9 +2487,10 @@ pub fn refreshTerminalSnapshotBytes(
         if (input.len != 0) {
             @memcpy(snapshot.raw[0..input.len], input);
             snapshot.raw_len = input.len;
-            const range = console_scroll.visibleRange(input, metrics.cols, @intCast(visible_limit), scroll_offset, codepage);
+            snapshot.complete_raw_len = complete_len;
+            const range = console_scroll.visibleRange(input[0..complete_len], metrics.cols, @intCast(visible_limit), scroll_offset, codepage);
             snapshot.effective_offset = range.effective_offset;
-            compactVisibleTerminalLines(snapshot, input, max_chars, range, codepage);
+            compactVisibleTerminalLines(snapshot, input[0..complete_len], max_chars, range, codepage);
         }
     }
 
@@ -2493,55 +2500,71 @@ pub fn refreshTerminalSnapshotBytes(
 }
 
 fn compactVisibleTerminalLines(snapshot: *TerminalSnapshot, raw: []const u8, max_chars: usize, range: console_scroll.Range, codepage: u16) void {
+    _ = codepage;
     snapshot.line_count = 0;
     snapshot.text_len = 0;
     snapshot.tail_line_len = 0;
+    if (raw.len == 0) return;
     var line: [terminal_line_max]u8 = .{0} ** terminal_line_max;
     var line_len: usize = 0;
+    var columns: usize = 0;
     var line_index: u32 = 0;
     var write_offset: usize = 0;
     var index: usize = 0;
-    while (index < raw.len and raw[index] != 0) : (index += 1) {
-        const ch = raw[index];
+    while (index < raw.len) {
+        const scalar = console_text.decode(raw[index..]) catch break;
+        const encoded = raw[index..][0..scalar.len];
+        index += scalar.len;
+        const ch = scalar.value;
+        if (ch == 0) break;
         if (ch == '\r') continue;
-        if (ch == '\n' or line_len >= max_chars or line_len + 1 >= line.len) {
+        if (ch == '\n' or columns >= max_chars) {
             storeTerminalSnapshotLine(snapshot, line[0..line_len], line_index, range, &write_offset);
             line_index += 1;
             line_len = 0;
+            columns = 0;
             if (ch == '\n') continue;
         }
-        if (console_scroll.printable(ch, codepage)) {
-            line[line_len] = ch;
-            line_len += 1;
+        if (console_text.printable(ch)) {
+            if (encoded.len > line.len - 1 - line_len) break;
+            @memcpy(line[line_len..][0..encoded.len], encoded);
+            line_len += encoded.len;
+            columns += 1;
         }
     }
-    if (line_len > 0 or line_index == 0) storeTerminalSnapshotLine(snapshot, line[0..line_len], line_index, range, &write_offset);
+    if (columns > 0 or line_index == 0) storeTerminalSnapshotLine(snapshot, line[0..line_len], line_index, range, &write_offset);
     snapshot.text_len = write_offset;
-    snapshot.tail_line_len = @intCast(line_len);
+    snapshot.tail_line_len = @intCast(columns);
 }
 
 fn appendTerminalSnapshotSuffix(snapshot: *TerminalSnapshot, suffix: []const u8, max_chars: usize, visible_limit: usize, codepage: u16) bool {
-    var line_len: usize = snapshot.tail_line_len;
+    _ = codepage;
+    var columns: usize = snapshot.tail_line_len;
     var index: usize = 0;
-    while (index < suffix.len and suffix[index] != 0) : (index += 1) {
-        const ch = suffix[index];
+    while (index < suffix.len) {
+        const scalar = console_text.decode(suffix[index..]) catch return false;
+        const encoded = suffix[index..][0..scalar.len];
+        index += scalar.len;
+        const ch = scalar.value;
+        if (ch == 0) break;
         if (ch == '\r') continue;
-        if (ch == '\n' or line_len >= max_chars) {
-            if (line_len == 0 and ch == '\n' and !appendTerminalVisibleLine(snapshot, visible_limit)) return false;
-            line_len = 0;
+        if (ch == '\n' or columns >= max_chars) {
+            if (columns == 0 and ch == '\n' and !appendTerminalVisibleLine(snapshot, visible_limit)) return false;
+            columns = 0;
             if (ch == '\n') continue;
         }
-        if (!console_scroll.printable(ch, codepage)) continue;
-        if (line_len == 0 and !appendTerminalVisibleLine(snapshot, visible_limit)) return false;
-        if (snapshot.line_count == 0 or snapshot.text_len >= snapshot.text.len) return false;
+        if (!console_text.printable(ch)) continue;
+        if (columns == 0 and !appendTerminalVisibleLine(snapshot, visible_limit)) return false;
+        if (snapshot.line_count == 0 or encoded.len > snapshot.text.len - snapshot.text_len) return false;
         const line = &snapshot.lines[snapshot.line_count - 1];
-        if (@as(usize, line.offset) + @as(usize, line.len) != snapshot.text_len or line.len == std.math.maxInt(u16)) return false;
-        snapshot.text[snapshot.text_len] = ch;
-        snapshot.text_len += 1;
-        line.len += 1;
-        line_len += 1;
+        if (@as(usize, line.offset) + @as(usize, line.len) != snapshot.text_len or encoded.len > std.math.maxInt(u16) - line.len) return false;
+        @memcpy(snapshot.text[snapshot.text_len..][0..encoded.len], encoded);
+        snapshot.text_len += encoded.len;
+        line.len += @intCast(encoded.len);
+        line.columns += 1;
+        columns += 1;
     }
-    snapshot.tail_line_len = @intCast(line_len);
+    snapshot.tail_line_len = @intCast(columns);
     return true;
 }
 
@@ -2602,9 +2625,9 @@ fn markTerminalLineChanges(stats: *TerminalRefreshStats, old_hashes: []const u64
 fn storeTerminalSnapshotLine(snapshot: *TerminalSnapshot, line: []const u8, line_index: u32, range: console_scroll.Range, write_offset: *usize) void {
     if (line_index < range.start_line or line_index >= range.end_line or snapshot.line_count >= snapshot.lines.len) return;
     const available = snapshot.text.len - write_offset.*;
-    const len = @min(line.len, @min(available, std.math.maxInt(u16)));
+    const len = console_text.completePrefix(line[0..@min(line.len, @min(available, std.math.maxInt(u16)))]);
     if (len != 0) @memcpy(snapshot.text[write_offset.* .. write_offset.* + len], line[0..len]);
-    snapshot.lines[snapshot.line_count] = .{ .offset = @intCast(write_offset.*), .len = @intCast(len) };
+    snapshot.lines[snapshot.line_count] = .{ .offset = @intCast(write_offset.*), .len = @intCast(len), .columns = @intCast(console_text.cells(line[0..len])) };
     snapshot.line_count += 1;
     write_offset.* += len;
 }
@@ -2622,7 +2645,7 @@ fn renderTerminalSnapshot(ctx: *const desk_api.Context, rect: surface.Rect, snap
         const line_rect = surface.Rect{
             .x = metrics.x,
             .y = metrics.y + @as(i32, @intCast(index)) * metrics.line_h,
-            .w = @as(i32, @intCast(len)) * glyph_w,
+            .w = @as(i32, item.columns) * glyph_w,
             .h = metrics.line_h,
         };
         if (!line_rect.intersects(paint_bounds)) continue;
@@ -2630,40 +2653,6 @@ fn renderTerminalSnapshot(ctx: *const desk_api.Context, rect: surface.Rect, snap
         if (len != 0) @memcpy(line_buffer[0..len], snapshot.text[start .. start + len]);
         ctx.paintText(line_rect.x, line_rect.y, @ptrCast(&line_buffer), snapshot.state.fg, snapshot.state.bg);
     }
-}
-
-fn terminalText(ctx: *const desk_api.Context, rect: surface.Rect, text_buf: []const u8, font_size: u8, codepage: u16, scroll_offset: u32, fg: u32, bg: u32) u32 {
-    const metrics = terminalMetrics(rect, font_size);
-    const max_chars: usize = @intCast(@min(metrics.cols, @as(u32, terminal_line_max - 1)));
-    const range = console_scroll.visibleRange(text_buf, metrics.cols, metrics.rows, scroll_offset, codepage);
-    var line: [terminal_line_max]u8 = .{0} ** terminal_line_max;
-    var line_len: usize = 0;
-    var line_index: u32 = 0;
-    var y = metrics.y;
-    var i: usize = 0;
-    while (i < text_buf.len and text_buf[i] != 0) : (i += 1) {
-        const ch = text_buf[i];
-        if (ch == '\r') continue;
-        if (ch == '\n' or line_len >= max_chars or line_len + 1 >= line.len) {
-            if (line_index >= range.start_line and line_index < range.end_line) {
-                drawTerminalLine(ctx, metrics.x, y, &line, line_len, fg, bg);
-                y += metrics.line_h;
-            }
-            line_index += 1;
-            clearTerminalLine(line[0..], &line_len);
-            if (ch == '\n') continue;
-        }
-        if (console_scroll.printable(ch, codepage)) {
-            line[line_len] = ch;
-            line_len += 1;
-        }
-    }
-    if (line_len > 0 or line_index == 0) {
-        if (line_index >= range.start_line and line_index < range.end_line) {
-            drawTerminalLine(ctx, metrics.x, y, &line, line_len, fg, bg);
-        }
-    }
-    return range.effective_offset;
 }
 
 fn syncConsoleMetrics(ctx: *const desk_api.Context, instance_id: u32, rect: surface.Rect, font_size: u8) void {
@@ -3206,6 +3195,78 @@ test "terminal incremental refresh falls back on ring scroll geometry font codep
     try std.testing.expect(!changed_prefix.incremental);
 }
 
+
+test "every UTF8 write split retains whole cells and actual full versus dirty pixels" {
+    const rect = surface.Rect{ .x = 0, .y = 0, .w = 84, .h = 80 };
+    const raw: r4os.abi.R4XStartContext = .{};
+    const bundle: r4os.program.Bundle = .{ .raw = &raw };
+    var full_pixels: [84*80]u32 = @splat(0);
+    var dirty_pixels: [84*80]u32 = @splat(0);
+    var oracle_pixels: [84*80]u32 = @splat(0);
+    var full_scene = scene_buffer.SceneBuffer{};
+    var dirty_scene = scene_buffer.SceneBuffer{};
+    var oracle_scene = scene_buffer.SceneBuffer{};
+    try std.testing.expect(full_scene.attach(std.mem.sliceAsBytes(&full_pixels),84,80));
+    try std.testing.expect(dirty_scene.attach(std.mem.sliceAsBytes(&dirty_pixels),84,80));
+    try std.testing.expect(oracle_scene.attach(std.mem.sliceAsBytes(&oracle_pixels),84,80));
+    var ctx = desk_api.Context{ .sys = r4os.r4sys.Context.init(&bundle), .dev = r4os.r4dev.Context.init(&bundle),
+        .desk = r4os.r4desk.Context.init(&bundle), .draw = r4os.r4draw.Context.init(&bundle), .self_handle = .{}, .scene = &full_scene };
+    const text = "1234567\xc3\xbc\xe2\x94\x80X\nA\xe2\x82\xac\xf0\x9f\x98\x80";
+    const state = r4os.abi.ConsoleState{ .fg = 0xffffff, .bg = 0 };
+    var incremental = TerminalSnapshot{};
+    for (0..text.len+1) |end| {
+        const stats = refreshTerminalSnapshotBytes(&incremental,39,@intCast(end+1),rect,14,437,0,state,text[0..end]);
+        var rebuilt = TerminalSnapshot{};
+        _ = refreshTerminalSnapshotBytes(&rebuilt,39,@intCast(end+1),rect,14,437,0,state,text[0..end]);
+        try std.testing.expectEqual(rebuilt.text_len,incremental.text_len);
+        try std.testing.expectEqualSlices(u8,rebuilt.text[0..rebuilt.text_len],incremental.text[0..incremental.text_len]);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(incremental.text[0..incremental.text_len]));
+        @memset(&full_pixels,0);
+        ctx.scene = &full_scene;
+        renderTerminalSnapshot(&ctx,rect,&rebuilt);
+        ctx.scene = &dirty_scene;
+        if (stats.full_rebuild) {
+            @memset(&dirty_pixels,0); renderTerminalSnapshot(&ctx,rect,&incremental);
+        } else {
+            for (0..terminal_snapshot_line_max) |row| if (stats.rowChanged(row)) {
+                const clip = terminalRowRect(rect,14,row);
+                dirty_scene.setPaintClip(clip);
+                dirty_scene.fillRect(clip,0);
+                renderTerminalSnapshot(&ctx,rect,&incremental);
+                dirty_scene.clearPaintClip();
+            };
+        }
+        try std.testing.expectEqualSlices(u32,&full_pixels,&dirty_pixels);
+    }
+    try std.testing.expectEqual(@as(usize,3),incremental.line_count);
+    try std.testing.expectEqual(@as(u16,8),incremental.lines[0].columns);
+    try std.testing.expectEqual(@as(u16,2),incremental.lines[1].columns);
+    try std.testing.expectEqual(@as(u16,3),incremental.lines[2].columns);
+    const paint = @import("paint.zig");
+    paint.textScene(&oracle_scene,&ctx.draw,10,6,"1234567\xc3\xbc",0xffffff,0);
+    paint.textScene(&oracle_scene,&ctx.draw,10,22,"\xe2\x94\x80X",0xffffff,0);
+    paint.textScene(&oracle_scene,&ctx.draw,10,38,"A\xe2\x82\xac\xf0\x9f\x98\x80",0xffffff,0);
+    try std.testing.expectEqualSlices(u32,&oracle_pixels,&full_pixels);
+}
+
+test "converted CP437 cells and ring replay ignore font codepage for decoding" {
+    const rect = surface.Rect{ .x = 0, .y = 0, .w = 84, .h = 80 };
+    const text = "\xe2\x94\x80\xc3\xbc"; // Canonical result of CP437 C4/81.
+    var first = TerminalSnapshot{};
+    var other_font = TerminalSnapshot{};
+    const state: r4os.abi.ConsoleState = .{};
+    _ = refreshTerminalSnapshotBytes(&first,39,1,rect,14,437,0,state,text);
+    _ = refreshTerminalSnapshotBytes(&other_font,39,1,rect,14,1252,0,state,text);
+    try std.testing.expectEqual(@as(u16,2),first.lines[0].columns);
+    try std.testing.expectEqualStrings(text,first.text[0..first.text_len]);
+    try std.testing.expectEqualSlices(u8,first.text[0..first.text_len],other_font.text[0..other_font.text_len]);
+    var overflowed = state;
+    overflowed.output_dropped_bytes = 1026;
+    const update = refreshTerminalSnapshotBytes(&first,39,2,rect,14,437,0,overflowed,"\xc3\xbcZ");
+    try std.testing.expect(update.full_rebuild);
+    try std.testing.expectEqual(@as(u16,2),first.lines[0].columns);
+    try std.testing.expectEqualStrings("\xc3\xbcZ",first.text[0..first.text_len]);
+}
 test "terminal row damage is bounded to one visible line" {
     const rect = surface.Rect{ .x = 100, .y = 50, .w = 320, .h = 80 };
     try std.testing.expectEqual(surface.Rect{ .x = 110, .y = 56, .w = 310, .h = 16 }, terminalRowRect(rect, 14, 0));
