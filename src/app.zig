@@ -6127,14 +6127,19 @@ pub const App = struct {
     fn runR4SnesPerformanceAndPoweroff(self: *App) noreturn {
         const ok = self.runR4SnesPerformance();
         self.ctx.println(if (ok) "R4SNES presentation profile: OK" else "R4SNES presentation profile: FAILED");
+        _ = self.ctx.fileWrite("C:\\TEMP\\SNES-STATUS.TXT", if (ok) "OK" else "FAILED");
         self.ctx.systemPoweroff();
         while (true) self.ctx.sleepTicks(1);
     }
 
     fn runR4SnesPerformance(self: *App) bool {
         const index = self.findFreeAppWindow() orelse return false;
-        const args = if (argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) "/PERFCHECK" else "/PERFTEST";
-        self.launchGuiPath(r4snes_host_path, args, "R4SNES performance", .gui);
+        var argument_buffer: [128]u8 = undefined;
+        const command = if (argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) "/PERFCHECK" else "/PERFTEST";
+        const region = if (argsContain(self.ctx.argsRaw(), "/SNES-PAL")) "/PAL" else "/NTSC";
+        const mode = if (argsContain(self.ctx.argsRaw(), "/SNES-NORMAL")) "/NORMAL" else if (argsContain(self.ctx.argsRaw(), "/SNES-DETAIL")) "/DETAIL" else "/PAIRED";
+        const args = std.fmt.bufPrintZ(&argument_buffer, "{s} {s} {s}", .{ command, region, mode }) catch return false;
+        self.launchGuiPath(r4snes_host_path, args.ptr, "R4SNES performance", .gui);
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle)) return false;
         var trace = PresentationTrace{ .window_index = index };
