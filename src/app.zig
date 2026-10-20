@@ -3,6 +3,7 @@ const r4os = @import("r4os");
 const gfx = @import("r4gfx");
 const r4img = @import("r4img");
 const r4std = @import("r4std");
+const console_input = @import("console_input.zig");
 const appearance_signal = @import("appearance_signal.zig");
 const desk_api = @import("api.zig");
 const compositor = @import("compositor.zig");
@@ -427,6 +428,7 @@ pub const App = struct {
     window_service_mirrored: [4]bool = .{false} ** 4,
     window_modes: [4]r4os.abi.WindowModeExchange = @splat(.{}),
     window_process_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
+    console_pending: [4]console_input.Pending = @splat(.{}),
     window_completion_handles: [4]r4os.abi.ProgramProcessHandle = .{r4os.abi.ProgramProcessHandle{}} ** 4,
     window_completion_exit_codes: [4]i32 = .{0} ** 4,
     headless_acceptance_terminal: bool = false,
@@ -540,6 +542,7 @@ pub const App = struct {
         self.invalidateFull();
         self.redraw();
         _ = self.ctx.bootReady();
+        if (argsContain(self.ctx.argsRaw(), "/INPUTTEST")) return self.runConsoleInputSelftest();
         if (argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) self.runR4SnesPerformanceAndPoweroff();
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
@@ -559,6 +562,10 @@ pub const App = struct {
         if (hasSmokeArg(self.ctx.argsRaw())) self.runSmokeAndPoweroff();
 
         while (!self.ctx.sys.programShouldClose()) {
+            for (&self.console_pending, self.window_process_handles) |*pending, handle| {
+                pending.bind(handle);
+                pending.flush(&self.ctx.sys);
+            }
             if (self.headless_acceptance_terminal) {
                 self.ctx.sleepTicks(self.loop_sleep_ticks);
                 continue;
@@ -731,6 +738,11 @@ pub const App = struct {
             delay = manager.captureWaitTicks(now_ns, self.monotonic_hz, delay);
         };
         if (self.cursor_controller.retryPending()) delay = @min(delay, self.loop_sleep_ticks);
+        // A quiet reader need not publish output after freeing input space.
+        // Retained input therefore has its own bounded retry deadline.
+        for (&self.console_pending) |*pending| {
+            if (pending.queue.len != 0 and pending.last_error == 0) delay = @min(delay, self.loop_sleep_ticks);
+        }
         if (self.activity_wait_supported) {
             const rc = self.ctx.desktopActivityWait(self.activity_seq, delay, &self.activity_seq);
             if (rc >= 0) {
@@ -2427,6 +2439,62 @@ pub const App = struct {
         return true;
     }
 
+    fn runConsoleInputSelftest(self: *App) i32 {
+        const unicode = "\xc3\xbc\xe2\x82\xac\xd0\x81\xc4\x80\xf0\x9f\x98\x80";
+        const changed = "\xc3\xbc\xe2\x82\xac\xd0\x81\xc4\x80!";
+        for ([_]bool{ false, true }) |paste| {
+            self.launchConsolePath(terminal_path, "/NOAUTOEXEC", "Input test");
+            self.smokePumpFrames(4);
+            const index = self.active_window;
+            if (index >= self.windows.len or self.windows[index].kind != .terminal or self.windows[index].instance_id == 0) return 1;
+            const handle = self.window_process_handles[index];
+            defer {
+                if (sameProcessHandle(self.window_process_handles[index], handle)) {
+                    _ = self.ctx.sys.programHandleKill(&handle);
+                    self.smokePumpFrames(4);
+                }
+            }
+            self.activateWindow(index, false);
+            if (paste) {
+                if (self.ctx.clipboardWrite("ECHO " ++ unicode ++ "\r\n") < 0 or !self.pasteClipboardToConsole(handle.instance_id)) return 2;
+            } else {
+                for ("ECHO ") |byte| if (!self.deliverTerminalKeyToActiveConsole(byte)) return 3;
+                for ([_]u32{ 0xfc, 0x20ac, 0x401, 0x100, 0x1f600 }) |value| if (!self.deliverTerminalKeyToActiveConsole(value)) return 4;
+                if (!self.deliverTerminalKeyToActiveConsole(r4os.gui.Key.enter)) return 5;
+            }
+            for ([_]u32{ r4os.gui.Key.up, r4os.gui.Key.backspace, '!', r4os.gui.Key.enter, r4os.gui.Key.f3, r4os.gui.Key.enter }) |key| {
+                if (!self.deliverTerminalKeyToActiveConsole(key)) return 6;
+            }
+            if (!self.pushConsoleInputBounded(handle.instance_id, "ECHO INPUT-END\r")) return 7;
+            var ready = false;
+            for (0..100) |_| {
+                self.smokePumpFrames(1);
+                var output: [4096]u8 = undefined;
+                const count = self.ctx.consoleOutput(handle.instance_id, &output);
+                if (count > 0) {
+                    const text = output[0..@intCast(count)];
+                    if (containsBytes(text, unicode) and containsBytes(text, changed)) {
+                        const first = std.mem.indexOf(u8, text, "INPUT-END") orelse continue;
+                        if (containsBytes(text[first + "INPUT-END".len ..], "INPUT-END")) {
+                            ready = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!ready) return 8;
+            if (!self.pushConsoleInputBounded(handle.instance_id, "EXIT\r")) return 9;
+            for (0..100) |_| {
+                self.smokePumpFrames(1);
+                if (!sameProcessHandle(self.window_process_handles[index], handle)) break;
+            }
+            if (sameProcessHandle(self.window_process_handles[index], handle)) return 10;
+            if (!sameProcessHandle(self.window_completion_handles[index], handle) or self.window_completion_exit_codes[index] != 0) return 11;
+        }
+        self.ctx.println("Desktop typed scalar/clipboard UTF8 input and real history/backspace: OK");
+        return 0;
+    }
+
     fn smokeLaunchMultipleTerminalWindows(self: *App) bool {
         self.ctx.print("Terminal multi-window launch: ");
         const perf_start = self.ctx.performanceInput() orelse {
@@ -3502,6 +3570,10 @@ pub const App = struct {
     }
 
     fn smokePumpFrames(self: *App, frames: u32) void {
+        for (&self.console_pending, self.window_process_handles) |*pending, handle| {
+            pending.bind(handle);
+            pending.flush(&self.ctx.sys);
+        }
         var i: u32 = 0;
         while (i < frames) : (i += 1) {
             self.ctx.sleepTicks(self.loop_sleep_ticks);
@@ -8101,6 +8173,7 @@ pub const App = struct {
         self.gui_frame_caches[index].releaseSharedRasters(self.ctx);
         self.gui_frame_caches[index].deinit(self.ctx.allocator());
         self.window_process_handles[index] = .{};
+        self.console_pending[index].bind(.{});
         self.windows[index].unbindInstance();
         self.resetConsoleScroll(index, 0);
         self.clearWindowLaunch(index);
@@ -8267,13 +8340,12 @@ pub const App = struct {
         if (instance_id == 0 or !isConsoleKey(key)) return false;
         self.followConsoleTail(self.active_window);
         if (key == r4os.gui.Key.ctrl_v) return self.pasteClipboardToConsole(instance_id);
-        if (isTextKey(key) and key >= 0x80) {
-            var encoded: [4]u8 = undefined;
-            const len = encodeUtf8Codepoint(key, &encoded);
-            if (len == 0) return false;
-            return self.pushConsoleInputBounded(instance_id, encoded[0..len]);
-        }
-        return self.ctx.consolePushKey(instance_id, @intCast(key)) == 0;
+        const pending = &self.console_pending[self.active_window];
+        pending.bind(self.window_process_handles[self.active_window]);
+        const event = if (isTextKey(key)) r4os.input_events.text(key) orelse return false else r4os.input_events.key(@intCast(key));
+        if (!pending.queue.append(&.{event})) return false;
+        pending.flush(&self.ctx.sys);
+        return true;
     }
 
     fn handleTerminalScrollKey(self: *App, key: u8) bool {
@@ -8494,7 +8566,7 @@ pub const App = struct {
                 continue;
             }
             previous_cr = false;
-            if (isTextKey(ch)) {
+            if (ch >= 0x20 and ch != 0x7f) {
                 data[write_index] = ch;
                 write_index += 1;
             } else if (ch == r4os.gui.Key.tab) {
@@ -8508,28 +8580,15 @@ pub const App = struct {
     }
 
     fn pushConsoleInputBounded(self: *App, instance_id: u32, data: []const u8) bool {
-        if (data.len == 0) return true;
-        var offset: usize = 0;
-        var calls: usize = 0;
-        while (offset < data.len and calls < 64) : (calls += 1) {
-            const result = self.ctx.consolePushInput(instance_id, data[offset..]);
-            if (result == r4os.abi.err_no_fn) {
-                for (data[offset..]) |ch| {
-                    if (self.ctx.consolePushKey(instance_id, ch) != 0) return false;
-                }
-                return true;
-            }
-            if (result < 0) return false;
-            const accepted: usize = @intCast(result);
-            if (accepted > data.len - offset) return false;
-            if (accepted == 0) {
-                self.ctx.taskYield();
-                continue;
-            }
-            offset += accepted;
-            if (offset < data.len) self.ctx.taskYield();
+        for (self.window_process_handles, 0..) |handle, index| {
+            if (handle.instance_id != instance_id or handle.generation == 0) continue;
+            const pending = &self.console_pending[index];
+            pending.bind(handle);
+            if (!pending.bytes(data)) return false;
+            pending.flush(&self.ctx.sys);
+            return true;
         }
-        return offset == data.len;
+        return false;
     }
 
     fn pasteClipboardToRunPath(self: *App) bool {

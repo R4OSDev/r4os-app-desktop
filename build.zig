@@ -24,6 +24,10 @@ pub fn build(b: *std.Build) void {
     const test_target = b.graph.host;
     const test_optimize: std.builtin.OptimizeMode = .Debug;
     const host_r4os = sdk.createR4osModule(test_target, test_optimize);
+    const input_root = b.createModule(.{ .root_source_file = b.path("src/console_input.zig"), .target = test_target, .optimize = test_optimize });
+    input_root.addImport("r4os", host_r4os);
+    const input_tests = b.addRunArtifact(b.addTest(.{ .root_module = input_root }));
+    b.step("input-test", "Desktop typed input, retained partial suffix and exact window generation").dependOn(&input_tests.step);
     const r4gfx = b.createModule(.{
         .root_source_file = libraries_dep.namedLazyPath("r4gfx_zig_binding"),
         .target = test_target,
@@ -286,7 +290,9 @@ pub fn build(b: *std.Build) void {
     wallpaper_module.addImport("png_fixture", png_fixture);
     wallpaper_module.addImport("raster_fixture", raster_fixture);
     wallpaper_module.addImport("profile_fixtures", b.createModule(.{
-        .root_source_file = libraries_dep.path("R4GFX/Tests/Color/fixtures.zig"), .target = test_target, .optimize = test_optimize,
+        .root_source_file = libraries_dep.path("R4GFX/Tests/Color/fixtures.zig"),
+        .target = test_target,
+        .optimize = test_optimize,
     }));
     const wallpaper_tests = b.addTest(.{
         .root_module = wallpaper_module,
@@ -320,8 +326,7 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     physical_input_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
-    for ([_]*std.Build.Module{ draw_module, compositor_module, paint_module, scene_buffer_tests.root_module,
-        wallpaper_module, gui_shape_renderer_module }) |module| module.addImport("r4gfx_desktop_outputs", topology);
+    for ([_]*std.Build.Module{ draw_module, compositor_module, paint_module, scene_buffer_tests.root_module, wallpaper_module, gui_shape_renderer_module }) |module| module.addImport("r4gfx_desktop_outputs", topology);
     const physical_input_tests = b.addTest(.{ .root_module = physical_input_module });
 
     const run_model_tests = b.addRunArtifact(model_tests);
@@ -353,6 +358,7 @@ pub fn build(b: *std.Build) void {
     render_step.dependOn(&run_compositor_tests.step);
     render_step.dependOn(&run_wallpaper_tests.step);
     const test_step = b.step("test", "Run Desktop Zig tests");
+    test_step.dependOn(&input_tests.step);
     test_step.dependOn(&run_model_tests.step);
     test_step.dependOn(&run_window_tests.step);
     test_step.dependOn(&run_surface_tests.step);

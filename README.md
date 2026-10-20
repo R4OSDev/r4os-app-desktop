@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.101`
+- Version: `0.1.130`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
@@ -219,3 +219,7 @@ Runnable budget exhaustion yields cooperatively after normal input handling.
 Pending work uses the existing desktop activity sequence and a one-tick
 deadline fallback. The common Kernel queue coalesces completion/retirement
 wakes outside graphics owners. No backend-specific wait or ABI was added.
+
+## Console input
+
+Terminal key delivery uses typed Unicode scalars or explicit logical keys. Clipboard bytes80/81 remain text data. Each of the four window bindings retains up to4096 pending events and retires only the acknowledged prefix; pending input never follows a replacement process generation. `Build.sh input-test` checks retained suffixes and binding changes. `/INPUTTEST` exercises real terminal windows through typed keyboard delivery, clipboard paste and history/backspace; it returns normally.
