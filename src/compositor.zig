@@ -554,10 +554,11 @@ test "occlusion composition matches complete painter order after move hide minim
         const sparse_stats = try tile_software.paint(&graphics.colors, &sparse_cache, &sparse_scene);
         try std.testing.expectEqual(@as(u64, 16), sparse_stats.tiles);
         try std.testing.expectEqual(@as(u64, 17), sparse_stats.candidates);
-        try std.testing.expectEqual(@as(u64, 129), sparse_stats.pixels);
-        try std.testing.expectEqual(@as(u64, 780), sparse_stats.read_bytes);
-        try std.testing.expectEqual(@as(u64, 776), sparse_stats.write_bytes);
-        std.debug.print("[desktop-cpu-color] sparse damage: 129 transformed pixels, 780 read / 776 written bytes; opaque base removes destination conversion\n", .{});
+        try std.testing.expectEqual(@as(u64, 60), sparse_stats.direct_pixels);
+        try std.testing.expectEqual(@as(u64, 69), sparse_stats.pixels);
+        try std.testing.expectEqual(@as(u64, 60), sparse_stats.read_bytes);
+        try std.testing.expectEqual(@as(u64, 56), sparse_stats.write_bytes);
+        std.debug.print("[desktop-cpu-color] sparse damage: 60 copied + 9 transformed pixels, 60 read / 56 written color bytes; translucent tile retains linear blending\n", .{});
         for (sparse_pixels, 0..) |value, i| {
             const x = i % 1024; const y = i / 1024;
             const expected: u32 = if (x == 2 and y == 3) 0xbcbcbc else
@@ -709,6 +710,101 @@ fn drawOverlay(
         .tasks => |tasks| draw.tasksDialog(ctx, screen_w, screen_h, windows, active_window, tasks.status, tasks.instances, tasks.render, tasks.focus, hover_target, pressed_target),
         .settings => |settings| draw.settingsDialog(ctx, screen_w, screen_h, settings.config, settings.focus, hover_target, pressed_target),
         .message_box => |box| draw.messageBoxDialog(ctx, screen_w, screen_h, box, hover_target, pressed_target),
+    }
+}
+
+test "opaque partial tiles match linear reference across origins holes and translucent cursor" {
+    const Scene = @import("scene_buffer.zig").SceneBuffer;
+    const Cache = @import("composition_layers.zig").Cache;
+    const software = @import("composition_software.zig");
+    var provider: @import("gfx_renderer_test.zig").Fixture = .{};
+    const graphics = try provider.open();
+    defer graphics.destroy();
+    for ([_][2]i32{ .{ 0, 0 }, .{ -79, 23 } }) |origin| {
+        for ([_]bool{ false, true }) |cursor| {
+            var outputs: [2][130 * 97]u32 = undefined;
+            var counts: [2]software.Stats = undefined;
+            const a: surface.Rect = .{ .x = origin[0] + 5, .y = origin[1] + 7, .w = 101, .h = 75 };
+            const b: surface.Rect = .{ .x = origin[0] + 112, .y = origin[1] + 76, .w = 7, .h = 9 };
+            const alpha: surface.Rect = .{ .x = a.x + 3, .y = a.y + 4, .w = 2, .h = 2 };
+            for (&outputs, 0..) |*pixels, reference| {
+                @memset(pixels, 0x123456);
+                var canvas: Scene = .{};
+                try std.testing.expect(canvas.attach(std.mem.sliceAsBytes(pixels), 130, 97));
+                canvas.origin_x = origin[0]; canvas.origin_y = origin[1];
+                var cache = Cache.init(std.testing.allocator, 1024 * 1024);
+                defer cache.deinit();
+                try cache.startCpuOutput(canvas.fullRect());
+                for ([_]surface.Rect{ a, b }, [_]u32{ 0, 0x24a6df }) |damage, color| {
+                    const painter = (try cache.begin(1, canvas.fullRect(), damage)).?;
+                    painter.fillRect(damage, color);
+                    try cache.end(1);
+                }
+                if (cursor) {
+                    const painter = (try cache.begin(2, alpha, alpha)).?;
+                    const white = [_]u32{0x80ffffff} ** 4;
+                    try std.testing.expect(painter.blendArgb32(alpha, alpha.x, alpha.y, 2, 2, 1, std.mem.sliceAsBytes(&white)));
+                    try cache.end(2);
+                }
+                if (reference != 0) {
+                    // A transparent final layer forces the unchanged COLOR_V1
+                    // path without contributing light or expanding damage.
+                    for ([_]surface.Rect{ a, b }) |damage| {
+                        _ = (try cache.begin(99, canvas.fullRect(), damage)).?;
+                        try cache.end(99);
+                    }
+                }
+                _ = try cache.finish();
+                counts[reference] = try software.paint(&graphics.colors, &cache, &canvas);
+            }
+            try std.testing.expect(counts[0].direct_pixels > 0 and counts[1].direct_pixels == 0);
+            try std.testing.expect(counts[0].pixels < counts[1].pixels);
+            try std.testing.expectEqualSlices(u32, &outputs[1], &outputs[0]);
+            for (outputs[0], 0..) |pixel, i| {
+                const x = origin[0] + @as(i32, @intCast(i % 130));
+                const y = origin[1] + @as(i32, @intCast(i / 130));
+                const expected: u32 = if (cursor and alpha.contains(x, y)) 0xbcbcbc else
+                    if (b.contains(x, y)) 0x24a6df else if (a.contains(x, y)) 0 else 0x123456;
+                try std.testing.expectEqual(expected, pixel);
+            }
+        }
+    }
+}
+
+test "software output fixture retains native original whole canvas hashes at both sizes" {
+    const fixture = @import("software_output_fixture.zig");
+    const Scene = @import("scene_buffer.zig").SceneBuffer;
+    const software = @import("composition_software.zig");
+    var provider: @import("gfx_renderer_test.zig").Fixture = .{};
+    const graphics = try provider.open(); defer graphics.destroy();
+    const source = try std.testing.allocator.alloc(u32, fixture.source_width * fixture.source_height);
+    defer std.testing.allocator.free(source);
+    for (source, 0..) |*pixel, i| pixel.* = fixture.sourcePixel(i);
+    const pixels = try std.testing.allocator.alloc(u32, fixture.width * fixture.height);
+    defer std.testing.allocator.free(pixels);
+    @memset(pixels, fixture.canvas_rgb);
+    var canvas: Scene = .{};
+    try std.testing.expect(canvas.attach(std.mem.sliceAsBytes(pixels), fixture.width, fixture.height));
+    var owner: software.Owner = .{}; defer owner.deinit();
+    for (fixture.clients, fixture.hashes) |client, expected| {
+        try owner.begin(std.testing.allocator, &canvas);
+        const cache = owner.cache.?;
+        const background = (try cache.begin(1, canvas.fullRect(), client)).?;
+        background.fillRect(background.fullRect(), fixture.background_rgb); try cache.end(1);
+        const painter = (try cache.begin(64, fixture.frame(client), client)).?;
+        painter.fillRect(painter.fullRect(), fixture.window_rgb);
+        const view = try r4os.subsystem_host.calculateViewport(client.w, client.h, fixture.source_width, fixture.source_height);
+        try std.testing.expect(painter.blitXrgb32Nearest(painter.fullRect(), .{
+            .pixels = source, .source_x = 0, .source_y = 0,
+            .source_w = fixture.source_width, .source_h = fixture.source_height,
+            .source_stride = fixture.source_width, .guest_w = fixture.source_width, .guest_h = fixture.source_height,
+            .viewport = .{ .x = client.x + view.x, .y = client.y + view.y, .w = @intCast(view.w), .h = @intCast(view.h) },
+        }));
+        try cache.end(64);
+        try owner.finish(&graphics.colors, &canvas);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(pixels), &digest, .{});
+        try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(digest, .lower));
     }
 }
 

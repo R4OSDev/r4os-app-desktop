@@ -926,7 +926,7 @@ fn checkOpaqueSoftwareWindow(graphics: anytype) !void {
             try cpu.cache.?.external(2, canvas.fullRect(), damage, &frame);
             const before_direct = cpu.stats.direct_pixels;
             try cpu.finish(&graphics.colors, &canvas);
-            try t.expectEqual(@as(u64, if (translucent or other_color or partial) 0 else 64), cpu.stats.direct_pixels - before_direct);
+            try t.expectEqual(@as(u64, if (translucent or other_color) 0 else if (partial) 6 else 64), cpu.stats.direct_pixels - before_direct);
             for (pixels, 0..) |value, i| {
                 const touched = !partial or (i % 8 >= 1 and i % 8 <= 3 and i / 8 >= 1 and i / 8 <= 2);
                 try t.expectEqual(@as(u32, if (touched) expected[i] else 0x123456), value);

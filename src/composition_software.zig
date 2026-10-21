@@ -140,7 +140,8 @@ fn sdrPixels(entry: *const layers.Entry) ?SdrPixels {
 
 /// A final opaque canonical SDR layer needs neither the covered destination
 /// nor an sRGB -> FP16 -> sRGB round trip. Partial, translucent and other
-/// color encodings retain normal COLOR_V1 blending.
+/// color encodings retain normal COLOR_V1 blending unless the final layer
+/// covers the complete requested area. Pixels outside that area stay intact.
 fn copyOpaqueTile(cache: *const layers.Cache, tile: Rect, target: *scene.SceneBuffer, candidates: *const tiles.Mask) bool {
     var ordered = candidates.iterator(.{ .direction = .reverse });
     while (ordered.next()) |index| {
@@ -197,14 +198,6 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
             while (x < block.right * side) : (x += side) {
                 const tile: Rect = .{ .x = target.origin_x + x, .y = target.origin_y + y, .w = @min(side, target.width - x), .h = @min(side, target.height - y) };
                 stats.tiles += 1; stats.candidates += block.candidates.count();
-                if (copyOpaqueTile(cache, tile, target, &block.candidates)) {
-                    const count = @as(u64, @intCast(tile.w)) * @as(u32, @intCast(tile.h));
-                    stats.commands +|= 1;
-                    stats.pixels +|= count;
-                    stats.direct_pixels +|= count;
-                    continue;
-                }
-                @memset(&workspace.touched, 0);
                 var area: ?Rect = null;
                 var affected = block.candidates.iterator(.{});
                 while (affected.next()) |index| {
@@ -212,6 +205,14 @@ pub fn paint(colors: *const gfx.ColorV1Client, cache: *layers.Cache, target: *sc
                     area = if (area) |old| old.merged(clip) else clip;
                 }
                 const active = area orelse continue;
+                if (copyOpaqueTile(cache, active, target, &block.candidates)) {
+                    const count = @as(u64, @intCast(active.w)) * @as(u32, @intCast(active.h));
+                    stats.commands +|= 1;
+                    stats.pixels +|= count;
+                    stats.direct_pixels +|= count;
+                    continue;
+                }
+                @memset(&workspace.touched, 0);
                 const local = rect(active.x - tile.x, active.y - tile.y, active.w, active.h);
                 const first_command = block.candidates.findFirstSet().?;
                 const opaque_base = isOpaque(cache, cache.commands[first_command], active);
