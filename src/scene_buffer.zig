@@ -92,8 +92,21 @@ pub const SceneBuffer = struct {
         var y = clipped.y;
         while (y < clipped.bottom()) : (y += 1) {
             const start = self.rowOffset(y) + self.column(clipped.x);
-            @memset(pixels[start..][0..@intCast(clipped.w)],0);
+            clearRamPixels(pixels[start..][0..@intCast(clipped.w)]);
         }
+    }
+
+    fn clearRamPixels(pixels: []u32) void {
+        // ReleaseSmall lowers zero memset to compiler_rt's byte loop. Keep
+        // these local RAM writes wide, including rows aligned to only u32.
+        // Volatile prevents folding the loop back to memset; it grants no
+        // publication, MMIO or resource-retirement semantics.
+        var index: usize = 0;
+        while (pixels.len - index >= 2) : (index += 2) {
+            const pair: *align(@alignOf(u32)) volatile u64 = @ptrCast(pixels.ptr + index);
+            pair.* = 0;
+        }
+        if (index != pixels.len) pixels[index] = 0;
     }
 
     fn rowOffset(self: *const SceneBuffer, y: i64) usize {
@@ -554,6 +567,29 @@ test "scene buffer fills clipped rectangles" {
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[5]);
     try std.testing.expectEqual(@as(u32, 0x123456), pixels[7]);
     try std.testing.expectEqual(@as(u32, 0), pixels[8]);
+}
+
+test "layer clear keeps guards and transparent pixels across pair alignment and clipped tails" {
+    const t = std.testing;
+    for (0..2) |alignment| for (1..10) |width| {
+        var guarded: [32]u32 align(8) = @splat(0xa1b2c3d4);
+        const start = 2 + alignment;
+        const bounds: surface.Rect = .{ .x = -7, .y = 5, .w = @intCast(width), .h = 1 };
+        var layer: SceneBuffer = .{};
+        try t.expect(layer.attachLayer(std.mem.sliceAsBytes(guarded[start..][0..width]), bounds));
+        const inner_width = width - @min(width, 2);
+        layer.setPaintClip(.{ .x = -6, .y = 5, .w = @intCast(inner_width), .h = 1 });
+        layer.clearLayer(.{ .x = -20, .y = -20, .w = 100, .h = 100 });
+        for (guarded, 0..) |pixel, index| {
+            const cleared = index >= start + 1 and index < start + 1 + inner_width;
+            try t.expectEqual(@as(u32, if (cleared) 0 else 0xa1b2c3d4), pixel);
+        }
+        layer.clearPaintClip();
+        layer.clearLayer(bounds);
+        try t.expect(std.mem.allEqual(u32, guarded[start..][0..width], 0));
+        try t.expect(std.mem.allEqual(u32, guarded[0..start], 0xa1b2c3d4));
+        try t.expect(std.mem.allEqual(u32, guarded[start + width ..], 0xa1b2c3d4));
+    };
 }
 
 test "scene buffer replays native xrgb32 identity integer fractional and tile seams" {
