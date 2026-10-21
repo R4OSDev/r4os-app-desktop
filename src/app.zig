@@ -6107,22 +6107,7 @@ pub const App = struct {
         }
     }
 
-    const PresentationTrace = struct {
-        window_index: usize,
-        generations: [4096]u64 = undefined,
-        count: usize = 0,
-        overflow: bool = false,
-
-        fn record(self: *PresentationTrace, generation: u64) void {
-            if (generation == 0 or (self.count != 0 and self.generations[self.count - 1] == generation)) return;
-            if (self.count == self.generations.len) {
-                self.overflow = true;
-                return;
-            }
-            self.generations[self.count] = generation;
-            self.count += 1;
-        }
-    };
+    const PresentationTrace = @import("snes_output_trace.zig").Trace;
 
     fn runR4SnesPerformanceAndPoweroff(self: *App) noreturn {
         const ok = self.runR4SnesPerformance();
@@ -6133,7 +6118,15 @@ pub const App = struct {
     }
 
     fn runR4SnesPerformance(self: *App) bool {
+        if (argsContain(self.ctx.argsRaw(), "/SNES-OUTPUT-PROFILE"))
+            @import("software_output_profile.zig").run(self.ctx, self.colors) catch |err| {
+                self.ctx.write("R4SNES software output analysis: "); self.ctx.println(@errorName(err)); return false;
+            };
         const index = self.findFreeAppWindow() orelse return false;
+        const maximized = argsContain(self.ctx.argsRaw(), "/SNES-MAXIMIZED");
+        // Establish the owner's geometry before the child starts its warmup.
+        self.windows[index].setNormal(62, 40, 430, 262);
+        if (maximized) self.windows[index].toggleMaximizeIn(self.outputWorkArea(index));
         var argument_buffer: [128]u8 = undefined;
         const command = if (argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) "/PERFCHECK" else "/PERFTEST";
         const region = if (argsContain(self.ctx.argsRaw(), "/SNES-PAL")) "/PAL" else "/NTSC";
@@ -6142,9 +6135,13 @@ pub const App = struct {
         self.launchGuiPath(r4snes_host_path, args.ptr, "R4SNES performance", .gui);
         const handle = self.window_process_handles[index];
         if (!processHandleValid(handle)) return false;
-        var trace = PresentationTrace{ .window_index = index };
-        self.performance_present = &trace;
+        const trace = self.ctx.allocator().create(PresentationTrace) catch return false;
+        defer self.ctx.allocator().destroy(trace);
+        trace.* = .{ .window_index = index };
+        self.performance_present = trace;
         defer self.performance_present = null;
+        const before = self.render_stats;
+        const started_ns = self.ctx.sys.monotonicNanoseconds() orelse return false;
         const started = self.ctx.ticks();
         const timeout = @as(u64, @max(1, self.monotonic_hz)) * 300;
         while (sameProcessHandle(self.window_process_handles[index], handle)) {
@@ -6157,15 +6154,28 @@ pub const App = struct {
         }
         if (!sameProcessHandle(self.window_completion_handles[index], handle) or
             self.window_completion_exit_codes[index] != 0 or trace.overflow or trace.count == 0) return false;
-        // The immutable frame generation is recorded only after the actual
-        // display copy/present succeeds. Submission alone cannot reach here.
+        // A generation was included in a successful display copy. Partial
+        // damage and physical scanout visibility remain separate facts.
         var output: [65536]u8 = undefined;
         var length: usize = 0;
-        for (trace.generations[0..trace.count]) |generation| {
-            const line = std.fmt.bufPrint(output[length..], "{d}\n", .{generation}) catch return false;
+        for (trace.samples[0..trace.count]) |sample| {
+            const line = std.fmt.bufPrint(output[length..], "{d}\n", .{sample.generation}) catch return false;
             length += line.len;
         }
-        return self.ctx.fileWrite("C:\\TEMP\\SNES-PRESENT.TXT", output[0..length]) == @as(i32, @intCast(length));
+        if (self.ctx.fileWrite("C:\\TEMP\\SNES-PRESENT.TXT", output[0..length]) != @as(i32, @intCast(length))) return false;
+        const report = std.json.Stringify.valueAlloc(self.ctx.allocator(), .{
+            .contract = "desktop-window-output-v1", .receipt = "software-display-copy-present-success",
+            .window_case = if (maximized) "maximized" else "small", .process = handle,
+            .screen = .{ .w = self.screen_w, .h = self.screen_h }, .frame = trace.frame, .client = trace.client,
+            .session_start_ns = started_ns, .session_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return false,
+            .global_desktop_presents = self.render_stats.present_successes -% before.present_successes,
+            .cursor_moves = self.render_stats.cursor_moves -% before.cursor_moves,
+            .cursor_tick_hz = self.monotonic_hz, .physical_visibility = @as(?u64, null),
+            .records = trace.samples[0..trace.count],
+            .note = "Window generations observed in successful software copies; full_client_copy needs one complete covering region. Generation cohorts may complete after the guest timer. Frame/compose/present wall spans reuse existing owner clocks; no input-to-scanout or physical frame receipt.",
+        }, .{}) catch return false;
+        defer self.ctx.allocator().free(report);
+        return self.ctx.fileWrite("C:\\TEMP\\SNES-WINDOW.JSON", report) == @as(i32, @intCast(report.len));
     }
 
     const GpuFrame = struct {
@@ -6332,8 +6342,8 @@ pub const App = struct {
                 const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
                 self.last_display_revision = self.ctx.displayRevision();
                 self.cursor_controller.presented(true);
-                if (self.performance_present) |trace| if (frame.cull.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index)) != 0)
-                    trace.record(frame.gui_generations[trace.window_index]);
+                // This explicit profile qualifies software output only.
+                if (self.performance_present) |trace| trace.overflow = true;
                 self.recordPresentStats(frame.bounds, frame.pixels, frame.regions, frame.kind, elapsedTicks(frame.start_tick, now), elapsedTicks(frame.start_tick, frame.composed_tick), elapsedTicks(frame.composed_tick, now), elapsedNanoseconds(frame.start_ns, now_ns), elapsedNanoseconds(frame.start_ns, frame.composed_ns), elapsedNanoseconds(frame.composed_ns, now_ns), if (frame.cursor_queued_tick == 0) 0 else elapsedTicks(frame.cursor_queued_tick, now), frame.cull, 0, false, true, false, frame.remote_result, .{});
                 // The counters above describe CPU copies; this was a native
                 // present whose visibility was independently observed.
@@ -6468,11 +6478,6 @@ pub const App = struct {
         self.last_display_revision = self.ctx.displayRevision();
         self.cursor_controller.presented(canonical_present);
         if (self.cursor_controller.clean_pending and !canonical_present) self.invalidateCursor();
-        if (self.performance_present) |trace| {
-            if (display_copy_succeeded and display_present_succeeded and
-                (cull_stats.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index))) != 0)
-                trace.record(gui_frame_views[trace.window_index].info.committed_generation);
-        }
         const now = self.ctx.ticks();
         const now_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
         const frame_ticks = elapsedTicks(frame_start, now);
@@ -6486,6 +6491,22 @@ pub const App = struct {
             0
         else
             elapsedTicks(cursor_queued_tick, now);
+        if (self.performance_present) |trace| {
+            if (display_copy_succeeded and display_present_succeeded and
+                (cull_stats.rendered_gui_windows & (@as(u8, 1) << @intCast(trace.window_index))) != 0)
+            {
+                const client = self.windows[trace.window_index].clientSurface().rect;
+                const complete = for (clipped_regions) |region| {
+                    if (region.x <= client.x and region.y <= client.y and region.right() >= client.right() and region.bottom() >= client.bottom()) break true;
+                } else false;
+                trace.record(self.windows[trace.window_index].frameSurface().rect, client, .{
+                    .generation = gui_frame_views[trace.window_index].info.committed_generation,
+                    .completed_ns = now_ns, .frame_wall_ns = frame_ns, .compose_wall_ns = compose_ns,
+                    .present_wall_ns = present_ns, .damage_bounds = damage_bounds, .full_client_copy = complete,
+                    .cursor_queued_to_copy_ticks = if (cursor_queued_tick == 0) null else elapsedTicks(cursor_queued_tick, now),
+                });
+            }
+        }
         self.recordPresentStats(
             damage_bounds,
             @intCast(@min(damage_pixels, ~@as(u32, 0))),
