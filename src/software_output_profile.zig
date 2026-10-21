@@ -7,9 +7,11 @@ const api = @import("api.zig");
 const scene = @import("scene_buffer.zig");
 const software = @import("composition_software.zig");
 const fixture = @import("software_output_fixture.zig");
+const compositor = @import("compositor.zig");
 
 const Record = struct {
     omit_covered_background: bool,
+    coverage_culled_background: bool,
     client: @import("surface.zig").Rect,
     sample: usize,
     warmup: bool,
@@ -50,6 +52,13 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
         defer owner.deinit();
         for (fixture.clients, fixture.hashes) |client, expected| {
             const view = try r4os.subsystem_host.calculateViewport(client.w, client.h, fixture.source_width, fixture.source_height);
+            const frame = fixture.frame(client);
+            const windows = [_]@import("window.zig").Window{.{ .kind = .app, .instance_id = 1,
+                .x = frame.x, .y = frame.y, .w = frame.w, .h = frame.h,
+                .normal_x = frame.x, .normal_y = frame.y, .normal_w = frame.w, .normal_h = frame.h }};
+            const frames = [_]@import("gui_frame_snapshot.zig").View{.{ .supported = true, .valid = true }};
+            var context = ctx.*;
+            context.scene = &canvas; context.output_bounds = null; context.gpu_windows = @splat(null);
             var reserved: usize = 0;
             for (0..5) |sample| {
                 var marks: [10]u64 = undefined;
@@ -58,8 +67,12 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
                 const cache = owner.cache.?;
                 const changed_before = cache.changed_bytes;
                 const copied_before = owner.stats.direct_pixels;
+                canvas.setPaintClip(client);
+                const cover = compositor.CpuCover.init(&context, &windows, &frames, 0, client);
+                var cull: compositor.CullStats = .{};
+                const coverage_culled = !cover.visible(&cull, client, canvas.fullRect());
                 marks[1] = try now(ctx);
-                if (!omit_background) {
+                if (!omit_background and !coverage_culled) {
                     const background = (try cache.begin(1, canvas.fullRect(), client)) orelse return error.Layer;
                     marks[2] = try now(ctx);
                     background.fillRect(background.fullRect(), fixture.background_rgb);
@@ -95,7 +108,7 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
                 std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(pixels), &digest, .{});
                 const hex = std.fmt.bytesToHex(digest, .lower);
                 if (!std.mem.eql(u8, &hex, expected)) return error.PixelMismatch;
-                records[index] = .{ .omit_covered_background = omit_background, .client = client,
+                records[index] = .{ .omit_covered_background = omit_background, .coverage_culled_background = coverage_culled, .client = client,
                     .sample = sample, .warmup = sample == 0, .phase_wall_ns = spans,
                     .changed_bytes = cache.changed_bytes - changed_before,
                     .direct_pixels = owner.stats.direct_pixels - copied_before,
@@ -111,7 +124,7 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
         .contract = "desktop-software-output-v1", .clock = clock, .clock_pair_min_ns = pair_min_ns,
         .canvas_width = fixture.width, .canvas_height = fixture.height,
         .phase_order = "owner-begin,background-begin-clear,background-fill,background-compare-copy,window-begin-clear,window-fill,nearest-scale,window-compare-copy,composition",
-        .note = "Static public SDR layers in RAM. Begin includes lookup/reuse/clear; warm allocations forbidden. Wall spans include descheduling. No display or ROM. Omission is a diagnostic candidate under proven fixture coverage only.",
+        .note = "Static public SDR layers in RAM. Begin includes lookup/reuse/clear; warm allocations forbidden. Wall spans include descheduling. No display or ROM. coverage_culled_background records the productive classic CPU client cover; omit_covered_background remains the explicit diagnostic override.",
         .records = records,
     }, .{});
     defer allocator.free(report);

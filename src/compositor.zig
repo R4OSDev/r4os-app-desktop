@@ -57,6 +57,38 @@ pub const CullStats = struct {
     rendered_gui_windows: u8 = 0,
 };
 
+/// Current painter geometry, never retained opacity inferred from an older
+/// frame. appWindow fills the classic client opaquely before replaying GUI
+/// commands. Limit this proof to the primary CPU capture path; external BOs,
+/// native/per-output color paths and a mismatched clip supply no cover.
+pub const CpuCover = struct {
+    client: ?surface.Rect = null,
+
+    pub fn init(ctx: *const desk_api.Context, windows: []const window.Window,
+        frames: []const gui_frame_snapshot.View, active: usize, damage: surface.Rect) CpuCover
+    {
+        const scene = ctx.scene orelse return .{};
+        const hook = scene.layer_hook orelse return .{};
+        if (ctx.output_bounds != null or !hook.external_cpu or scene.premultiplied or
+            scene.primitive_hook != null or !std.meta.eql(scene.paintBounds(), damage) or
+            active >= windows.len or active >= frames.len or active >= ctx.gpu_windows.len) return .{};
+        const win = &windows[active];
+        if (win.kind != .app or win.instance_id == 0 or !win.visible or win.minimized or win.close_requested or
+            !frames[active].supported or !frames[active].valid or ctx.gpu_windows[active] != null) return .{};
+        const client = win.clientSurface().rect;
+        return if (client.isEmpty()) .{} else .{ .client = client };
+    }
+
+    pub fn visible(self: CpuCover, stats: *CullStats, damage: surface.Rect, bounds: surface.Rect) bool {
+        if (!layerVisible(stats, damage, bounds)) return false;
+        const cover = self.client orelse return true;
+        const area = @import("composition_layers.zig").intersect(damage, bounds) orelse return true;
+        if (cover.x > area.x or cover.y > area.y or cover.right() < area.right() or cover.bottom() < area.bottom()) return true;
+        stats.layers_culled +%= 1;
+        return false;
+    }
+};
+
 pub const SettingsOverlay = struct {
     config: desktop_config.Config,
     focus: model.UiTarget,
@@ -138,14 +170,15 @@ pub fn compose(
         return stats;
     }
 
-    if (layerVisible(&stats, damage, desktop_rect)) {
+    const cover = CpuCover.init(ctx, windows, gui_frames, active_window, damage);
+    if (cover.visible(&stats, damage, desktop_rect)) {
         if (layer(ctx,.background,desktop_rect)) |target| {
             defer target.end(); target.context.paintRect(desktop_rect.x, desktop_rect.y, @intCast(desktop_rect.w), @intCast(desktop_rect.h), config.desktop_bg);
         }
     }
 
     const info_rect = draw.desktopInfoRect(ctx, screen_w, screen_h);
-    if (layerVisible(&stats, damage, info_rect)) {
+    if (cover.visible(&stats, damage, info_rect)) {
         if (layer(ctx,.info,info_rect)) |target| {
             defer target.end(); draw.desktopInfoLayer(&target.context, screen_w, screen_h, config.desktop_bg);
         }
@@ -159,7 +192,7 @@ pub fn compose(
             .w = @intCast(wallpaper_view.width),
             .h = @intCast(wallpaper_view.height),
         };
-        if (layerVisible(&stats, damage, wallpaper_rect)) {
+        if (cover.visible(&stats, damage, wallpaper_rect)) {
             if (layer(ctx,.wallpaper,wallpaper_rect)) |target| {
                 defer target.end(); target.context.paintXrgb32(origin.x, origin.y, wallpaper_view.width, wallpaper_view.height, wallpaper_view.pixels);
             }
@@ -349,6 +382,108 @@ fn coveredByHigherWindow(windows: []const window.Window, index: usize, active: u
         if (cover.x <= left and cover.y <= top and cover.right() >= right and cover.bottom() >= bottom) return true;
     }
     return false;
+}
+
+test "CPU client cover requires current classic capture and complete affected bounds" {
+    const Scene = @import("scene_buffer.zig").SceneBuffer;
+    const software = @import("composition_software.zig");
+    const t = std.testing;
+    var pixels: [160 * 120]u32 = undefined;
+    var canvas: Scene = .{};
+    try t.expect(canvas.attach(std.mem.sliceAsBytes(&pixels), 160, 120));
+    var owner: software.Owner = .{};
+    defer owner.deinit();
+    try owner.begin(t.allocator, &canvas);
+    var ctx: desk_api.Context = undefined;
+    ctx.scene = &canvas; ctx.output_bounds = null; ctx.gpu_windows = @splat(null);
+    var windows = [_]window.Window{.{ .kind = .app, .instance_id = 1,
+        .x = 2, .y = 2, .w = 140, .h = 100,
+        .normal_x = 2, .normal_y = 2, .normal_w = 140, .normal_h = 100 }};
+    var frames = [_]gui_frame_snapshot.View{.{ .supported = true, .valid = true }};
+    const client = windows[0].clientSurface().rect;
+    canvas.setPaintClip(client);
+    const cover = CpuCover.init(&ctx, &windows, &frames, 0, client);
+    try t.expectEqualDeep(client, cover.client.?);
+    var stats: CullStats = .{};
+    try t.expect(!cover.visible(&stats, client, canvas.fullRect()));
+    var exposed = client; exposed.x -= 1; exposed.w += 1;
+    try t.expect(cover.visible(&stats, exposed, canvas.fullRect()));
+    ctx.output_bounds = canvas.fullRect();
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    ctx.output_bounds = null;
+    var external: @import("window_image.zig").Frame = .{};
+    ctx.gpu_windows[0] = &external;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    ctx.gpu_windows[0] = null;
+    frames[0].valid = false;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    frames[0].valid = true;
+    windows[0].minimized = true;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    windows[0].minimized = false; windows[0].visible = false;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    windows[0].visible = true; windows[0].close_requested = true;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    windows[0].close_requested = false;
+    var hook = canvas.layer_hook.?; hook.external_cpu = false; canvas.layer_hook = hook;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    hook.external_cpu = true; canvas.layer_hook = hook;
+    canvas.setPaintClip(client.inset(1, 1));
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+    canvas.layer_hook = null;
+    try t.expect(CpuCover.init(&ctx, &windows, &frames, 0, client).client == null);
+}
+
+test "CPU background omission matches full painter order through reveal and translucent cursor" {
+    const Scene = @import("scene_buffer.zig").SceneBuffer;
+    const software = @import("composition_software.zig");
+    const t = std.testing;
+    var provider: @import("gfx_renderer_test.zig").Fixture = .{};
+    const graphics = try provider.open(); defer graphics.destroy();
+    var pixels: [2][160 * 120]u32 = @splat(@splat(0xabcdef));
+    var owners = [_]software.Owner{ .{}, .{} };
+    defer for (&owners) |*owner| owner.deinit();
+    var ctx: desk_api.Context = undefined;
+    ctx.output_bounds = null; ctx.gpu_windows = @splat(null);
+    var windows = [_]window.Window{.{ .kind = .app, .instance_id = 1,
+        .x = 2, .y = 2, .w = 140, .h = 100,
+        .normal_x = 2, .normal_y = 2, .normal_w = 140, .normal_h = 100 }};
+    const commands = [_]r4os.abi.GuiFrameCommand{.{ .kind = r4os.abi.gui_frame_command_kind_clear, .rgb = 0x123456 }};
+    const frames = [_]gui_frame_snapshot.View{.{ .supported = true, .valid = true, .commands = &commands }};
+    const first_client = windows[0].clientSurface().rect;
+    for (0..6) |scenario| {
+        switch (scenario) {
+            1 => windows[0].x += 15,
+            3 => windows[0].visible = false,
+            4 => { windows[0].visible = true; windows[0].minimized = true; },
+            5 => { windows[0].minimized = false; windows[0].w -= 20; },
+            else => {},
+        }
+        const damage = if (scenario == 2) surface.Rect{ .x = 0, .y = 0, .w = 160, .h = 120 } else first_client;
+        for (&owners, &pixels, 0..) |*owner, *canvas_pixels, variant| {
+            var canvas: Scene = .{};
+            try t.expect(canvas.attach(std.mem.sliceAsBytes(canvas_pixels), 160, 120));
+            try owner.begin(t.allocator, &canvas);
+            canvas.setPaintClip(damage); ctx.scene = &canvas;
+            const cover = if (variant == 1) CpuCover.init(&ctx, &windows, &frames, 0, damage) else CpuCover{};
+            var stats: CullStats = .{};
+            if (cover.visible(&stats, damage, canvas.fullRect())) if (layer(&ctx, .background, canvas.fullRect())) |target| {
+                target.context.paintRect(0, 0, 160, 120, 0x2468ac); target.end();
+            };
+            drawWindows(&ctx, &windows, &frames, 0, "", "", "", &.{}, &.{}, 8, 0, false, .none, .none, damage, &stats);
+            if (windows[0].visible and !windows[0].minimized) {
+                const client = windows[0].clientSurface().rect;
+                const cursor: surface.Rect = .{ .x = client.x + 2, .y = client.y + 3, .w = 3, .h = 1 };
+                if (layer(&ctx, .cursor, cursor)) |target| {
+                    try t.expect(target.context.scene.?.blendAlpha8(cursor.x, cursor.y, 3, 1, 3, 0xff0000, &.{ 128, 0, 255 }));
+                    target.end();
+                }
+            }
+            try owner.finish(&graphics.colors, &canvas);
+        }
+        try t.expectEqualSlices(u32, &pixels[0], &pixels[1]);
+        if (scenario == 0) try t.expectEqual(owners[0].cache.?.command_count - 1, owners[1].cache.?.command_count);
+    }
 }
 
 test "opaque higher windows cull only covered damage and respect visibility and order" {
@@ -782,29 +917,44 @@ test "software output fixture retains native original whole canvas hashes at bot
     for (source, 0..) |*pixel, i| pixel.* = fixture.sourcePixel(i);
     const pixels = try std.testing.allocator.alloc(u32, fixture.width * fixture.height);
     defer std.testing.allocator.free(pixels);
-    @memset(pixels, fixture.canvas_rgb);
     var canvas: Scene = .{};
     try std.testing.expect(canvas.attach(std.mem.sliceAsBytes(pixels), fixture.width, fixture.height));
-    var owner: software.Owner = .{}; defer owner.deinit();
-    for (fixture.clients, fixture.hashes) |client, expected| {
-        try owner.begin(std.testing.allocator, &canvas);
-        const cache = owner.cache.?;
-        const background = (try cache.begin(1, canvas.fullRect(), client)).?;
-        background.fillRect(background.fullRect(), fixture.background_rgb); try cache.end(1);
-        const painter = (try cache.begin(64, fixture.frame(client), client)).?;
-        painter.fillRect(painter.fullRect(), fixture.window_rgb);
-        const view = try r4os.subsystem_host.calculateViewport(client.w, client.h, fixture.source_width, fixture.source_height);
-        try std.testing.expect(painter.blitXrgb32Nearest(painter.fullRect(), .{
-            .pixels = source, .source_x = 0, .source_y = 0,
-            .source_w = fixture.source_width, .source_h = fixture.source_height,
-            .source_stride = fixture.source_width, .guest_w = fixture.source_width, .guest_h = fixture.source_height,
-            .viewport = .{ .x = client.x + view.x, .y = client.y + view.y, .w = @intCast(view.w), .h = @intCast(view.h) },
-        }));
-        try cache.end(64);
-        try owner.finish(&graphics.colors, &canvas);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(pixels), &digest, .{});
-        try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(digest, .lower));
+    for ([_]bool{ false, true }) |culling| {
+        @memset(pixels, fixture.canvas_rgb);
+        var owner: software.Owner = .{}; defer owner.deinit();
+        for (fixture.clients, fixture.hashes) |client, expected| {
+            try owner.begin(std.testing.allocator, &canvas);
+            canvas.setPaintClip(client);
+            var ctx: desk_api.Context = undefined;
+            ctx.scene = &canvas; ctx.output_bounds = null; ctx.gpu_windows = @splat(null);
+            const frame = fixture.frame(client);
+            const windows = [_]window.Window{.{ .kind = .app, .instance_id = 1,
+                .x = frame.x, .y = frame.y, .w = frame.w, .h = frame.h,
+                .normal_x = frame.x, .normal_y = frame.y, .normal_w = frame.w, .normal_h = frame.h }};
+            const frames = [_]gui_frame_snapshot.View{.{ .supported = true, .valid = true }};
+            const cover = if (culling) CpuCover.init(&ctx, &windows, &frames, 0, client) else CpuCover{};
+            var stats: CullStats = .{};
+            const cache = owner.cache.?;
+            if (cover.visible(&stats, client, canvas.fullRect())) {
+                const background = (try cache.begin(1, canvas.fullRect(), client)).?;
+                background.fillRect(background.fullRect(), fixture.background_rgb); try cache.end(1);
+            }
+            if (culling) try std.testing.expectEqual(@as(u32, 1), stats.layers_culled);
+            const painter = (try cache.begin(64, fixture.frame(client), client)).?;
+            painter.fillRect(painter.fullRect(), fixture.window_rgb);
+            const view = try r4os.subsystem_host.calculateViewport(client.w, client.h, fixture.source_width, fixture.source_height);
+            try std.testing.expect(painter.blitXrgb32Nearest(painter.fullRect(), .{
+                .pixels = source, .source_x = 0, .source_y = 0,
+                .source_w = fixture.source_width, .source_h = fixture.source_height,
+                .source_stride = fixture.source_width, .guest_w = fixture.source_width, .guest_h = fixture.source_height,
+                .viewport = .{ .x = client.x + view.x, .y = client.y + view.y, .w = @intCast(view.w), .h = @intCast(view.h) },
+            }));
+            try cache.end(64);
+            try owner.finish(&graphics.colors, &canvas);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(pixels), &digest, .{});
+            try std.testing.expectEqualStrings(expected, &std.fmt.bytesToHex(digest, .lower));
+        }
     }
 }
 
