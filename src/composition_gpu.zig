@@ -25,12 +25,6 @@ pub const Engine = struct {
     pub const admission_nanoseconds = 250 * std.time.ns_per_us;
     clock: ?Clock = null,
     preparation_cancel: ?*const u32 = null,
-    // Temporary qualification metadata, published with preparation's done
-    // receipt and read only after that thread has been collected.
-    preparation_query: ?struct { head: u32, result: i32, expected_w: i32, expected_h: i32,
-        width: u32, height: u32, flags: u32 } = null,
-    preparation_busy_queries: u32 = 0,
-    preparation_changed_queries: u32 = 0,
     immediate_work: bool = false,
     last_admission_steps: usize = 0,
     retirement_epoch: u64 = 0,
@@ -326,14 +320,10 @@ pub const Engine = struct {
             if (self.head) |selected| if (selected != head) continue;
             var value = std.mem.zeroes(gfx.R4GfxPresentationInfo);
             const rc = self.client.presentation_info(self.device, @intCast(head), &value);
-            self.preparation_query = .{ .head = @intCast(head), .result = rc,
-                .expected_w = cache.screen.w, .expected_h = cache.screen.h,
-                .width = value.width, .height = value.height, .flags = value.flags };
             // A mode owner temporarily hides its presentation. Keep the
             // exact Busy result so the existing bounded preparation retries
             // or retires normally; no bytes from this query are admissible.
             if (rc == gfx.status_busy) {
-                self.preparation_busy_queries +|= 1;
                 return error.Busy;
             }
             if (rc != gfx.status_ok or
@@ -345,7 +335,6 @@ pub const Engine = struct {
                 // under the original deadline until coherent discovery can
                 // retire it; it has not reported a physical GPU failure.
                 if (self.head != null) {
-                    self.preparation_changed_queries +|= 1;
                     return error.Busy;
                 }
                 continue;

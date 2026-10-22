@@ -21,15 +21,32 @@ pub const Context = struct {
 
     pub fn init(app: *r4os.App) ?Context {
         const sys = app.system();
+        const dev = app.devicesLowLevel() orelse return null;
+        const desk = app.desktop() orelse return null;
+        const draw = app.drawing() orelse return null;
+        inline for (.{ "service_open", "service_call", "service_close" }) |field| {
+            if (!sys.hasFn(field)) {
+                sys.println("R4DESK requires current R4SYS." ++ field);
+                return null;
+            }
+        }
+        if (!desk.hasFn("remote_frame_publish_regions")) {
+            sys.println("R4DESK requires current R4DESK.remote_frame_publish_regions");
+            return null;
+        }
+        if (!draw.hasFn("display_blit_xrgb32_stride")) {
+            sys.println("R4DESK requires current R4DRAW.display_blit_xrgb32_stride");
+            return null;
+        }
         const instance_id = app.startContext().instance_id;
         if (instance_id == 0 or instance_id > std.math.maxInt(u32)) return null;
         var self_handle: r4os.abi.ProgramProcessHandle = .{};
         if (sys.programOpenHandle(@intCast(instance_id), &self_handle) != r4os.abi.program_handle_ok) return null;
         return .{
             .sys = sys,
-            .dev = app.devicesLowLevel() orelse return null,
-            .desk = app.desktop() orelse return null,
-            .draw = app.drawing() orelse return null,
+            .dev = dev,
+            .desk = desk,
+            .draw = draw,
             .self_handle = self_handle,
             .scene = null,
         };
@@ -384,7 +401,30 @@ pub const Context = struct {
                         response.version != r4os.abi.tray_desktop_exchange_version or
                         response.size != @sizeOf(r4os.abi.TrayDesktopExchange) or
                         !std.meta.eql(response.desktop_owner, self.self_handle)) return r4os.abi.tray_result_bad_request;
-                    return response.result;
+                    if (response.result != r4os.abi.tray_result_ok) return response.result;
+                    // Qualify the current copied color mailbox before output
+                    // owners exist. Flags=0 publishes no active output or mode
+                    // request; a competing host never reaches this exchange.
+                    const color_request: r4os.abi.DisplayColorExchange = .{ .base = .{
+                        .desktop_owner = self.self_handle,
+                        .status = .{ .desktop_epoch = self.self_handle.generation, .revision = 1 },
+                    } };
+                    var color_reply: r4os.abi.DisplayColorExchange = .{};
+                    const color_rc = self.displayColorExchange(&color_request, &color_reply);
+                    if (color_rc == r4os.abi.service_api_result_bad_op or
+                        color_rc == r4os.abi.service_api_result_buffer_too_small) return color_rc;
+                    if (color_rc == r4os.abi.service_api_result_ok) {
+                        const base = color_reply.base;
+                        const status = base.status;
+                        if (base.magic != r4os.abi.display_control_exchange_magic or base.version != 1 or
+                            base.size != @sizeOf(r4os.abi.DisplayControlExchange) or
+                            !std.meta.eql(base.desktop_owner, self.self_handle) or
+                            status.magic != r4os.abi.display_control_status_magic or status.version != 1 or
+                            status.size != @sizeOf(r4os.abi.DisplayControlStatus) or
+                            status.desktop_epoch != self.self_handle.generation)
+                            return r4os.abi.tray_result_bad_request;
+                        return r4os.abi.tray_result_ok;
+                    }
                 }
             }
             self.sleepTicks(1);
@@ -412,18 +452,10 @@ pub const Context = struct {
         return self.window_session.open(self);
     }
 
-    pub fn displayControlExchange(self: *Context, request: *const r4os.abi.DisplayControlExchange, out: *r4os.abi.DisplayControlExchange) i32 {
-        const got = self.window_session.call(self, r4os.abi.display_control_op_exchange, std.mem.asBytes(request), std.mem.asBytes(out));
-        if (got != @sizeOf(r4os.abi.DisplayControlExchange)) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
-        return r4os.abi.service_api_result_ok;
-    }
     pub fn displayColorExchange(self: *Context, request: *const r4os.abi.DisplayColorExchange, out: *r4os.abi.DisplayColorExchange) i32 {
         const got = self.window_session.call(self, r4os.abi.display_control_op_color_exchange, std.mem.asBytes(request), std.mem.asBytes(out));
         if (got == r4os.abi.service_api_result_bad_op) {
-            var legacy: r4os.abi.DisplayControlExchange = .{};
-            const rc = self.displayControlExchange(&request.base, &legacy);
-            if (rc == r4os.abi.service_api_result_ok) out.* = .{ .base = legacy };
-            return rc;
+            self.println("R4DESK requires current WINSVC display color exchange");
         }
         if (got != @sizeOf(r4os.abi.DisplayColorExchange)) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
         return r4os.abi.service_api_result_ok;
@@ -658,10 +690,7 @@ pub const Context = struct {
         if (frame_pixels == 0 or frame_pixels > max_frame_pixels) return r4os.abi.remote_frame_error_invalid;
         info.frame_pixels = @intCast(frame_pixels);
         info.frame_bytes = @intCast(frame_pixels * @sizeOf(u32));
-        if (self.desk.supportsRemoteFrameRegions()) {
-            return self.desk.remoteFramePublishRegions(&info, pixels, regions[0..rects.len]);
-        }
-        return self.desk.remoteFramePublish(&info, pixels);
+        return self.desk.remoteFramePublishRegions(&info, pixels, regions[0..rects.len]);
     }
 
     pub fn remoteInputPoll(self: *const Context, out: *r4os.abi.RemoteInputEvent) i32 {
@@ -830,34 +859,16 @@ pub const Context = struct {
         const start_y: usize = @intCast(clipped.y);
         const start_x: usize = @intCast(clipped.x);
 
-        if (self.supportsDisplayBlitStride()) {
-            const offset = start_y * scene_width + start_x;
-            const needed = (@as(usize, @intCast(clipped.h)) - 1) * scene_width + @as(usize, @intCast(clipped.w));
-            return self.draw.displayBlitXrgb32Stride(
-                @intCast(x),
-                @intCast(y),
-                w,
-                h,
-                @intCast(scene_width),
-                pixels[offset .. offset + needed],
-            );
-        }
-
-        if (clipped.x == 0 and clipped.w == scene.width) {
-            const offset = start_y * scene_width;
-            const count = @as(usize, @intCast(clipped.w)) * @as(usize, @intCast(clipped.h));
-            return self.draw.displayBlitXrgb32(@intCast(x), @intCast(y), w, h, pixels[offset .. offset + count]);
-        }
-
-        var row: i32 = 0;
-        while (row < clipped.h) : (row += 1) {
-            const row_y: usize = @intCast(clipped.y + row);
-            const offset = row_y * scene_width + start_x;
-            const row_pixels = pixels[offset .. offset + @as(usize, @intCast(clipped.w))];
-            const rc = self.draw.displayBlitXrgb32(@intCast(x), @intCast(clipped.y + row), w, 1, row_pixels);
-            if (rc < 0) return rc;
-        }
-        return 1;
+        const offset = start_y * scene_width + start_x;
+        const needed = (@as(usize, @intCast(clipped.h)) - 1) * scene_width + @as(usize, @intCast(clipped.w));
+        return self.draw.displayBlitXrgb32Stride(
+            @intCast(x),
+            @intCast(y),
+            w,
+            h,
+            @intCast(scene_width),
+            pixels[offset .. offset + needed],
+        );
     }
 
     pub fn supportsDisplayPresentRegions(self: *const Context) bool {
