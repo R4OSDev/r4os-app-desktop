@@ -16,9 +16,16 @@ pub const Job = struct {
     path: [128:0]u8 = @splat(0),
     bytes: u64 = 0,
     pub fn start(allocator: std.mem.Allocator, sys: r4os.r4sys.Context, desk: r4os.r4desk.Context) ?*Job {
+        return startAt(allocator, sys, desk, "");
+    }
+    /// Diagnostic caller supplies its unique CREATE-only path. The same
+    /// worker, immutable lease, BMP writer and join receipts are used.
+    pub fn startAt(allocator: std.mem.Allocator, sys: r4os.r4sys.Context, desk: r4os.r4desk.Context, path: []const u8) ?*Job {
+        if (path.len >= 128) return null;
         if (!desk.hasFn("remote_frame_snapshot_acquire") or !desk.hasFn("remote_frame_snapshot_release")) return null;
         const self = allocator.create(Job) catch return null;
         self.* = .{ .allocator = allocator, .sys = sys, .desk = desk };
+        @memcpy(self.path[0..path.len], path);
         const resources: r4os.Resources = .{ .sys = sys };
         switch (resources.createThread(run, @intFromPtr(self), 128 * 1024)) {
             .handle => |handle| self.handle = handle,
@@ -54,9 +61,12 @@ pub const Job = struct {
             info.format != r4os.abi.remote_frame_format_xrgb32 or info.stride_pixels != info.width or
             info.frame_pixels != @as(u64, info.width) * info.height) return error.InvalidSnapshot;
         const header = try bitmapHeader(info.width, info.height);
-        if (!self.sys.exists(directory) and self.sys.dirCreate(directory) < 0) return error.Directory;
-        const now = self.sys.monotonicNanoseconds() orelse return error.Clock;
-        const path = try std.fmt.bufPrintZ(&self.path, "{s}\\SHOT-{x}.BMP", .{ directory, now });
+        if (self.path[0] == 0) {
+            if (!self.sys.exists(directory) and self.sys.dirCreate(directory) < 0) return error.Directory;
+            const now = self.sys.monotonicNanoseconds() orelse return error.Clock;
+            _ = try std.fmt.bufPrintZ(&self.path, "{s}\\SHOT-{x}.BMP", .{ directory, now });
+        }
+        const path = self.path[0..std.mem.indexOfScalar(u8, &self.path, 0).? :0];
         if (self.sys.exists(path)) return error.Exists;
         var staged_storage: [128:0]u8 = undefined;
         const staged = try std.fmt.bufPrintZ(&staged_storage, "{s}.PART", .{path});
@@ -95,7 +105,7 @@ pub const Job = struct {
         self.allocator.destroy(self); return result;
     }
     pub fn close(self: *Job) void {
-        @atomicStore(u32, &self.cancel, 1, .release);
+        self.requestCancel();
         const end = (self.sys.monotonicNanoseconds() orelse 0) +| std.time.ns_per_s;
         while (true) {
             if (self.collect() != null) return;
@@ -104,6 +114,7 @@ pub const Job = struct {
         }
         // An unretired worker keeps its heap owner until program teardown.
     }
+    pub fn requestCancel(self: *Job) void { @atomicStore(u32, &self.cancel, 1, .release); }
 };
 /// Standard 32-bit BI_RGB, top-down, tightly packed XRGB; capture is sRGB SDR.
 pub fn bitmapHeader(width: u32, height: u32) ![54]u8 {

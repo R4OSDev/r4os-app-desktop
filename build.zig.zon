@@ -26,6 +26,7 @@
         "DOCUMENTATION.de.txt",
         "THIRD_PARTY_NOTICES.md",
         "src",
+        "Contract",
         "PROVENANCE.txt",
     },
 }

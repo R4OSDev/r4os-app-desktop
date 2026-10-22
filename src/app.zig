@@ -35,6 +35,7 @@ const volume = @import("volume.zig");
 const wallpaper = @import("wallpaper.zig");
 const window = @import("window.zig");
 const window_service_gate = @import("window_service_gate.zig");
+const diagnostic = @import("desktop_check");
 
 const Dialog = enum(u8) {
     none,
@@ -254,6 +255,16 @@ const DesktopLayoutAsyncSave = struct {
 
 pub const App = struct {
     ctx: *desk_api.Context,
+    diagnostic_restart_state: u32 = 0,
+    diagnostic_restart_old_handle: u32 = 0,
+    diagnostic_restart_result: i32 = 0,
+    diagnostic_restart_at_tick: u64 = 0,
+    diagnostic_input_generation: u64 = 0,
+    diagnostic_capture_override: bool = false,
+    diagnostic_screenshot: bool = false,
+    diagnostic_launcher: r4os.abi.ProgramProcessHandle = .{},
+    diagnostic_export: [128:0]u8 = @splat(0),
+    diagnostic_session: diagnostic.Session = .{},
     images: *const r4img.Context,
     png: *const r4img.PngContext,
     raster: *const r4img.RasterContext,
@@ -556,12 +567,33 @@ pub const App = struct {
             self.headless_acceptance_terminal = true;
         }
         if (argsContain(self.ctx.argsRaw(), "/SMOKE-AUDIO-OUTPUT")) self.runAudioOutputSmokeAndPoweroff();
-        if (argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE")) self.runWindowIdleSmokeAndPoweroff();
+        if (argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE")) {
+            const native = argsContain(self.ctx.argsRaw(), "/OUTPUTS") or argsContain(self.ctx.argsRaw(), "/CURSOR") or
+                argsContain(self.ctx.argsRaw(), "/SCREEN-POWER") or argsContain(self.ctx.argsRaw(), "/SWAPCHAIN");
+            if (native) {
+                if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) return 2;
+                self.runWindowIdleSmokeAndPoweroff();
+            }
+            if (!self.startDiagnosticLauncher()) return 1;
+        }
         if (hasKlickifaxSmokeArg(self.ctx.argsRaw())) self.runKlickifaxSmokeAndPoweroff();
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
         if (hasSmokeArg(self.ctx.argsRaw())) self.runSmokeAndPoweroff();
 
         while (!self.ctx.sys.programShouldClose()) {
+            self.processDiagnostics();
+            if (processHandleValid(self.diagnostic_launcher)) {
+                var completion: r4os.abi.ProgramProcessCompletion = .{};
+                if (self.ctx.sys.programHandleWait(&self.diagnostic_launcher, 0, &completion) == 0) {
+                    const valid = sameProcessHandle(completion.handle, self.diagnostic_launcher) and completion.sequence != 0;
+                    const exit_code = completion.exit_code;
+                    if (self.ctx.sys.programHandleReap(&self.diagnostic_launcher, &completion) != 0) return 1;
+                    self.diagnostic_launcher = .{};
+                    const removed = !self.ctx.sys.exists(&self.diagnostic_export) or self.ctx.sys.fileDelete(&self.diagnostic_export) >= 0;
+                    self.ctx.println(if (valid and exit_code == 0 and removed) "DESKTOP window-idle result: OK (Spectra)" else "DESKTOP window-idle FAILED (Spectra)");
+                    return if (valid and removed) exit_code else 1;
+                }
+            }
             for (&self.console_pending, self.window_process_handles) |*pending, handle| {
                 pending.bind(handle);
                 pending.flush(&self.ctx.sys);
@@ -574,7 +606,9 @@ pub const App = struct {
             self.pollComposition();
 
             const platform_now = self.ctx.sys.monotonicNanoseconds() orelse 0;
-            if (self.platform_input.poll(&self.ctx.sys, &self.ctx.draw, &self.screen_power, platform_now)) self.last_input_ns = platform_now;
+            if (self.platform_input.poll(&self.ctx.sys, &self.ctx.draw, &self.screen_power, platform_now)) {
+                self.last_input_ns = platform_now; self.noteDiagnosticInput();
+            }
             self.screen_power.tick(&self.ctx.draw, self.ctx.sys.monotonicNanoseconds() orelse 0, self.config.screen_off_seconds);
 
             var needs_redraw = self.syncDesktopFolder();
@@ -584,20 +618,20 @@ pub const App = struct {
 
             var remote_events: u32 = 0;
             while (remote_events < remote_input_burst and self.pollRemoteInputEvent()) : (remote_events += 1) {
-                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0; self.noteDiagnosticInput();
                 if (self.screen_power.input(&self.ctx.draw, self.last_input_ns)) continue;
                 if (self.dispatchEvent()) needs_redraw = true;
             }
             var physical_events: u32 = 0;
             while (physical_events < physical_input_burst and self.pollPhysicalKeyEvent()) : (physical_events += 1) {
-                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0; self.noteDiagnosticInput();
             }
             if (self.pollKeyboardEvent()) {
-                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0; self.noteDiagnosticInput();
                 if (!self.screen_power.input(&self.ctx.draw, self.last_input_ns) and self.dispatchEvent()) needs_redraw = true;
             }
             if (self.pollMouseEvent()) {
-                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0;
+                self.last_input_ns = self.ctx.sys.monotonicNanoseconds() orelse 0; self.noteDiagnosticInput();
                 if (!self.screen_power.input(&self.ctx.draw, self.last_input_ns) and self.dispatchEvent()) needs_redraw = true;
             }
             if (self.pollTimerEvent() and self.dispatchEvent()) needs_redraw = true;
@@ -614,7 +648,329 @@ pub const App = struct {
 
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
         }
+        if (processHandleValid(self.diagnostic_launcher)) {
+            _ = self.ctx.sys.programHandleRequestClose(&self.diagnostic_launcher);
+            var completion: r4os.abi.ProgramProcessCompletion = .{};
+            if (self.ctx.sys.programHandleWait(&self.diagnostic_launcher, self.ctx.sys.ticksFromMilliseconds(15000), &completion) != 0 or
+                self.ctx.sys.programHandleReap(&self.diagnostic_launcher, &completion) != 0) return 1;
+            self.diagnostic_launcher = .{};
+            if (self.ctx.sys.exists(&self.diagnostic_export) and self.ctx.sys.fileDelete(&self.diagnostic_export) < 0) return 1;
+        }
         return 0;
+    }
+
+    fn startDiagnosticLauncher(self: *App) bool {
+        const path = std.fmt.bufPrintZ(&self.diagnostic_export, "C:\\TEMP\\DC{X:0>8}-{X:0>16}.JSON", .{ self.ctx.self_handle.instance_id, self.ctx.self_handle.generation }) catch return false;
+        if (self.ctx.sys.exists(path)) return false;
+        var command: [256:0]u8 = undefined;
+        const args = std.fmt.bufPrintZ(&command, "CHECK DESKTOP /RESTART {s} /JSON /EXPORT:{s}", .{
+            if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) @as([]const u8, "/CAPTURE") else "", path,
+        }) catch return false;
+        return self.ctx.sys.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", args, .console, &self.diagnostic_launcher) == 0;
+    }
+
+    fn noteDiagnosticInput(self: *App) void {
+        if (self.diagnostic_session.caller.valid()) self.diagnostic_input_generation +%= 1;
+    }
+
+    fn diagnosticIdentity(value: r4os.abi.ProgramProcessHandle) diagnostic.Identity {
+        return .{ .instance = value.instance_id, .generation = value.generation };
+    }
+
+    fn diagnosticHandle(value: diagnostic.Identity) r4os.abi.ProgramProcessHandle {
+        return .{ .instance_id = value.instance, .generation = value.generation };
+    }
+
+    fn diagnosticLive(self: *App, value: diagnostic.Identity) bool {
+        if (!value.valid()) return false;
+        var info: r4os.abi.ProgramInstanceInfo = .{};
+        const handle = diagnosticHandle(value);
+        return self.ctx.sys.programHandleStatus(&handle, &info) == 0 and info.id == value.instance and
+            info.state != @intFromEnum(r4os.abi.ProgramInstanceState.done);
+    }
+
+    fn diagnosticGone(self: *App, value: diagnostic.Identity) bool {
+        const handle = diagnosticHandle(value);
+        var info: r4os.abi.ProgramInstanceInfo = .{};
+        const status = self.ctx.sys.programHandleStatus(&handle, &info);
+        return processHandleDefinitelyGone(status) or (status == 0 and info.state == @intFromEnum(r4os.abi.ProgramInstanceState.done));
+    }
+
+    fn diagnosticForeignWindows(self: *const App, binding: diagnostic.Identity) bool {
+        for (self.window_process_handles) |handle| {
+            const identity = diagnosticIdentity(handle);
+            if (identity.valid() and !self.diagnostic_session.owns(identity) and !identity.same(self.diagnostic_session.caller) and !identity.same(binding)) return true;
+        }
+        return false;
+    }
+
+    fn processDiagnostics(self: *App) void {
+        const now = self.ctx.ticks();
+        if (self.diagnostic_session.caller.valid() and (now >= self.diagnostic_session.deadline or
+            self.diagnosticGone(self.diagnostic_session.caller))) _ = self.endDiagnosticSession(true);
+        if (self.diagnostic_restart_at_tick != 0 and now >= self.diagnostic_restart_at_tick) {
+            self.diagnostic_restart_at_tick = 0;
+            if (!self.diagnostic_session.caller.valid() or self.diagnostic_input_generation != self.diagnostic_session.input_generation) {
+                self.diagnostic_restart_state = 3;
+                self.diagnostic_restart_result = r4os.abi.service_api_result_busy;
+            } else {
+                self.diagnostic_restart_old_handle = self.ctx.window_session.handle;
+                var info: r4os.abi.ServiceInfo = .{};
+                self.diagnostic_restart_result = self.ctx.sys.serviceRestart(r4os.abi.window_service_name, &info);
+                if (self.diagnostic_restart_result == 0) {
+                    var stale: r4os.abi.WindowServiceSnapshot = .{};
+                    if (self.ctx.windowServiceSnapshot(&stale) == 0) self.diagnostic_restart_result = -1;
+                    self.markWindowServiceUnavailable();
+                }
+                self.diagnostic_restart_state = if (self.diagnostic_restart_result == 0) 2 else 3;
+            }
+        }
+        const work = self.ctx.diagnostic_work orelse return;
+        self.ctx.diagnostic_work = null;
+        var broker: r4os.abi.ServiceInfo = .{};
+        const current = self.ctx.sys.serviceStatus(r4os.abi.window_service_name, &broker) == 0 and
+            broker.instance_id == work.broker.instance and self.diagnosticLive(work.broker);
+        const response = if (self.ctx.ticks() >= work.deadline_tick or !current)
+            diagnostic.Response{ .op = work.request.op, .target = work.request.target,
+                .desktop = diagnosticIdentity(self.ctx.self_handle), .result = r4os.abi.service_api_result_timeout }
+            else self.diagnosticStep(work.request, work.request.caller.instance);
+        var bytes: [diagnostic.completion_size]u8 = undefined;
+        diagnostic.encodeCompletion(&bytes, work.ticket, work.broker, response);
+        var unused: [0]u8 = .{};
+        const acknowledged = self.ctx.window_session.call(self.ctx, diagnostic.complete_operation, &bytes, &unused) == 0;
+        if (work.request.op == .restart and response.result == 0) {
+            if (acknowledged) self.diagnostic_restart_at_tick = self.ctx.ticks() +| @max(1, self.ctx.sys.ticksFromMilliseconds(100))
+            else { self.diagnostic_restart_state = 3; self.diagnostic_restart_result = r4os.abi.service_api_result_timeout; }
+        }
+    }
+
+    fn diagnosticStep(self: *App, request: diagnostic.Request, client: u32) diagnostic.Response {
+        var response: diagnostic.Response = .{ .op = request.op, .desktop = diagnosticIdentity(self.ctx.self_handle),
+            .target = request.target, .idle_timeouts = self.activity_wait_timeouts, .redraws = self.render_stats.redraws,
+            .input_generation = self.diagnostic_input_generation, .service_handle = self.ctx.window_session.handle, .restart_state = self.diagnostic_restart_state,
+            .restart_old_handle = self.diagnostic_restart_old_handle, .restart_result = self.diagnostic_restart_result };
+        const isolated = argsContain(self.ctx.argsRaw(), "/CHECK-ISOLATED") or argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE");
+        if (isolated) response.flags |= diagnostic.isolated;
+        if (self.win_service_gate.available) response.flags |= diagnostic.service_available;
+        response.result = r4os.abi.service_api_result_busy;
+        if (request.caller.instance != client or !self.diagnosticLive(request.caller)) return response;
+        const now = self.ctx.ticks();
+        if (request.deadline_tick <= now or request.deadline_tick - now > self.ctx.sys.ticksFromMilliseconds(60000)) return response;
+        if (request.op == .begin) {
+            if (self.diagnostic_session.caller.valid() or self.diagnosticForeignWindows(request.caller) or self.drag.active or self.resize.active or
+                self.desktop_drag.active or self.dialog != .none or self.volume_ui.popup_open or self.start_open) return response;
+            self.diagnostic_session = .{ .caller = request.caller, .deadline = request.deadline_tick, .input_generation = self.diagnostic_input_generation };
+            self.diagnostic_restart_state = 0;
+            self.diagnostic_restart_at_tick = 0;
+            self.diagnostic_restart_old_handle = 0;
+            self.diagnostic_restart_result = 0;
+        } else {
+            if (request.op == .end and !self.diagnostic_session.caller.valid()) { response.result = 0; return response; }
+            if (!self.diagnostic_session.caller.same(request.caller)) return response;
+            // End is always allowed for the exact caller, also after user input
+            // or foreign windows arrived. It releases only this reservation.
+            if (request.op == .end) {
+                if (self.endDiagnosticSession(false)) response.result = 0;
+                return response;
+            }
+            const cleanup = request.op == .screenshot_cancel or request.op == .screenshot_status or (request.op == .capture and request.dx == 0);
+            if (!cleanup and (now >= self.diagnostic_session.deadline or self.diagnostic_input_generation != self.diagnostic_session.input_generation or
+                self.diagnosticForeignWindows(if (request.op == .bind) request.target else .{}))) return response;
+        }
+        response.result = 0;
+        switch (request.op) {
+            .begin => {},
+            .bind => {
+                const target = diagnosticHandle(request.target);
+                var info: r4os.abi.ProgramInstanceInfo = .{};
+                if (self.ctx.programHandleStatus(&target, &info) != 0 or info.state != @intFromEnum(r4os.abi.ProgramInstanceState.running) or
+                    info.app_class != @intFromEnum(r4os.abi.ProgramInstanceClass.gui) or
+                    info.flags & (r4os.abi.ProgramInstanceFlag.close_requested | r4os.abi.ProgramInstanceFlag.desktop_host) != 0 or
+                    !self.diagnostic_session.bind(request.target)) { response.result = -1; return response; }
+                const bound = for (self.window_process_handles) |handle| {
+                    if (sameProcessHandle(handle, target)) break true;
+                } else false;
+                if (!bound) {
+                    if (info.window_id >= 0) { response.result = -1; return response; }
+                    const index = self.findFreeAppWindow() orelse { response.result = r4os.abi.service_api_result_full; return response; };
+                    // Assign only this exact owned GUI, then use the existing
+                    // current-host admission path, metadata, resize and mirror.
+                    response.result = self.ctx.programSetWindowHandle(&target, @intCast(index));
+                    if (response.result == 0) _ = self.syncProgramWindows();
+                }
+            },
+            .snapshot, .drag, .resize, .focus, .close => {
+                if (!request.target.valid() and request.op == .snapshot) return response;
+                if (!self.diagnostic_session.owns(request.target)) { response.result = r4os.abi.service_api_result_invalid; return response; }
+                const index = for (self.window_process_handles, 0..) |handle, index| {
+                    if (diagnosticIdentity(handle).same(request.target)) break index;
+                } else { response.result = r4os.abi.service_api_result_not_found; return response; };
+                if (@abs(@as(i64, request.dx)) > 128 or @abs(@as(i64, request.dy)) > 128) { response.result = -1; return response; }
+                const win = &self.windows[index];
+                switch (request.op) {
+                    .drag => {
+                        const x = win.x + 20; const y = win.y + 10;
+                        self.beginDrag(index, x, y);
+                        for (0..100) |step| _ = self.updateDrag(x + @divTrunc(request.dx * @as(i32, @intCast(step)), 100),
+                            y + @divTrunc(request.dy * @as(i32, @intCast(step)), 100));
+                        // Same final-coordinate path as a real release whose
+                        // coordinate was absent from preceding motion packets.
+                        self.flushReleasedWindowGeometry(x + request.dx, y + request.dy);
+                        self.drag = .{};
+                    },
+                    .resize => {
+                        const x = win.x + win.w; const y = win.y + win.h;
+                        self.beginResize(index, .bottom_right, x, y);
+                        _ = self.updateResize(x + @divTrunc(request.dx, 2), y + @divTrunc(request.dy, 2));
+                        self.flushReleasedWindowGeometry(x + request.dx, y + request.dy);
+                        self.resize = .{};
+                    },
+                    .focus => {
+                        self.activateWindow(index, false);
+                        self.keyboard_focus = self.windowTargetForIndex(index);
+                        self.mirrorWindowFocus(index);
+                        self.invalidateWindow(index);
+                    },
+                    .close => { response.result = self.requestWindowProcessClose(index); },
+                    else => {},
+                }
+                response.x = win.x; response.y = win.y; response.w = win.w; response.h = win.h;
+                response.gui_revision = self.ctx.guiRevision(request.target.instance);
+                if (self.smokeGeometryMatches(index)) response.flags |= diagnostic.geometry_matches;
+                if (self.active_window == index) response.flags |= diagnostic.focused;
+            },
+            .tray => {
+                const owner = diagnosticHandle(request.caller);
+                const hit = self.smokeFindTrayIdentity(owner, request.item) orelse { response.result = r4os.abi.service_api_result_not_found; return response; };
+                const identity = self.tray_registry.hit(hit.x, hit.y) orelse { response.result = -1; return response; };
+                if (!self.submitTrayActivation(identity, r4os.abi.tray_event_kind_primary, 0, hit.x, hit.y, self.ctx.ticks())) response.result = -1
+                else response.flags |= diagnostic.tray_hit;
+            },
+            .volume => {
+                if (self.diagnosticVolumeTargets()) response.flags |= diagnostic.volume_targets else response.result = -1;
+            },
+            .restart => {
+                if (!isolated) { response.result = r4os.abi.service_api_result_disabled; return response; }
+                if (self.diagnostic_restart_state == 1) { response.result = r4os.abi.service_api_result_busy; return response; }
+                self.diagnostic_restart_state = 1;
+                self.diagnostic_restart_result = 0;
+                response.restart_state = 1; // Scheduled; not a completion claim.
+            },
+            .audio => {
+                if (!isolated) { response.result = r4os.abi.service_api_result_disabled; return response; }
+                if (!self.smokeVolumeContract()) response.result = -1;
+            },
+            .capture => {
+                if (!isolated) { response.result = r4os.abi.service_api_result_disabled; return response; }
+                if (request.dx == 0) {
+                    self.endDiagnosticCapture();
+                    return response;
+                }
+                var stats: r4os.abi.RemoteFrameCaptureStats = .{};
+                if (request.dx < 2 or request.dx > 4 or self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 1) {
+                    response.result = r4os.abi.service_api_result_busy; return response;
+                }
+                self.diagnostic_capture_override = true;
+                self.syncCaptureDemand();
+                const pixels = [_]u32{ 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
+                if (request.dx == 3 and self.ctx.desk.remoteFrameSourceReset() < 0) { response.result = -1; return response; }
+                var info: r4os.abi.RemoteFrameInfo = .{ .width = @intCast(if (request.dx == 2) 2 else request.dx),
+                    .height = if (request.dx == 2) 2 else 1, .stride_pixels = @intCast(if (request.dx == 2) 2 else request.dx),
+                    .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
+                if (self.ctx.desk.remoteFramePublish(&info, pixels[0..(if (request.dx == 3) @as(usize, 3) else 4)]) < 0) response.result = -1;
+            },
+            .screenshot, .screenshot_status, .screenshot_cancel => {
+                if (!isolated) { response.result = r4os.abi.service_api_result_disabled; return response; }
+                if (request.op == .screenshot) {
+                    if (self.screenshot_job != null or self.diagnostic_screenshot) { response.result = r4os.abi.service_api_result_busy; return response; }
+                    var buffer: [128:0]u8 = undefined;
+                    const path = diagnostic.screenshotPath(&buffer, request.caller) catch { response.result = -1; return response; };
+                    self.screenshot_last = null;
+                    self.screenshot_job = @import("screenshot.zig").Job.startAt(self.ctx.allocator(), self.ctx.sys, self.ctx.desk, path);
+                    if (self.screenshot_job == null) { response.result = -1; return response; }
+                    self.diagnostic_screenshot = true;
+                }
+                if (self.diagnostic_screenshot) {
+                    if (self.screenshot_job) |job| {
+                        if (request.op == .screenshot_cancel) job.requestCancel();
+                        response.screenshot_state = 1;
+                    } else if (self.screenshot_last) |saved| {
+                        response.screenshot_state = 2;
+                        response.screenshot_bytes = saved.bytes;
+                        response.w = self.screen_w; response.h = self.screen_h;
+                        if (saved.code != 0 and request.op != .screenshot_cancel) response.result = -1;
+                    } else response.result = -1;
+                }
+            },
+            .end => unreachable,
+        }
+        return response;
+    }
+
+    fn endDiagnosticCapture(self: *App) void {
+        if (!self.diagnostic_capture_override) return;
+        self.diagnostic_capture_override = false;
+        self.resetCaptureSource();
+        self.syncCaptureDemand();
+        self.invalidateFull();
+    }
+
+    fn endDiagnosticSession(self: *App, abandoned: bool) bool {
+        self.diagnostic_restart_at_tick = 0;
+        self.endDiagnosticCapture();
+        if (self.diagnostic_screenshot) {
+            if (self.screenshot_job) |job| { job.requestCancel(); return false; }
+            if (self.screenshot_last) |saved| {
+                if (self.ctx.sys.exists(&saved.path) and self.ctx.sys.fileDelete(&saved.path) < 0) return false;
+            }
+            self.diagnostic_screenshot = false;
+        }
+        var retired = true;
+        for (self.diagnostic_session.targets) |identity| {
+            if (!identity.valid()) continue;
+            const handle = diagnosticHandle(identity);
+            var info: r4os.abi.ProgramInstanceInfo = .{};
+            const status = self.ctx.programHandleStatus(&handle, &info);
+            if (processHandleDefinitelyGone(status)) continue;
+            if (abandoned and status == 0) {
+                if (info.state == @intFromEnum(r4os.abi.ProgramInstanceState.done)) {
+                    if (self.diagnosticGone(self.diagnostic_session.caller)) {
+                        var completion: r4os.abi.ProgramProcessCompletion = .{};
+                        if (self.ctx.programHandleReap(&handle, &completion) == 0) continue;
+                    }
+                } else _ = self.ctx.programHandleRequestClose(&handle);
+            }
+            retired = false;
+        }
+        for (self.window_process_handles, 0..) |handle, index| {
+            if (!self.diagnostic_session.owns(diagnosticIdentity(handle))) continue;
+            if (!self.diagnosticGone(diagnosticIdentity(handle))) { retired = false; continue; }
+            self.invalidateWindow(index);
+            self.clearWindowInstanceBinding(index);
+            self.windows[index].close();
+            if (self.active_window == index) self.focusFirstVisibleWindow();
+            self.invalidateTaskbar();
+        }
+        if (!retired) return false;
+        self.diagnostic_session = .{};
+        return true;
+    }
+
+    fn diagnosticVolumeTargets(self: *App) bool {
+        if (!self.config.taskbar_clock or !self.volume_ui.installed) return false;
+        const old = self.volume_ui.popup_open;
+        defer self.volume_ui.popup_open = old;
+        self.volume_ui.popup_open = true;
+        const clock = draw.taskbarClockRect(self.screen_w, self.screen_h);
+        const icon = draw.taskbarVolumeRect(self.screen_w, self.screen_h, true);
+        const keyboard = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, true, true);
+        const track = draw.volumeTrackRect(self.screen_w, self.screen_h, true);
+        const mute = draw.volumeMuteRect(self.screen_w, self.screen_h, true);
+        return icon.right() + volume.icon_gap == clock.x and keyboard.right() + draw.taskbar_layout_gap == icon.x and
+            self.volumePopupTargetAt(track.x + @divTrunc(track.w, 2), track.y + @divTrunc(track.h, 2)) == .volume_popup_slider and
+            self.volumePopupTargetAt(mute.x + @divTrunc(mute.w, 2), mute.y + @divTrunc(mute.h, 2)) == .volume_popup_mute and
+            self.volumePopupTargetAt(icon.x + @divTrunc(icon.w, 2), icon.y + @divTrunc(icon.h, 2)) == .taskbar_volume and
+            self.volumePopupTargetAt(0, 0) == .volume_popup_backdrop;
     }
 
     // 0.56.28: Im aktiven Fall kurz schlafen (Responsiveness fuer
@@ -1219,7 +1575,7 @@ pub const App = struct {
     }
 
     fn syncCaptureDemand(self: *App) void {
-        const wanted = self.remote_frame_consumers != 0;
+        const wanted = self.remote_frame_consumers != 0 and !self.diagnostic_capture_override;
         const managed = self.managedOutputs();
         if (self.composition) |owner| owner.capture_demand = wanted and !managed;
         if (self.outputs) |manager| for (&manager.slots) |*slot| {
@@ -1276,82 +1632,8 @@ pub const App = struct {
         }
     }
 
-    fn smokeCaptureContract(self: *App) void {
-        var stats: r4os.abi.RemoteFrameCaptureStats = .{};
-        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 0 or stats.leases != 0 or stats.live_bytes != 0)
-            self.windowIdleSmokeFailed("capture-no-demand");
-        if (self.ctx.remoteFrameAcquire() != 1) self.windowIdleSmokeFailed("capture-acquire");
-        _ = self.pollRemoteFrameDemand();
-        self.invalidateFull();
-        var info: r4os.abi.RemoteFrameInfo = .{};
-        const deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 5 * std.time.ns_per_s;
-        while (self.ctx.remoteFrameInfo(&info) != 0) {
-            if ((self.ctx.sys.monotonicNanoseconds() orelse deadline) >= deadline) self.windowIdleSmokeFailed("capture-completion");
-            self.smokePumpFrames(1);
-        }
-        if (info.width != self.screen_w or info.height != self.screen_h) self.windowIdleSmokeFailed("capture-geometry");
-        var first: r4os.abi.RemoteFrameLease = .{};
-        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &first) != 0) self.windowIdleSmokeFailed("capture-first-lease");
-        const original: [*]const u32 = @ptrFromInt(first.pixels_addr);
-        const old_pixels = original[0..16].*;
-        const pixels = [_]u32{ 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
-        info = .{ .width = 2, .height = 2, .stride_pixels = 2, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
-        if (self.ctx.desk.remoteFramePublish(&info, &pixels) < 0) self.windowIdleSmokeFailed("capture-resize-publish");
-        var second: r4os.abi.RemoteFrameLease = .{};
-        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &second) != 0) self.windowIdleSmokeFailed("capture-resize-lease");
-        _ = self.ctx.desk.remoteFrameSourceReset();
-        info = .{ .width = 3, .height = 1, .stride_pixels = 3, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
-        if (self.ctx.desk.remoteFramePublish(&info, pixels[0..3]) < 0) self.windowIdleSmokeFailed("capture-reset-publish");
-        var third: r4os.abi.RemoteFrameLease = .{};
-        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &third) != 0 or third.epoch == second.epoch or
-            !std.mem.eql(u32, &old_pixels, original[0..16]) or !std.mem.eql(u32, &pixels, @as([*]const u32, @ptrFromInt(second.pixels_addr))[0..4]))
-            self.windowIdleSmokeFailed("capture-retained-snapshot");
-        info = .{ .width = 4, .height = 1, .stride_pixels = 4, .bytes_per_pixel = 4, .format = r4os.abi.remote_frame_format_xrgb32 };
-        if (self.ctx.desk.remoteFramePublish(&info, &pixels) < 0) self.windowIdleSmokeFailed("capture-bounded-publish");
-        var fourth: r4os.abi.RemoteFrameLease = .{};
-        if (self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &fourth) != r4os.abi.remote_frame_error_unavailable or fourth.id != 0)
-            self.windowIdleSmokeFailed("capture-snapshot-limit");
-        if (self.ctx.desk.remoteFrameSnapshotRelease(&second) != 0 or self.ctx.desk.remoteFrameSnapshotAcquire(0, &info, &fourth) != 0)
-            self.windowIdleSmokeFailed("capture-snapshot-reuse");
-        if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\RFDIAG.R4X", "/EXITOWNED", "RFDIAG capture:", "RFDIAG result: OK"))
-            self.windowIdleSmokeFailed("capture-process-exit");
-        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.consumers != 1 or stats.leases != 3 or stats.snapshots > 3)
-            self.windowIdleSmokeFailed("capture-process-retirement");
-        for ([_]r4os.abi.RemoteFrameLease{ first, third, fourth }) |lease| if (self.ctx.desk.remoteFrameSnapshotRelease(&lease) != 0)
-            self.windowIdleSmokeFailed("capture-release");
-        if (self.ctx.remoteFrameRelease() != 0) self.windowIdleSmokeFailed("capture-last-reader");
-        _ = self.pollRemoteFrameDemand();
-        self.pollComposition();
-        if (self.ctx.desk.remoteFrameCaptureStats(&stats) != 0 or stats.leases != 0 or stats.live_bytes != 0 or stats.snapshot_bytes != 0)
-            self.windowIdleSmokeFailed("capture-retirement");
-        self.invalidateFull();
-        self.startScreenshot();
-        const save_deadline = (self.ctx.sys.monotonicNanoseconds() orelse 0) +| 15 * std.time.ns_per_s;
-        while (self.screenshot_job != null) {
-            if ((self.ctx.sys.monotonicNanoseconds() orelse save_deadline) >= save_deadline) self.windowIdleSmokeFailed("capture-screenshot-timeout");
-            self.smokePumpFrames(1);
-        }
-        const saved = self.screenshot_last orelse self.windowIdleSmokeFailed("capture-screenshot-start");
-        var header: [54]u8 = undefined;
-        if (saved.code != 0 or self.ctx.sys.fileReadAt(&saved.path, 0, &header) != header.len or header[0] != 'B' or header[1] != 'M' or
-            std.mem.readInt(u32, header[2..6], .little) != saved.bytes or saved.bytes != 54 + @as(u64, @intCast(self.screen_w)) * @as(u64, @intCast(self.screen_h)) * 4)
-            self.windowIdleSmokeFailed("capture-screenshot-file");
-        _ = self.pollRemoteFrameDemand();
-        self.pollComposition();
-        self.ctx.println("DESKTOP capture: OK bounded snapshots resize source-reset process-exit screenshot-BMP no-demand-retirement");
-        if (self.outputs) |manager| for (&manager.slots) |*slot| if (slot.logical_index == manager.layout.primary) {
-            const reader = if (slot.gpu) |owner| &owner.capture.reader else if (slot.software) |owner| &owner.capture.reader else continue;
-            self.ctx.write("DESKTOP readback: copy-bytes=");
-            self.ctx.printU64(reader.stats.copy_bytes);
-            self.ctx.write(" cpu-read-bytes=");
-            self.ctx.printU64(reader.stats.cpu_read_bytes);
-            self.ctx.write(" max-latency-ns=");
-            self.ctx.printU64(reader.stats.max_latency_ns);
-            self.ctx.println("");
-        };
-    }
-
     fn publishCapture(self: *App, capture: *@import("remote_capture.zig").Capture) void {
+        if (self.diagnostic_capture_override) { if (capture.image() != null) capture.acknowledge(false); return; }
         const now = self.ctx.sys.monotonicNanoseconds() orelse 0;
         if (capture.image()) |image| {
             var captured = image;
@@ -1882,7 +2164,6 @@ pub const App = struct {
         self.ctx.println("DESKTOP window-idle result: OK");
         _ = self.printSmokeRenderStats("window-idle-close", render_sample);
         self.smokeGraphicsResources();
-        if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) self.smokeCaptureContract();
         self.ctx.systemPoweroff();
     }
 
@@ -3714,24 +3995,21 @@ pub const App = struct {
                 (original.flags & r4os.abi.audio_master_state_flag_muted);
     }
 
+    fn diagnosticFailure(self: *App, reason: []const u8) bool {
+        self.ctx.write("DESKTOP diagnostic failed: "); self.ctx.println(reason); return false;
+    }
+
     fn smokeVolumeContract(self: *App) bool {
         if (!self.config.taskbar_clock or !self.ctx.exists(audio_service_module_path)) {
-            return self.headlessSubsystemFailure("volume-profile");
+            return self.diagnosticFailure("volume-profile");
         }
 
         var original: r4os.abi.AudioServiceMasterState = .{};
         if (self.ctx.audioMasterState(&original) != r4os.abi.service_api_result_ok) {
-            return self.headlessSubsystemFailure("volume-service-status");
+            return self.diagnosticFailure("volume-service-status");
         }
         self.acceptVolumeState(original);
         _ = self.updateTrayLayout();
-
-        const clock = draw.taskbarClockRect(self.screen_w, self.screen_h);
-        const icon = draw.taskbarVolumeRect(self.screen_w, self.screen_h, true);
-        const keyboard = draw.taskbarKeyboardLayoutRect(self.screen_w, self.screen_h, true, true);
-        if (icon.right() + volume.icon_gap != clock.x or keyboard.right() + draw.taskbar_layout_gap != icon.x) {
-            return self.headlessSubsystemFailure("volume-layout");
-        }
 
         const popup_was_open = self.volume_ui.popup_open;
         var restore_needed = false;
@@ -3748,13 +4026,13 @@ pub const App = struct {
             .fixed_volume = volume.gainForPercent(35),
         };
         if (self.ctx.audioSetMasterState(&request, &changed) != r4os.abi.service_api_result_ok) {
-            return self.headlessSubsystemFailure("volume-set-muted");
+            return self.diagnosticFailure("volume-set-muted");
         }
         restore_needed = true;
         if ((changed.flags & r4os.abi.audio_master_state_flag_muted) == 0 or
             changed.selected_volume_fixed != request.fixed_volume or changed.effective_volume_fixed != 0)
         {
-            return self.headlessSubsystemFailure("volume-muted-state");
+            return self.diagnosticFailure("volume-muted-state");
         }
 
         request = .{
@@ -3766,21 +4044,12 @@ pub const App = struct {
             changed.selected_volume_fixed != request.fixed_volume or
             changed.effective_volume_fixed != request.fixed_volume)
         {
-            return self.headlessSubsystemFailure("volume-positive-unmute");
+            return self.diagnosticFailure("volume-positive-unmute");
         }
 
-        self.volume_ui.popup_open = true;
-        const track = draw.volumeTrackRect(self.screen_w, self.screen_h, true);
-        const mute = draw.volumeMuteRect(self.screen_w, self.screen_h, true);
-        if (self.volumePopupTargetAt(track.x + @divTrunc(track.w, 2), track.y + @divTrunc(track.h, 2)) != .volume_popup_slider or
-            self.volumePopupTargetAt(mute.x + @divTrunc(mute.w, 2), mute.y + @divTrunc(mute.h, 2)) != .volume_popup_mute or
-            self.volumePopupTargetAt(icon.x + @divTrunc(icon.w, 2), icon.y + @divTrunc(icon.h, 2)) != .taskbar_volume or
-            self.volumePopupTargetAt(0, 0) != .volume_popup_backdrop)
-        {
-            return self.headlessSubsystemFailure("volume-popup-targets");
-        }
+        if (!self.diagnosticVolumeTargets()) return self.diagnosticFailure("volume-popup-targets");
 
-        if (!self.restoreSmokeVolumeState(original)) return self.headlessSubsystemFailure("volume-restore");
+        if (!self.restoreSmokeVolumeState(original)) return self.diagnosticFailure("volume-restore");
         restore_needed = false;
         return true;
     }
@@ -5093,9 +5362,7 @@ pub const App = struct {
             const resize_index = self.resize.window_index;
             // The release packet can carry the final coordinate even when
             // no separate motion packet was delivered for it.
-            if (was_drag) _ = self.updateDrag(mouse.x, mouse.y);
-            if (was_resize) _ = self.updateResize(mouse.x, mouse.y);
-            self.flushWindowGeometry(true);
+            self.flushReleasedWindowGeometry(mouse.x, mouse.y);
             if (was_down and pressed_target == .volume_popup_slider and self.volume_dragging) {
                 _ = self.updateVolumeFromPointer(mouse.x, true);
                 self.volume_dragging = false;
@@ -5764,6 +6031,12 @@ pub const App = struct {
         self.keyboard_focus = .none;
     }
 
+    fn flushReleasedWindowGeometry(self: *App, x: i32, y: i32) void {
+        if (self.drag.active) _ = self.updateDrag(x, y);
+        if (self.resize.active) _ = self.updateResize(x, y);
+        self.flushWindowGeometry(true);
+    }
+
     fn beginDrag(self: *App, index: usize, x: i32, y: i32) void {
         const win = &self.windows[index];
         if (win.maximized) return;
@@ -6275,7 +6548,7 @@ pub const App = struct {
         if (self.screenshot_job) |job| if (job.collect()) |result| {
             self.screenshot_job = null;
             self.screenshot_last = result;
-            if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
+            if (!self.diagnostic_screenshot and !argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
                 self.dialog = .message_window_info;
                 self.dialog_focus = .message_ok;
                 if (result.code == 0) self.setMessageBox(.info, .ok, "Screenshot", "Saved in C:\\SCREENSHOTS.") else self.setMessageBox(.@"error", .ok, "Screenshot", "The screenshot could not be saved.");
@@ -6596,6 +6869,7 @@ pub const App = struct {
     }
 
     fn publishRemoteScene(self: *App, physical_regions: []const surface.Rect) i32 {
+        if (self.diagnostic_capture_override) return r4os.abi.remote_frame_error_unavailable;
         if (!self.cpu_scene_current or !self.scene.matches(self.screen_w, self.screen_h)) return r4os.abi.remote_frame_error_unavailable;
         var regions: [surface.max_damage_regions]surface.Rect = undefined;
         var count: usize = 0;
@@ -7801,14 +8075,18 @@ pub const App = struct {
             if (self.instanceSnapshotForWindow(i)) |snapshot| {
                 const info = snapshot.info;
                 if (info.state == @intFromEnum(r4os.abi.ProgramInstanceState.done)) {
+                    const diagnostic_owned = self.diagnostic_session.owns(diagnosticIdentity(snapshot.handle));
                     var completion: r4os.abi.ProgramProcessCompletion = .{};
-                    const reap_status = self.ctx.programHandleReap(&snapshot.handle, &completion);
-                    if (reap_status != r4os.abi.program_handle_ok and !processHandleDefinitelyGone(reap_status)) continue;
-                    const exit_code = if (reap_status == r4os.abi.program_handle_ok) completion.exit_code else info.exit_code;
+                    var exit_code = info.exit_code;
+                    if (!diagnostic_owned) {
+                        const reap_status = self.ctx.programHandleReap(&snapshot.handle, &completion);
+                        if (reap_status != r4os.abi.program_handle_ok and !processHandleDefinitelyGone(reap_status)) continue;
+                        if (reap_status == r4os.abi.program_handle_ok) exit_code = completion.exit_code;
+                    }
                     self.window_completion_handles[i] = snapshot.handle;
                     self.window_completion_exit_codes[i] = exit_code;
                     self.invalidateWindow(i);
-                    self.reportFinishedWindow(i, exit_code);
+                    if (!diagnostic_owned) self.reportFinishedWindow(i, exit_code);
                     self.clearWindowInstanceBinding(i);
                     self.windows[i].close();
                     if (self.active_window == i) self.focusFirstVisibleWindow();
@@ -7832,7 +8110,7 @@ pub const App = struct {
                 continue;
             }
             self.invalidateWindow(i);
-            self.reportFinishedWindow(i, self.program_status.last_exit_code);
+            if (!self.diagnostic_session.owns(diagnosticIdentity(self.window_process_handles[i]))) self.reportFinishedWindow(i, self.program_status.last_exit_code);
             // The exact generation is absent from the authoritative snapshot.
             // Never let an ID-reused successor inherit the stale window action.
             self.clearWindowInstanceBinding(i);

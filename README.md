@@ -4,13 +4,41 @@
 
 ## Package
 
-- Version: `0.1.130`
+- Version: see `module.R4MF`
 - Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
 - Image scope: `slim`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+## Explicit functional checks
+
+`SPECTRA CHECK DESKTOP [/JSON]` runs the shared window/focus/drag/resize/idle,
+tray, volume-target and public capture checks. It requires the current Desktop,
+WINSVC and the Full-profile APPDEF/CLOCK fixtures. Run it through SSH with a
+quiet Desktop: foreign windows, active interactions and new user input refuse
+or abort the job. Spectra owns its two children and waits/reaps their exact
+handles; it never drains physical input or closes foreign windows.
+
+`/RESTART`, `/AUDIO` and `/CAPTURE` are explicit isolated variants. Boot this
+Desktop with `/CHECK-ISOLATED` before selecting them. The last variant checks
+immutable snapshots across resize/source reset, the three-snapshot limit,
+a real exit-owned Spectra child and the productive screenshot BMP worker.
+Own temporary screenshot files are CREATE-only and removed after worker join.
+`SPECTRA CHECK DESKTOP /CANCEL` starts this same check in an owned Spectra
+child, requests Close after two real windows and verifies Exit4, exact Reap
+and empty resources. Desktop releases the UI binding without consuming the
+controller's process completion.
+`Contract/desktop_check_v1.zig` is the language-neutral, fixed-byte owner
+boundary; the passive WINSVC operation4500 remains separate.
+
+During migration, `/SMOKE-WINDOW-IDLE` without hardware options forwards to
+the same Spectra body, returns its result and does not power off. Its `/CAPTURE`
+option selects the shared capture variant. Existing explicit native output,
+cursor, swapchain and screen-power boot cases retain their distinct owner
+purpose; combining those old hardware options with `/CAPTURE` is rejected.
+They do not grant physical visibility or hardware qualification to Spectra.
 
 ## Offscreen composition diagnostics
 

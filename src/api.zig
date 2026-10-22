@@ -5,6 +5,7 @@ const scene_buffer = @import("scene_buffer.zig");
 const surface = @import("surface.zig");
 const window_service = @import("window_service_gate.zig");
 const gfx_renderer = @import("gfx_renderer.zig");
+const desktop_check = @import("desktop_check");
 
 pub const Context = struct {
     sys: r4os.r4sys.Context,
@@ -14,6 +15,7 @@ pub const Context = struct {
     self_handle: r4os.abi.ProgramProcessHandle,
     scene: ?*scene_buffer.SceneBuffer = null,
     window_session: window_service.Session = .{},
+    diagnostic_work: ?desktop_check.Work = null,
     graphics: ?*gfx_renderer.Renderer = null,
     recording_state: u8 = 0, // UI-owned: idle, recording, finalizing.
     output_bounds: ?surface.Rect = null,
@@ -438,6 +440,20 @@ pub const Context = struct {
         request: *const r4os.abi.TrayDesktopExchange,
         out: *r4os.abi.TrayDesktopExchange,
     ) i32 {
+        if (op == r4os.abi.tray_service_op_desktop_sync) {
+            const tray_size = @sizeOf(r4os.abi.TrayDesktopExchange);
+            var bridge: [tray_size + desktop_check.work_size]u8 = undefined;
+            const got = self.window_session.call(self, desktop_check.tray_operation, std.mem.asBytes(request), &bridge);
+            if (got != bridge.len) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
+            const work = desktop_check.decodeWork(bridge[tray_size..]) catch return r4os.abi.service_api_result_invalid;
+            if (work) |value| {
+                if (self.diagnostic_work) |pending| {
+                    if (pending.ticket != value.ticket) return r4os.abi.service_api_result_busy;
+                } else self.diagnostic_work = value;
+            }
+            @memcpy(std.mem.asBytes(out), bridge[0..tray_size]);
+            return 0;
+        }
         const got = self.window_session.call(self, op, std.mem.asBytes(request), std.mem.asBytes(out));
         if (got != @as(i32, @intCast(@sizeOf(r4os.abi.TrayDesktopExchange)))) return if (got < 0) got else r4os.abi.service_api_result_buffer_too_small;
         return r4os.abi.service_api_result_ok;

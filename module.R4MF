@@ -1,7 +1,7 @@
 R4OS_MODULE_MANIFEST=2
 KIND=R4X
 NAME=R4DESK
-VERSION=0.1.138
+VERSION=0.1.139
 LANGUAGE=Zig
 SOURCE=src/main.zig
 ENTRY_MODE=app
@@ -38,3 +38,4 @@ ZIG_MODULE=r4enc:../../Libraries/R4ENC/Bindings/Zig/r4enc.zig
 ZIG_MODULE=r4enc_recording_mux:../../Libraries/R4ENC/Bindings/Zig/recording_mux.zig
 ZIG_MODULE=r4enc_recording_pixels:../../Libraries/R4ENC/Bindings/Zig/recording_pixels.zig
 ZIG_MODULE=r4std_console_text:../../Libraries/R4STD/Bindings/Zig/console_text.zig
+ZIG_MODULE=desktop_check:Contract/desktop_check_v1.zig

@@ -19,8 +19,12 @@ pub fn build(b: *std.Build) void {
             libraries_dep.namedLazyPath("r4enc_recording_mux"),
             libraries_dep.namedLazyPath("r4enc_recording_pixels"),
             libraries_dep.namedLazyPath("r4std_console_text"),
+            b.path("Contract/desktop_check_v1.zig"),
         },
     });
+
+    const check_wire = b.createModule(.{ .root_source_file = b.path("Contract/desktop_check_v1.zig"), .target = b.graph.host });
+    b.step("diagnostic-test", "Explicit bounded Desktop work byte contract and generation binding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check_wire })).step);
 
     const test_target = b.graph.host;
     const console_text = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4std_console_text"), .target = test_target });
@@ -330,7 +334,10 @@ pub fn build(b: *std.Build) void {
         .optimize = test_optimize,
     });
     physical_input_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
-    for ([_]*std.Build.Module{ draw_module, compositor_module, paint_module, scene_buffer_tests.root_module, wallpaper_module, gui_shape_renderer_module }) |module| module.addImport("r4gfx_desktop_outputs", topology);
+    for ([_]*std.Build.Module{ draw_module, compositor_module, paint_module, scene_buffer_tests.root_module, wallpaper_module, gui_shape_renderer_module }) |module| {
+        module.addImport("r4gfx_desktop_outputs", topology);
+        module.addImport("desktop_check", check_wire);
+    }
     const physical_input_tests = b.addTest(.{ .root_module = physical_input_module });
 
     const run_model_tests = b.addRunArtifact(model_tests);
