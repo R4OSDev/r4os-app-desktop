@@ -8,7 +8,35 @@ pub const complete_operation: u16 = 4503;
 pub const request_size = 80;
 pub const response_size = 128;
 const magic: u32 = 0x31434452;
-pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel };
+pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel,
+    begin_benchmark, software_profile, snes_prepare, snes_finish };
+pub const SnesMode = enum(u2) { normal, detail, paired };
+pub const SnesOptions = struct {
+    pal: bool = false,
+    mode: SnesMode = .normal,
+    maximized: bool = false,
+    check_only: bool = false,
+    pub fn bits(self: SnesOptions) u64 {
+        return @as(u64, @intFromBool(self.pal)) | (@as(u64, @intFromEnum(self.mode)) << 1) |
+            (@as(u64, @intFromBool(self.maximized)) << 3) | (@as(u64, @intFromBool(self.check_only)) << 4);
+    }
+    pub fn decode(value: u64) !SnesOptions {
+        if (value & ~@as(u64, 31) != 0 or (value >> 1) & 3 == 3) return error.InvalidBenchmarkOptions;
+        return .{ .pal = value & 1 != 0, .mode = @enumFromInt((value >> 1) & 3),
+            .maximized = value & 8 != 0, .check_only = value & 16 != 0 };
+    }
+};
+// Existing subsystem files are reserved only for one explicit isolated run.
+// The native Core host runner and its comparison context remain independent.
+pub const snes_data_path = "C:\\TEMP\\SNES-PERF.JSONL";
+pub const snes_error_path = "C:\\TEMP\\SNES-PERF.ERROR";
+pub const snes_generations_path = "C:\\TEMP\\SNES-PRESENT.TXT";
+pub const snes_window_path = "C:\\TEMP\\SNES-WINDOW.JSON";
+pub const snes_paths = [_][*:0]const u8{ snes_data_path, snes_error_path, snes_generations_path, snes_window_path };
+pub fn softwareReportPath(buffer: []u8, owner: Identity) ![:0]u8 {
+    if (!owner.valid()) return error.InvalidOwner;
+    return std.fmt.bufPrintZ(buffer, "C:\\TEMP\\DP{X:0>8}-{X:0>16}.JSON", .{ owner.instance, owner.generation });
+}
 pub const Identity = struct {
     instance: u32 = 0,
     generation: u64 = 0,
@@ -104,6 +132,7 @@ pub const Session = struct {
     targets: [2]Identity = .{Identity{}} ** 2,
     deadline: u64 = 0,
     input_generation: u64 = 0,
+    benchmark: bool = false,
     pub fn owns(self: *const Session, target: Identity) bool {
         for (self.targets) |value| if (value.same(target)) return true;
         return false;
@@ -155,6 +184,11 @@ pub fn completionTicket(bytes: []const u8) !u64 {
 pub fn completionBroker(bytes: []const u8) !Identity { _ = try completionTicket(bytes); return identity(bytes, 8); }
 
 test "active wire is current exact and has no pointers; reservation binds exact generations" {
+    try std.testing.expect(!(@as(Identity, .{})).same(.{}));
+    const options: SnesOptions = .{ .pal = true, .mode = .paired, .maximized = true, .check_only = true };
+    try std.testing.expectEqualDeep(options, try SnesOptions.decode(options.bits()));
+    try std.testing.expectError(error.InvalidBenchmarkOptions, SnesOptions.decode(6));
+    try std.testing.expectError(error.InvalidBenchmarkOptions, SnesOptions.decode(32));
     const request: Request = .{ .op = .resize, .caller = .{ .instance = 3, .generation = 0x100000004 },
         .target = .{ .instance = 9, .generation = 77 }, .dx = -32, .dy = 24, .deadline_tick = 500 };
     var bytes: [request_size]u8 = undefined;

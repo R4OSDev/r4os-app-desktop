@@ -26,7 +26,9 @@ fn now(ctx: *const api.Context) !u64 {
     return ctx.sys.monotonicNanoseconds() orelse error.ClockMissing;
 }
 
-pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
+pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client, path: [*:0]const u8,
+    caller: r4os.abi.ProgramProcessHandle, deadline: u64) !void
+{
     const allocator = ctx.allocator();
     const source = try allocator.alloc(u32, fixture.source_width * fixture.source_height);
     defer allocator.free(source);
@@ -61,6 +63,11 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
             context.scene = &canvas; context.output_bounds = null; context.gpu_windows = @splat(null);
             var reserved: usize = 0;
             for (0..5) |sample| {
+                // Control checks and the full-canvas oracle stay outside all
+                // nine original measured phases. No new frame clock/poller.
+                var state: r4os.abi.ProgramInstanceInfo = .{};
+                if (ctx.sys.ticks() >= deadline or ctx.sys.programHandleStatus(&caller, &state) != 0 or
+                    state.state != @intFromEnum(r4os.abi.ProgramInstanceState.running)) return error.Cancelled;
                 var marks: [10]u64 = undefined;
                 marks[0] = try now(ctx);
                 try owner.begin(allocator, &canvas);
@@ -128,5 +135,5 @@ pub fn run(ctx: *api.Context, colors: *const gfx.ColorV1Client) !void {
         .records = records,
     }, .{});
     defer allocator.free(report);
-    if (ctx.fileWrite("C:\\TEMP\\SNES-OUTPUT.JSON", report) != @as(i32, @intCast(report.len))) return error.ReportWrite;
+    if (ctx.fileWrite(path, report) != @as(i32, @intCast(report.len))) return error.ReportWrite;
 }

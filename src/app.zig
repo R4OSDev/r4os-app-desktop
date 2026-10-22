@@ -265,6 +265,8 @@ pub const App = struct {
     diagnostic_launcher: r4os.abi.ProgramProcessHandle = .{},
     diagnostic_export: [128:0]u8 = @splat(0),
     diagnostic_session: diagnostic.Session = .{},
+    diagnostic_benchmark: @import("diagnostic_benchmark.zig").State = .{},
+    diagnostic_launcher_benchmark: bool = false,
     images: *const r4img.Context,
     png: *const r4img.PngContext,
     raster: *const r4img.RasterContext,
@@ -554,7 +556,9 @@ pub const App = struct {
         self.redraw();
         _ = self.ctx.bootReady();
         if (argsContain(self.ctx.argsRaw(), "/INPUTTEST")) return self.runConsoleInputSelftest();
-        if (argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) self.runR4SnesPerformanceAndPoweroff();
+        if (argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) {
+            if (!self.startDiagnosticBenchmarkLauncher()) return 1;
+        }
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
             self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);
@@ -582,6 +586,17 @@ pub const App = struct {
 
         while (!self.ctx.sys.programShouldClose()) {
             self.processDiagnostics();
+            // Preserve the original explicit window benchmark's cooperative
+            // owner pump. Spectra waits on the real child, with no IPC sampler.
+            if (self.diagnostic_benchmark.trace) |trace| {
+                if (!self.diagnostic_benchmark.report_ready and
+                    diagnosticIdentity(self.diagnostic_benchmark.child).same(diagnosticIdentity(self.window_process_handles[trace.window_index])))
+                {
+                    self.smokePumpCooperativeFrames(1);
+                    self.ctx.sleepTicks(1);
+                    continue;
+                }
+            }
             if (processHandleValid(self.diagnostic_launcher)) {
                 var completion: r4os.abi.ProgramProcessCompletion = .{};
                 if (self.ctx.sys.programHandleWait(&self.diagnostic_launcher, 0, &completion) == 0) {
@@ -590,7 +605,10 @@ pub const App = struct {
                     if (self.ctx.sys.programHandleReap(&self.diagnostic_launcher, &completion) != 0) return 1;
                     self.diagnostic_launcher = .{};
                     const removed = !self.ctx.sys.exists(&self.diagnostic_export) or self.ctx.sys.fileDelete(&self.diagnostic_export) >= 0;
-                    self.ctx.println(if (valid and exit_code == 0 and removed) "DESKTOP window-idle result: OK (Spectra)" else "DESKTOP window-idle FAILED (Spectra)");
+                    const ok = valid and exit_code == 0 and removed;
+                    self.ctx.println(if (self.diagnostic_launcher_benchmark)
+                        (if (ok) "DESKTOP benchmark result: OK (Spectra)" else "DESKTOP benchmark FAILED (Spectra)")
+                        else (if (ok) "DESKTOP window-idle result: OK (Spectra)" else "DESKTOP window-idle FAILED (Spectra)"));
                     return if (valid and removed) exit_code else 1;
                 }
             }
@@ -666,6 +684,22 @@ pub const App = struct {
         const args = std.fmt.bufPrintZ(&command, "CHECK DESKTOP /RESTART {s} /JSON /EXPORT:{s}", .{
             if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) @as([]const u8, "/CAPTURE") else "", path,
         }) catch return false;
+        return self.ctx.sys.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", args, .console, &self.diagnostic_launcher) == 0;
+    }
+
+    fn startDiagnosticBenchmarkLauncher(self: *App) bool {
+        const path = std.fmt.bufPrintZ(&self.diagnostic_export, "C:\\TEMP\\DB{X:0>8}-{X:0>16}.JSON", .{ self.ctx.self_handle.instance_id, self.ctx.self_handle.generation }) catch return false;
+        if (self.ctx.sys.exists(path)) return false;
+        var command: [384:0]u8 = undefined;
+        const raw = self.ctx.argsRaw();
+        const args = std.fmt.bufPrintZ(&command, "BENCH SNES /WINDOW {s} {s} {s} {s} {s} /JSON /EXPORT:{s}", .{
+            if (argsContain(raw, "/SNES-PAL")) @as([]const u8, "/PAL") else "/NTSC",
+            if (argsContain(raw, "/SNES-NORMAL")) @as([]const u8, "/NORMAL") else if (argsContain(raw, "/SNES-DETAIL")) "/DETAIL" else "/PAIRED",
+            if (argsContain(raw, "/SNES-MAXIMIZED")) @as([]const u8, "/MAXIMIZED") else "/SMALL",
+            if (argsContain(raw, "/SNES-OUTPUT-PROFILE")) @as([]const u8, "/OUTPUT-ANALYSIS") else "",
+            if (argsContain(raw, "/PERF-CHECK-R4SNES")) @as([]const u8, "/CHECK") else "", path,
+        }) catch return false;
+        self.diagnostic_launcher_benchmark = true;
         return self.ctx.sys.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", args, .console, &self.diagnostic_launcher) == 0;
     }
 
@@ -749,17 +783,20 @@ pub const App = struct {
             .target = request.target, .idle_timeouts = self.activity_wait_timeouts, .redraws = self.render_stats.redraws,
             .input_generation = self.diagnostic_input_generation, .service_handle = self.ctx.window_session.handle, .restart_state = self.diagnostic_restart_state,
             .restart_old_handle = self.diagnostic_restart_old_handle, .restart_result = self.diagnostic_restart_result };
-        const isolated = argsContain(self.ctx.argsRaw(), "/CHECK-ISOLATED") or argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE");
+        const isolated = argsContain(self.ctx.argsRaw(), "/CHECK-ISOLATED") or argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE") or
+            argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES");
         if (isolated) response.flags |= diagnostic.isolated;
         if (self.win_service_gate.available) response.flags |= diagnostic.service_available;
         response.result = r4os.abi.service_api_result_busy;
         if (request.caller.instance != client or !self.diagnosticLive(request.caller)) return response;
         const now = self.ctx.ticks();
-        if (request.deadline_tick <= now or request.deadline_tick - now > self.ctx.sys.ticksFromMilliseconds(60000)) return response;
-        if (request.op == .begin) {
+        const limit: u32 = if (request.op == .begin_benchmark or self.diagnostic_session.benchmark) 300000 else 60000;
+        if (request.deadline_tick <= now or request.deadline_tick - now > self.ctx.sys.ticksFromMilliseconds(limit)) return response;
+        if (request.op == .begin or request.op == .begin_benchmark) {
             if (self.diagnostic_session.caller.valid() or self.diagnosticForeignWindows(request.caller) or self.drag.active or self.resize.active or
                 self.desktop_drag.active or self.dialog != .none or self.volume_ui.popup_open or self.start_open) return response;
-            self.diagnostic_session = .{ .caller = request.caller, .deadline = request.deadline_tick, .input_generation = self.diagnostic_input_generation };
+            self.diagnostic_session = .{ .caller = request.caller, .deadline = request.deadline_tick, .input_generation = self.diagnostic_input_generation,
+                .benchmark = request.op == .begin_benchmark };
             self.diagnostic_restart_state = 0;
             self.diagnostic_restart_at_tick = 0;
             self.diagnostic_restart_old_handle = 0;
@@ -779,7 +816,29 @@ pub const App = struct {
         }
         response.result = 0;
         switch (request.op) {
-            .begin => {},
+            .begin, .begin_benchmark => {},
+            .software_profile => {
+                if (!self.diagnostic_session.benchmark or self.diagnostic_benchmark.software_reserved or processHandleValid(self.diagnostic_benchmark.child)) {
+                    response.result = r4os.abi.service_api_result_busy; return response;
+                }
+                var buffer: [128:0]u8 = undefined;
+                const path = diagnostic.softwareReportPath(&buffer, request.caller) catch { response.result = -1; return response; };
+                if (self.ctx.sys.exists(path)) { response.result = r4os.abi.service_api_result_busy; return response; }
+                self.diagnostic_benchmark.software_reserved = true;
+                @import("software_output_profile.zig").run(self.ctx, self.colors, path, diagnosticHandle(request.caller), request.deadline_tick) catch { response.result = -1; };
+            },
+            .snes_prepare => {
+                if (!isolated) { response.result = r4os.abi.service_api_result_disabled; return response; }
+                if (!self.diagnostic_session.benchmark or request.target.valid()) { response.result = r4os.abi.service_api_result_invalid; return response; }
+                const options = diagnostic.SnesOptions.decode(request.item) catch { response.result = r4os.abi.service_api_result_invalid; return response; };
+                self.prepareDiagnosticSnes(options) catch { response.result = -1; return response; };
+            },
+            .snes_finish => {
+                if (!self.diagnostic_session.benchmark or !diagnosticIdentity(self.diagnostic_benchmark.child).same(request.target)) {
+                    response.result = r4os.abi.service_api_result_invalid; return response;
+                }
+                self.finishDiagnosticSnes() catch { response.result = -1; };
+            },
             .bind => {
                 const target = diagnosticHandle(request.target);
                 var info: r4os.abi.ProgramInstanceInfo = .{};
@@ -792,7 +851,17 @@ pub const App = struct {
                 } else false;
                 if (!bound) {
                     if (info.window_id >= 0) { response.result = -1; return response; }
-                    const index = self.findFreeAppWindow() orelse { response.result = r4os.abi.service_api_result_full; return response; };
+                    const bench = &self.diagnostic_benchmark;
+                    const index = if (self.diagnostic_session.benchmark and bench.trace != null) bench.trace.?.window_index
+                        else self.findFreeAppWindow() orelse { response.result = r4os.abi.service_api_result_full; return response; };
+                    if (self.window_process_handles[index].instance_id != 0) { response.result = r4os.abi.service_api_result_busy; return response; }
+                    if (self.diagnostic_session.benchmark and bench.trace != null) {
+                        if (processHandleValid(bench.child)) { response.result = r4os.abi.service_api_result_busy; return response; }
+                        bench.child = target;
+                        bench.started_ns = self.ctx.sys.monotonicNanoseconds() orelse { response.result = -1; return response; };
+                        bench.presents_before = self.render_stats.present_successes;
+                        bench.cursor_before = self.render_stats.cursor_moves;
+                    }
                     // Assign only this exact owned GUI, then use the existing
                     // current-host admission path, metadata, resize and mirror.
                     response.result = self.ctx.programSetWindowHandle(&target, @intCast(index));
@@ -925,6 +994,17 @@ pub const App = struct {
             }
             self.diagnostic_screenshot = false;
         }
+        if (processHandleValid(self.diagnostic_benchmark.child) and !self.diagnosticGone(diagnosticIdentity(self.diagnostic_benchmark.child))) {
+            _ = self.ctx.programHandleRequestClose(&self.diagnostic_benchmark.child);
+            return false;
+        }
+        self.performance_present = null;
+        if (self.diagnostic_benchmark.trace) |trace| {
+            self.ctx.allocator().destroy(trace);
+            self.diagnostic_benchmark.trace = null;
+        }
+        if (!self.diagnostic_benchmark.cleanupFiles(&self.ctx.sys, self.diagnostic_session.caller)) return false;
+        self.diagnostic_benchmark = .{};
         var retired = true;
         for (self.diagnostic_session.targets) |identity| {
             if (!identity.valid()) continue;
@@ -6382,73 +6462,47 @@ pub const App = struct {
 
     const PresentationTrace = @import("snes_output_trace.zig").Trace;
 
-    fn runR4SnesPerformanceAndPoweroff(self: *App) noreturn {
-        const ok = self.runR4SnesPerformance();
-        self.ctx.println(if (ok) "R4SNES presentation profile: OK" else "R4SNES presentation profile: FAILED");
-        _ = self.ctx.fileWrite("C:\\TEMP\\SNES-STATUS.TXT", if (ok) "OK" else "FAILED");
-        self.ctx.systemPoweroff();
-        while (true) self.ctx.sleepTicks(1);
+    fn prepareDiagnosticSnes(self: *App, options: diagnostic.SnesOptions) !void {
+        const bench = &self.diagnostic_benchmark;
+        const native = if (self.composition) |worker|
+            self.ctx.draw.supportsDisplayPresentationStats() and worker.available(self.output_revision) else false;
+        if (native or self.managedOutputs()) return error.SoftwareOutputRequired;
+        if (self.performance_present != null or bench.trace != null or processHandleValid(bench.child)) return error.BenchmarkBusy;
+        if (!self.ctx.sys.exists(r4snes_host_path)) return error.SubsystemMissing;
+        const index = self.findFreeAppWindow() orelse return error.WindowFull;
+        if (!bench.reserveSnes(&self.ctx.sys)) return error.BenchmarkFilesBusy;
+        const trace = try self.ctx.allocator().create(PresentationTrace);
+        trace.* = .{ .window_index = index };
+        bench.trace = trace;
+        bench.options = options;
+        self.performance_present = trace;
+        // The caller spawns a pending, unattached GUI only after this receipt.
+        // Its real attach gate prevents warmup before this geometry exists.
+        self.windows[index].setNormal(62, 40, 430, 262);
+        if (options.maximized) self.windows[index].toggleMaximizeIn(self.outputWorkArea(index));
     }
 
-    fn runR4SnesPerformance(self: *App) bool {
-        if (argsContain(self.ctx.argsRaw(), "/SNES-OUTPUT-PROFILE"))
-            @import("software_output_profile.zig").run(self.ctx, self.colors) catch |err| {
-                self.ctx.write("R4SNES software output analysis: "); self.ctx.println(@errorName(err)); return false;
-            };
-        const index = self.findFreeAppWindow() orelse return false;
-        const maximized = argsContain(self.ctx.argsRaw(), "/SNES-MAXIMIZED");
-        // Establish the owner's geometry before the child starts its warmup.
-        self.windows[index].setNormal(62, 40, 430, 262);
-        if (maximized) self.windows[index].toggleMaximizeIn(self.outputWorkArea(index));
-        var argument_buffer: [128]u8 = undefined;
-        const command = if (argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) "/PERFCHECK" else "/PERFTEST";
-        const region = if (argsContain(self.ctx.argsRaw(), "/SNES-PAL")) "/PAL" else "/NTSC";
-        const mode = if (argsContain(self.ctx.argsRaw(), "/SNES-NORMAL")) "/NORMAL" else if (argsContain(self.ctx.argsRaw(), "/SNES-DETAIL")) "/DETAIL" else "/PAIRED";
-        const args = std.fmt.bufPrintZ(&argument_buffer, "{s} {s} {s}", .{ command, region, mode }) catch return false;
-        self.launchGuiPath(r4snes_host_path, args.ptr, "R4SNES performance", .gui);
-        const handle = self.window_process_handles[index];
-        if (!processHandleValid(handle)) return false;
-        const trace = self.ctx.allocator().create(PresentationTrace) catch return false;
-        defer self.ctx.allocator().destroy(trace);
-        trace.* = .{ .window_index = index };
-        self.performance_present = trace;
-        defer self.performance_present = null;
-        const before = self.render_stats;
-        const started_ns = self.ctx.sys.monotonicNanoseconds() orelse return false;
-        const started = self.ctx.ticks();
-        const timeout = @as(u64, @max(1, self.monotonic_hz)) * 300;
-        while (sameProcessHandle(self.window_process_handles[index], handle)) {
-            self.smokePumpCooperativeFrames(1);
-            self.ctx.sleepTicks(1);
-            if (self.ctx.ticks() -| started >= timeout) {
-                self.forceCloseWindowsByLaunchPath(r4snes_host_path);
-                return false;
-            }
-        }
+    fn finishDiagnosticSnes(self: *App) !void {
+        const bench = &self.diagnostic_benchmark;
+        if (bench.report_ready) return;
+        const trace = bench.trace orelse return error.TraceMissing;
+        const handle = bench.child;
+        var info: r4os.abi.ProgramInstanceInfo = .{};
+        if (!processHandleValid(handle) or self.ctx.programHandleStatus(&handle, &info) != 0 or
+            info.state != @intFromEnum(r4os.abi.ProgramInstanceState.done) or info.exit_code != 0) return error.ChildNotCompleted;
+        _ = self.syncProgramWindows();
+        const index = trace.window_index;
         if (!sameProcessHandle(self.window_completion_handles[index], handle) or
-            self.window_completion_exit_codes[index] != 0 or trace.overflow or trace.count == 0) return false;
-        // A generation was included in a successful display copy. Partial
-        // damage and physical scanout visibility remain separate facts.
-        var output: [65536]u8 = undefined;
-        var length: usize = 0;
-        for (trace.samples[0..trace.count]) |sample| {
-            const line = std.fmt.bufPrint(output[length..], "{d}\n", .{sample.generation}) catch return false;
-            length += line.len;
-        }
-        if (self.ctx.fileWrite("C:\\TEMP\\SNES-PRESENT.TXT", output[0..length]) != @as(i32, @intCast(length))) return false;
-        const report = std.json.Stringify.valueAlloc(self.ctx.allocator(), .{
-            .contract = "desktop-window-output-v1", .receipt = "software-display-copy-present-success",
-            .window_case = if (maximized) "maximized" else "small", .process = handle,
-            .screen = .{ .w = self.screen_w, .h = self.screen_h }, .frame = trace.frame, .client = trace.client,
-            .session_start_ns = started_ns, .session_end_ns = self.ctx.sys.monotonicNanoseconds() orelse return false,
-            .global_desktop_presents = self.render_stats.present_successes -% before.present_successes,
-            .cursor_moves = self.render_stats.cursor_moves -% before.cursor_moves,
-            .cursor_tick_hz = self.monotonic_hz, .physical_visibility = @as(?u64, null),
-            .records = trace.samples[0..trace.count],
-            .note = "Window generations observed in successful software copies; full_client_copy needs one complete covering region. Generation cohorts may complete after the guest timer. Frame/compose/present wall spans reuse existing owner clocks; no input-to-scanout or physical frame receipt.",
-        }, .{}) catch return false;
-        defer self.ctx.allocator().free(report);
-        return self.ctx.fileWrite("C:\\TEMP\\SNES-WINDOW.JSON", report) == @as(i32, @intCast(report.len));
+            self.window_completion_exit_codes[index] != 0) return error.WindowNotCompleted;
+        self.performance_present = null;
+        try @import("snes_output_trace.zig").writeReport(self.ctx, trace, .{
+            .maximized = bench.options.maximized, .process = handle,
+            .screen_w = @intCast(self.screen_w), .screen_h = @intCast(self.screen_h),
+            .started_ns = bench.started_ns, .ended_ns = self.ctx.sys.monotonicNanoseconds() orelse return error.ClockMissing,
+            .presents = self.render_stats.present_successes -% bench.presents_before,
+            .cursor_moves = self.render_stats.cursor_moves -% bench.cursor_before, .tick_hz = self.monotonic_hz,
+        }, diagnostic.snes_generations_path, diagnostic.snes_window_path);
+        bench.report_ready = true;
     }
 
     const GpuFrame = struct {

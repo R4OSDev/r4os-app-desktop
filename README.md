@@ -248,6 +248,19 @@ Pending work uses the existing desktop activity sequence and a one-tick
 deadline fallback. The common Kernel queue coalesces completion/retirement
 wakes outside graphics owners. No backend-specific wait or ABI was added.
 
+## Explicit output benchmarks
+
+`SPECTRA BENCH DESKTOP` invokes the original static SDR RAM fixture and its
+pixel hashes. `SPECTRA BENCH SNES /WINDOW` reserves the original Small or
+Maximized geometry and bounded copy trace before the exact pending GUI is
+attached. Spectra owns that child and waits for completion; Desktop uses the
+existing cooperative pump while its window is bound, then returns to normal
+request handling for final reporting and release. Render/emulator work and
+clocks are not duplicated in the frontend. The owner JSON is forwarded as an
+original value, with physical visibility remaining unknown. Only an explicit
+private `/OWN-DESKTOP` frontend option starts and closes its own isolated host.
+Lifecycle and contract details: `Docs/Diagnostics/Spectra.txt` in the workspace.
+
 ## Console input
 
 Terminal key delivery uses typed Unicode scalars or explicit logical keys. Clipboard bytes80/81 remain text data. Each of the four window bindings retains up to4096 pending events and retires only the acknowledged prefix; pending input never follows a replacement process generation. `Build.sh input-test` checks retained suffixes and binding changes. `/INPUTTEST` exercises real terminal windows through typed keyboard delivery, clipboard paste and history/backspace; it returns normally.
