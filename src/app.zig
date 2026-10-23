@@ -6243,7 +6243,8 @@ pub const App = struct {
         return if (self.outputs) |manager| manager.active() else false;
     }
     fn cursorRect(self: *const App) surface.Rect {
-        return if (self.managedOutputs()) .{ .x = self.cursor_x, .y = self.cursor_y, .w = surface.cursor_w, .h = surface.cursor_h } else surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
+        return if (self.managedOutputs()) output_geometry.cursorRect(self.outputs.?.desktop_bounds, .{ .x = self.cursor_x, .y = self.cursor_y })
+            else surface.cursor(self.cursor_x, self.cursor_y, self.screen_w, self.screen_h).rect;
     }
     fn outputBounds(self: *const App, index: usize) surface.Rect {
         if (self.outputs) |manager| if (manager.active()) {
@@ -6271,16 +6272,24 @@ pub const App = struct {
         }
         const shift = manager.translation;
         manager.translation = .{};
+        // The old and new admitted coordinate domains can have an
+        // unrepresentable union. Full damage replaces old coordinate damage.
+        self.damage = .{};
+        self.cursor_damage.reset(); self.capture_cursor_damage.reset();
+        self.cursor_damage_queued_tick = 0;
         self.drag = .{};
         self.resize = .{};
         self.system_menu_open = false;
+        var fallback = output_geometry.logical(manager.layout.outputs[manager.layout.primary].view) catch return;
+        fallback.h = @max(1, fallback.h - theme.taskbar_h);
         for (&self.windows, 0..) |*win, index| {
             const previous = win.geometry();
-            win.x -|= shift.x;
-            win.y -|= shift.y;
-            win.normal_x -|= shift.x;
-            win.normal_y -|= shift.y;
-            const restored = manager.layout.rescue(.{ .x = win.x, .y = win.y, .w = @intCast(win.w), .h = @intCast(win.h) }, theme.title_h) catch continue;
+            const restored = output_geometry.rebaseWindow(&manager.layout,
+                .{ .x = previous.x, .y = previous.y, .w = previous.w, .h = previous.h }, shift, fallback, theme.title_h);
+            const normal = output_geometry.rebaseWindow(&manager.layout,
+                .{ .x = win.normal_x, .y = win.normal_y, .w = win.normal_w, .h = win.normal_h }, shift, fallback, theme.title_h);
+            win.x = restored.x; win.y = restored.y; win.w = restored.w; win.h = restored.h;
+            win.normal_x = normal.x; win.normal_y = normal.y; win.normal_w = normal.w; win.normal_h = normal.h;
             if (win.fullscreen) {
                 win.fitFullscreen(self.outputBounds(index), self.outputWorkArea(index));
             } else if (win.maximized) {
@@ -6289,7 +6298,7 @@ pub const App = struct {
                 win.y = bounds.y;
                 win.w = bounds.w;
                 win.h = bounds.h;
-            } else win.setNormal(restored.x, restored.y, win.w, win.h);
+            } else win.setNormal(restored.x, restored.y, restored.w, restored.h);
             if (!std.meta.eql(previous, win.geometry()) and win.instance_id != 0) {
                 self.updateGuiWindowInfo(index);
                 self.mirrorWindowUpdate(index);

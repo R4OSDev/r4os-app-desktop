@@ -3,6 +3,7 @@ const r4os = @import("r4os");
 const a = r4os.abi;
 const Manager = @import("output_manager.zig").Manager;
 const catalog = @import("r4gfx_desktop_outputs");
+const topology = catalog.topology;
 const t = std.testing;
 
 const Source = struct {
@@ -55,6 +56,35 @@ const Source = struct {
 };
 
 pub fn check() !void {
+    const geometry = @import("output_geometry.zig");
+    const layout = try catalog.topology.Layout.init(&.{.{ .key = .{ .adapter = 1, .connector = 1 }, .primary = true,
+        .view = .{ .pixel_w = 640, .pixel_h = 480 } }}, 1);
+    const area = @import("surface.zig").Rect{ .x = 0, .y = 0, .w = 640, .h = 448 };
+    const prior_rect = @import("surface.zig").Rect{ .x = 40, .y = 60, .w = 300, .h = 160 };
+    try t.expectEqual(prior_rect, geometry.rebaseWindow(&layout, prior_rect, .{ .x = std.math.minInt(i32) }, area, 24));
+    try t.expectEqual(@import("surface.zig").Rect{ .x = 10, .y = 20, .w = 300, .h = 160 },
+        geometry.rebaseWindow(&layout, prior_rect, .{ .x = 30, .y = 40 }, area, 24));
+    const spanning = [_]topology.Output{
+        .{ .key = .{ .adapter = 1, .connector = 1 }, .primary = true, .view = .{ .pixel_w = 640, .pixel_h = 480 } },
+        .{ .key = .{ .adapter = 1, .connector = 2 },
+            .view = .{ .origin = .{ .x = 640 - std.math.maxInt(i32) }, .pixel_w = 640, .pixel_h = 480 } },
+    };
+    const wide = try topology.Layout.init(&spanning, 2);
+    // Generic topology mathematics can represent this span. The desktop
+    // refuses its unsupported normalized workspace before publishing it.
+    try t.expect(geometry.desktopBounds(&wide) == null);
+    const wide_bounds: @import("surface.zig").Rect = .{ .x = spanning[1].view.origin.x, .y = 0, .w = std.math.maxInt(i32), .h = 480 };
+    const edge_cursor = geometry.cursorRect(wide_bounds, .{ .x = 639, .y = 479 });
+    try t.expectEqual(@import("surface.zig").Rect{ .x = 639, .y = 479, .w = 1, .h = 1 }, edge_cursor);
+    const far_output = try geometry.logical(spanning[1].view);
+    try t.expectEqual(@as(i32, std.math.maxInt(i32)), far_output.merged(edge_cursor).w);
+    // Adjacent output coverage remains complete; only the outer desktop edge
+    // clips the cursor, not the boundary of whichever output owns its hotspot.
+    try t.expectEqual(@as(i32, 12), geometry.cursorRect(geometry.desktopBounds(&layout).?, .{ .x = 600 }).w);
+    var tiny = try topology.Layout.init(&.{.{ .key = .{ .connector = 1 }, .primary = true, .view = .{ .pixel_w = 1, .pixel_h = 1 } }}, 3);
+    try t.expect(geometry.desktopBounds(&tiny) != null);
+    tiny.outputs[0].view.origin.x = std.math.maxInt(i32) - 1;
+    try t.expect(geometry.desktopBounds(&tiny) == null);
     Source.revision = 1; Source.present = 1; Source.stale = false; Source.native_output = false;
     Source.bpc = 8; Source.buffers = 2; Source.connection = 4;
     Source.display = 5;

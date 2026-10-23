@@ -48,6 +48,22 @@ pub const Slot = struct {
             self.target.display_generation == info.display_generation and self.target.head_id == info.head_id;
     }
 };
+
+test "output layout normalization validates spans before changing candidates" {
+    var values = [_]topology.Output{
+        .{ .key = .{ .adapter = 1, .connector = 1 }, .primary = true,
+            .view = .{ .origin = .{ .x = std.math.minInt(i32) }, .pixel_w = 640, .pixel_h = 480 } },
+        .{ .key = .{ .adapter = 1, .connector = 2 },
+            .view = .{ .origin = .{ .x = std.math.maxInt(i32) - 640 }, .pixel_w = 640, .pixel_h = 480 } },
+    };
+    const before = values;
+    try std.testing.expectError(error.Bounds, Manager.normalize(&values, 0, 1));
+    try std.testing.expectEqualDeep(before, values);
+    const one = try Manager.normalize(values[0..1], 0, 2);
+    try std.testing.expectEqual(topology.Point{ .x = std.math.minInt(i32) }, one.translation);
+    try std.testing.expectEqual(topology.Point{}, values[0].view.origin);
+    try std.testing.expectEqual(@as(usize, 1), one.layout.count);
+}
 pub const Manager = struct {
     allocator: std.mem.Allocator,
     raw: *const a.R4XStartContext,
@@ -57,6 +73,7 @@ pub const Manager = struct {
     // storm cannot grow an unbounded list of quarantined workers.
     slots: [topology.capacity * 2]Slot = @splat(.{}),
     layout: topology.Layout = .{},
+    desktop_bounds: surface.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     snapshot: catalog.Snapshot = .{},
     saved: preferences.Config = .{},
     saved_colors: color_preferences.Config = .{},
@@ -224,9 +241,8 @@ pub const Manager = struct {
             }
             return false;
         };
-        self.discovery_error = null;
         const catalog_changed = !next.sameOutputs(&self.snapshot);
-        if (!catalog_changed and !self.reconcile) return false;
+        if (!catalog_changed and !self.reconcile) { self.discovery_error = null; return false; }
 
         var values: [topology.capacity]topology.Output = undefined;
         var owners: [topology.capacity]*Slot = undefined;
@@ -301,48 +317,63 @@ pub const Manager = struct {
                 // reachable output instead of booting an all-black desktop.
                 values[0].enabled = true; break :blk 0;
             };
-            translation = normalize(values[0..count], selected) catch .{};
-            layout = topology.Layout.init(values[0..count], next.revision) catch blk: {
+            const normalized = normalize(values[0..count], selected, next.revision) catch blk: {
                 // Changed native dimensions can invalidate an old placement.
                 // Keep every admitted output reachable with a bounded default.
                 var right: i32 = 0;
                 for (values[0..count]) |*value| {
                     value.clone_group = 0; value.view.origin = .{ .x = right };
-                    right += @intCast((value.view.logical() catch unreachable).w);
+                    const bounds = value.view.logical() catch |err| return self.rejectLayout(err);
+                    right = std.math.cast(i32, bounds.right()) orelse return self.rejectLayout(error.Bounds);
                 }
-                translation = normalize(values[0..count], selected) catch unreachable;
-                break :blk topology.Layout.init(values[0..count], next.revision) catch unreachable;
+                break :blk normalize(values[0..count], selected, next.revision) catch |err| return self.rejectLayout(err);
             };
+            layout = normalized.layout; translation = normalized.translation;
         }
+        const desktop_bounds: surface.Rect = if (layout.count == 0) .{ .x = 0, .y = 0, .w = 0, .h = 0 }
+            else geometry.desktopBounds(&layout) orelse return self.rejectLayout(error.Bounds);
         // Retiring a failed worker can require reconciliation without changing
         // the output set or desktop coordinates. App capture ownership must
         // survive that maintenance; real generation/layout changes still reset.
         const output_changed = catalog_changed or !std.meta.eql(self.layout, layout) or
             !std.meta.eql(self.translation, translation);
+        self.discovery_error = null;
         self.translation = translation; self.layout = layout;
+        self.desktop_bounds = desktop_bounds;
         self.snapshot = next; self.revision = next.revision;
         self.reconcile = false;
         for (&self.slots) |*slot| slot.logical_index = null;
         for (values[0..count], 0..) |value, i| {
             const slot = owners[i]; slot.view = value.view;
             if (slot.software) |owner| owner.view = value.view;
-            slot.logical_index = i; slot.disabled = !value.enabled; slot.invalidate();
+            slot.logical_index = i; slot.disabled = !value.enabled;
+            slot.damage = .{}; slot.invalidate();
         }
         self.poll();
         return output_changed;
     }
-    fn normalize(values: []topology.Output, selected: usize) !topology.Point {
+    const Normalized = struct { layout: topology.Layout, translation: topology.Point };
+    fn normalize(values: []topology.Output, selected: usize, revision: u64) !Normalized {
+        if (values.len > topology.capacity or selected >= values.len) return error.Bounds;
         const origin = values[selected].view.origin;
-        // Validate every subtraction before changing the candidate layout.
-        for (values) |value| {
-            _ = try std.math.sub(i32, value.view.origin.x, origin.x);
-            _ = try std.math.sub(i32, value.view.origin.y, origin.y);
+        var candidate: [topology.capacity]topology.Output = undefined;
+        @memcpy(candidate[0..values.len], values);
+        for (candidate[0..values.len], 0..) |*value, i| value.primary = i == selected;
+        // Use the same complete edge/span contract as layout requests. Neither
+        // coordinates nor primary flags change when admission fails.
+        const result = try catalog.control.normalized(try topology.Layout.init(candidate[0..values.len], revision));
+        @memcpy(values, result.outputs[0..result.count]);
+        return .{ .layout = result, .translation = origin };
+    }
+    fn rejectLayout(self: *Manager, err: anyerror) bool {
+        if (if (self.discovery_error) |previous| previous != err else true) {
+            self.sys.write("R4DESK output layout unavailable: "); self.sys.println(@errorName(err));
         }
-        for (values, 0..) |*value, i| {
-            value.primary = i == selected;
-            value.view.origin.x -= origin.x; value.view.origin.y -= origin.y;
-        }
-        return origin;
+        self.discovery_error = err; self.reconcile = true;
+        // Existing polling retires unpublished owners after their real ACKs.
+        // A layout refusal is not evidence of a GPU execution failure.
+        self.poll();
+        return false;
     }
     fn acquire(self: *Manager, entry: catalog.Entry, view: topology.Viewport) ?*Slot {
         const slot = for (&self.slots) |*current| {

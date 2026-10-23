@@ -1703,21 +1703,21 @@ pub fn cursor(ctx: *const desk_api.Context, x: i32, y: i32, screen_w: i32, scree
     if (item.rect.isEmpty()) return;
 
     var row: usize = 0;
-    while (row < @as(usize, @intCast(surface.cursor_h))) : (row += 1) {
-        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursor_asset.blackBits(row), 0x000000);
-        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), cursor_asset.whiteBits(row), 0xFFFFFF);
+    while (row < @as(usize, @intCast(item.rect.h))) : (row += 1) {
+        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), @intCast(item.rect.w), cursor_asset.blackBits(row), 0x000000);
+        cursorRuns(ctx, x, y + @as(i32, @intCast(row)), @intCast(item.rect.w), cursor_asset.whiteBits(row), 0xFFFFFF);
     }
 }
 
-fn cursorRuns(ctx: *const desk_api.Context, x: i32, y: i32, bits: u16, color: u32) void {
+fn cursorRuns(ctx: *const desk_api.Context, x: i32, y: i32, width: usize, bits: u16, color: u32) void {
     var col: usize = 0;
-    while (col < @as(usize, @intCast(surface.cursor_w))) {
+    while (col < width) {
         if (!cursor_asset.bitSet(bits, col)) {
             col += 1;
             continue;
         }
         const start = col;
-        while (col < @as(usize, @intCast(surface.cursor_w)) and cursor_asset.bitSet(bits, col)) : (col += 1) {}
+        while (col < width and cursor_asset.bitSet(bits, col)) : (col += 1) {}
         ctx.paintRect(x + @as(i32, @intCast(start)), y, @intCast(col - start), 1, color);
     }
 }
@@ -2994,6 +2994,15 @@ fn checkCursorCapture() !void {
         try std.testing.expectEqualSlices(u32, &software_pixels, &capture_pixels);
         arrow.restore(&scene);
         for (capture_pixels) |pixel| try std.testing.expectEqual(@as(u32, 0x2468ac), pixel);
+    }
+    for ([_]i32{ std.math.maxInt(i32) - 32, std.math.minInt(i32) }) |origin| {
+        const local: i32 = if (origin > 0) 31 else 5;
+        @memset(&software_pixels, 0x2468ac); @memset(&capture_pixels, 0x2468ac);
+        try std.testing.expect(scene.attachLayer(std.mem.sliceAsBytes(&software_pixels), .{ .x = 0, .y = 0, .w = 32, .h = 32 }));
+        cursor(&ctx, local, local, 32, 32);
+        try std.testing.expect(scene.attachLayer(std.mem.sliceAsBytes(&capture_pixels), .{ .x = origin, .y = origin, .w = 32, .h = 32 }));
+        cursor(&ctx, origin + local, origin + local, origin + 32, origin + 32);
+        try std.testing.expectEqualSlices(u32, &software_pixels, &capture_pixels);
     }
 }
 

@@ -67,20 +67,13 @@ pub const Rect = struct {
     }
 
     pub fn clampInside(self: Rect, bounds: Rect) Rect {
-        if (self.w >= bounds.w or self.h >= bounds.h) {
-            return .{
-                .x = bounds.x,
-                .y = bounds.y,
-                .w = @min(self.w, bounds.w),
-                .h = @min(self.h, bounds.h),
-            };
-        }
-
+        const w = @min(@max(0, self.w), @max(0, bounds.w));
+        const h = @min(@max(0, self.h), @max(0, bounds.h));
         return .{
-            .x = clamp(self.x, bounds.x, bounds.right() - self.w),
-            .y = clamp(self.y, bounds.y, bounds.bottom() - self.h),
-            .w = self.w,
-            .h = self.h,
+            .x = @intCast(std.math.clamp(@as(i64, self.x), bounds.x, @as(i64, bounds.x) + @max(0, bounds.w) - w)),
+            .y = @intCast(std.math.clamp(@as(i64, self.y), bounds.y, @as(i64, bounds.y) + @max(0, bounds.h) - h)),
+            .w = w,
+            .h = h,
         };
     }
 };
@@ -210,13 +203,13 @@ pub fn taskbar(screen_w: i32, screen_h: i32, taskbar_h: i32) Surface {
 }
 
 pub fn cursor(x: i32, y: i32, screen_w: i32, screen_h: i32) Surface {
-    const max_w = @max(0, screen_w - x);
-    const max_h = @max(0, screen_h - y);
+    const max_w = @max(0, @as(i64, screen_w) - x);
+    const max_h = @max(0, @as(i64, screen_h) - y);
     return make(.cursor, .{
         .x = x,
         .y = y,
-        .w = @min(cursor_w, max_w),
-        .h = @min(cursor_h, max_h),
+        .w = @intCast(@min(cursor_w, max_w)),
+        .h = @intCast(@min(cursor_h, max_h)),
     });
 }
 
@@ -252,6 +245,20 @@ test "rect clamp keeps surface inside bounds" {
     const rect = Rect{ .x = 600, .y = 440, .w = 100, .h = 80 };
 
     try std.testing.expectEqual(Rect{ .x = 540, .y = 368, .w = 100, .h = 80 }, rect.clampInside(bounds));
+    try std.testing.expectEqual(Rect{ .x = 0, .y = 64, .w = 640, .h = 80 },
+        (Rect{ .x = 20, .y = 64, .w = 900, .h = 80 }).clampInside(bounds));
+    try std.testing.expectEqual(Rect{ .x = 48, .y = 0, .w = 100, .h = 448 },
+        (Rect{ .x = 48, .y = 10, .w = 100, .h = 900 }).clampInside(bounds));
+    const equal_width = Rect{ .x = 0, .y = 64, .w = 640, .h = 80 };
+    const equal_height = Rect{ .x = 48, .y = 0, .w = 100, .h = 448 };
+    try std.testing.expectEqual(equal_width, equal_width.clampInside(bounds));
+    try std.testing.expectEqual(equal_height, equal_height.clampInside(bounds));
+    const negative = Rect{ .x = -1920, .y = -40, .w = 1920, .h = 1048 };
+    try std.testing.expectEqual(Rect{ .x = -1600, .y = -40, .w = 500, .h = 1048 },
+        (Rect{ .x = -1600, .y = 10, .w = 500, .h = 1500 }).clampInside(negative));
+    const extreme = Rect{ .x = std.math.maxInt(i32) - 640, .y = std.math.minInt(i32), .w = 640, .h = 448 };
+    const contained = Rect{ .x = extreme.x + 10, .y = extreme.y + 40, .w = 100, .h = 80 };
+    try std.testing.expectEqual(contained, contained.clampInside(extreme));
 }
 
 test "desktop taskbar and work area are separate surfaces" {
@@ -270,6 +277,9 @@ test "cursor surface is clipped at screen edge" {
     try std.testing.expectEqual(Rect{ .x = 100, .y = 80, .w = 12, .h = 18 }, cursor(100, 80, 1280, 720).rect);
     try std.testing.expectEqual(Rect{ .x = 1275, .y = 710, .w = 5, .h = 10 }, cursor(1275, 710, 1280, 720).rect);
     try std.testing.expectEqual(Rect{ .x = 8, .y = 0, .w = 12, .h = 18 }, cursor(8, 0, 1280, 720).rect);
+    const last = std.math.maxInt(i32);
+    try std.testing.expectEqual(Rect{ .x = last - 1, .y = last - 1, .w = 1, .h = 1 }, cursor(last - 1, last - 1, last, last).rect);
+    try std.testing.expectEqual(@as(i32, 12), cursor(std.math.minInt(i32), 0, last, last).rect.w);
 }
 
 test "dirty tracker merges invalid rectangles and resets on take" {

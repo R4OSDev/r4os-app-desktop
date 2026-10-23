@@ -290,13 +290,13 @@ pub fn compose(
         }
     }
 
-    const cursor_rect: surface.Rect = if (ctx.output_bounds != null) .{ .x = cursor_x, .y = cursor_y, .w = surface.cursor_w, .h = surface.cursor_h }
+    const cursor_rect: surface.Rect = if (ctx.output_bounds != null) surface.cursor(cursor_x, cursor_y, std.math.maxInt(i32), std.math.maxInt(i32)).rect
         else surface.cursor(cursor_x, cursor_y, screen_w, screen_h).rect;
     if (cursor_visible and layerVisible(&stats, damage, cursor_rect)) {
         if (layer(ctx,.cursor,cursor_rect)) |target| {
             defer target.end(); draw.cursor(&target.context, cursor_x, cursor_y,
-                if (ctx.output_bounds != null) cursor_x + surface.cursor_w else screen_w,
-                if (ctx.output_bounds != null) cursor_y + surface.cursor_h else screen_h);
+                if (ctx.output_bounds != null) cursor_rect.right() else screen_w,
+                if (ctx.output_bounds != null) cursor_rect.bottom() else screen_h);
         }
     }
     return stats;

@@ -183,7 +183,9 @@ pub const Window = struct {
                 .w = @max(self.w, self.min_frame_w),
                 .h = @max(self.h, self.min_frame_h),
             }).clampInside(work_area);
-            self.setNormal(next.x, next.y, @max(next.w, self.min_frame_w), @max(next.h, self.min_frame_h));
+            // Preserve the requested floor for a larger future work area,
+            // but the current visible rectangle must fit the current output.
+            self.setNormal(next.x, next.y, next.w, next.h);
         }
         return true;
     }
@@ -246,6 +248,8 @@ pub const Window = struct {
         const moved = (surface.Rect{ .x = x, .y = y, .w = self.w, .h = self.h }).clampInside(work_area);
         self.x = moved.x;
         self.y = moved.y;
+        self.w = moved.w;
+        self.h = moved.h;
         self.normal_x = self.x;
         self.normal_y = self.y;
         self.normal_w = self.w;
@@ -326,29 +330,33 @@ pub const Window = struct {
     }
     pub fn resizeIn(self: *Window, start: Geometry, handle: ResizeHandle, mouse_dx: i32, mouse_dy: i32, bounds: surface.Rect) void {
         if (!self.visible or self.minimized or self.maximized or self.fullscreen) return;
+        if (bounds.isEmpty()) return;
 
         const work_w = bounds.right();
         const work_h = bounds.bottom();
-        var next = start;
+        const min_w = @min(self.min_frame_w, bounds.w);
+        const min_h = @min(self.min_frame_h, bounds.h);
+        const initial = (surface.Rect{ .x = start.x, .y = start.y, .w = @max(start.w, min_w), .h = @max(start.h, min_h) }).clampInside(bounds);
+        var next = initial;
 
         if (handle.affectsLeft()) {
-            const right = start.x + start.w;
-            const max_x = @max(bounds.x, right - self.min_frame_w);
-            next.x = clamp(start.x + mouse_dx, bounds.x, max_x);
+            const right = initial.right();
+            const max_x = @max(@as(i64, bounds.x), @as(i64, right) - min_w);
+            next.x = @intCast(std.math.clamp(@as(i64, initial.x) + mouse_dx, bounds.x, max_x));
             next.w = right - next.x;
         } else if (handle.affectsRight()) {
-            const max_w = @max(self.min_frame_w, work_w - start.x);
-            next.w = clamp(start.w + mouse_dx, self.min_frame_w, max_w);
+            const max_w = @max(min_w, work_w - initial.x);
+            next.w = @intCast(std.math.clamp(@as(i64, initial.w) + mouse_dx, min_w, max_w));
         }
 
         if (handle.affectsTop()) {
-            const bottom = start.y + start.h;
-            const max_y = @max(bounds.y, bottom - self.min_frame_h);
-            next.y = clamp(start.y + mouse_dy, bounds.y, max_y);
+            const bottom = initial.bottom();
+            const max_y = @max(@as(i64, bounds.y), @as(i64, bottom) - min_h);
+            next.y = @intCast(std.math.clamp(@as(i64, initial.y) + mouse_dy, bounds.y, max_y));
             next.h = bottom - next.y;
         } else if (handle.affectsBottom()) {
-            const max_h = @max(self.min_frame_h, work_h - start.y);
-            next.h = clamp(start.h + mouse_dy, self.min_frame_h, max_h);
+            const max_h = @max(min_h, work_h - initial.y);
+            next.h = @intCast(std.math.clamp(@as(i64, initial.h) + mouse_dy, min_h, max_h));
         }
 
         self.setNormal(next.x, next.y, next.w, next.h);
@@ -543,6 +551,13 @@ test "window move clamps to desktop work area" {
     win.moveTo(999, 999, 640, 480);
     try std.testing.expectEqual(@as(i32, 340), win.x);
     try std.testing.expectEqual(@as(i32, 288), win.y);
+
+    win.setNormal(0, 200, 640, 160);
+    win.moveTo(0, 200, 640, 480);
+    try std.testing.expectEqualDeep(Geometry{ .x = 0, .y = 200, .w = 640, .h = 160 }, win.geometry());
+    win.toggleMaximize(640, 480);
+    win.toggleMaximize(640, 480);
+    try std.testing.expectEqualDeep(Geometry{ .x = 0, .y = 200, .w = 640, .h = 160 }, win.geometry());
 }
 
 test "window resize hit finds edges and ignores maximized windows" {
@@ -594,6 +609,17 @@ test "window resize clamps to minimum size and work area" {
     try std.testing.expectEqual(@as(i32, 144), win.y);
     try std.testing.expectEqual(@as(i32, 180), win.w);
     try std.testing.expectEqual(@as(i32, 96), win.h);
+
+    const edge: Geometry = .{ .x = std.math.minInt(i32), .y = std.math.minInt(i32), .w = 640, .h = 480 };
+    win.setNormal(edge.x + 32, edge.y + 32, 300, 160);
+    win.resizeIn(win.geometry(), .top_left, std.math.minInt(i32), std.math.minInt(i32), edge);
+    try std.testing.expectEqualDeep(Geometry{ .x = edge.x, .y = edge.y, .w = 332, .h = 192 }, win.geometry());
+    win.resizeIn(win.geometry(), .bottom_right, std.math.maxInt(i32), std.math.maxInt(i32), edge);
+    try std.testing.expectEqualDeep(edge, win.geometry());
+
+    // A captured drag can outlive a work-area change or a new minimum.
+    win.resizeIn(.{ .x = edge.x + 630, .y = edge.y + 470, .w = 10, .h = 10 }, .bottom_right, 0, 0, edge);
+    try std.testing.expectEqualDeep(Geometry{ .x = edge.x + 460, .y = edge.y + 384, .w = 180, .h = 96 }, win.geometry());
 }
 
 test "window maximize and restore stay inside work area" {
@@ -707,6 +733,17 @@ test "window app minimum client size raises resize floor" {
     try std.testing.expectEqual(@as(i32, -750), win.x);
     try std.testing.expectEqual(@as(i32, 316), win.w);
     try std.testing.expectEqual(@as(i32, 258), win.h);
+
+    const tiny: surface.Rect = .{ .x = -100, .y = 50, .w = 120, .h = 80 };
+    try std.testing.expect(win.setMinClientSizeIn(400, 300, tiny));
+    try std.testing.expectEqualDeep(tiny, win.geometry());
+    try std.testing.expectEqual(@as(i32, 180), win.min_frame_w);
+    try std.testing.expectEqual(@as(i32, 96), win.min_frame_h);
+    win.toggleMaximizeIn(tiny);
+    win.toggleMaximizeIn(tiny);
+    try std.testing.expectEqualDeep(tiny, win.geometry());
+    win.resizeIn(win.geometry(), .top_left, std.math.maxInt(i32), std.math.minInt(i32), tiny);
+    try std.testing.expectEqualDeep(tiny, win.geometry());
 }
 
 test "active window blocks input to overlapping higher slot" {
