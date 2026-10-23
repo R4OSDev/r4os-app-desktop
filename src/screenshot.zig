@@ -2,9 +2,10 @@
 //! Neither file I/O nor its snapshot lease owns a GPU/display buffer.
 const std = @import("std");
 const r4os = @import("r4os");
+const capture_file = @import("capture_file.zig");
 pub const directory = "C:\\SCREENSHOTS";
 pub const usage = 0x46; // Existing physical-key contract: HID Print Screen.
-pub const Result = struct { code: i32, path: [128:0]u8, bytes: u64 };
+pub const Result = struct { code: i32, path: [128:0]u8, bytes: u64, retained: bool = false };
 pub const Job = struct {
     allocator: std.mem.Allocator,
     sys: r4os.r4sys.Context,
@@ -15,6 +16,8 @@ pub const Job = struct {
     result: i32 = -1,
     path: [128:0]u8 = @splat(0),
     bytes: u64 = 0,
+    file: ?capture_file.Output = null,
+    reported: bool = false,
     pub fn start(allocator: std.mem.Allocator, sys: r4os.r4sys.Context, desk: r4os.r4desk.Context) ?*Job {
         return startAt(allocator, sys, desk, "");
     }
@@ -37,6 +40,7 @@ pub const Job = struct {
     fn run(raw: u64) callconv(.c) i32 {
         const self: *Job = @ptrFromInt(raw);
         defer @atomicStore(u32, &self.done, 1, .release);
+        defer if (self.file) |*file| if (!file.abort()) { self.result = -1; file.reportRetained(self.sys); };
         self.result = self.save() catch |err| {
             self.sys.write("Screenshot failed: "); self.sys.println(@errorName(err)); return -1;
         };
@@ -67,43 +71,34 @@ pub const Job = struct {
             _ = try std.fmt.bufPrintZ(&self.path, "{s}\\SHOT-{x}.BMP", .{ directory, now });
         }
         const path = self.path[0..std.mem.indexOfScalar(u8, &self.path, 0).? :0];
-        if (self.sys.exists(path)) return error.Exists;
-        var staged_storage: [128:0]u8 = undefined;
-        const staged = try std.fmt.bufPrintZ(&staged_storage, "{s}.PART", .{path});
-        if (self.sys.exists(staged)) return error.Exists;
-        var stream: r4os.file_stream.WriterState = .{ .path = staged };
-        if (!r4os.file_stream.begin(&self.sys, &stream, staged, r4os.abi.file_stream_open_create)) return error.Open;
-        var finished = false;
-        var published = false;
-        defer if (!finished) { _ = r4os.file_stream.abort(&self.sys, &stream); };
-        defer if (finished and !published) { _ = self.sys.fileDelete(staged); };
-        if (!r4os.file_stream.write(&self.sys, &stream, &header)) return error.Write;
+        self.file = try capture_file.Output.open(self.sys, path);
+        const file = &self.file.?;
+        if (!file.write(&header)) return error.Write;
         const pixels: [*]const u32 = @ptrFromInt(lease.pixels_addr);
         const bytes = std.mem.sliceAsBytes(pixels[0..info.frame_pixels]);
         var offset: usize = 0;
         while (offset < bytes.len) {
             if (self.cancelled()) return error.Cancelled;
             const end = @min(bytes.len, offset + 64 * 1024);
-            if (!r4os.file_stream.write(&self.sys, &stream, bytes[offset..end])) return error.Write;
+            if (!file.write(bytes[offset..end])) return error.Write;
             offset = end;
         }
-        finished = r4os.file_stream.finish(&self.sys, &stream);
-        if (!finished) return error.Finish;
-        if (self.sys.fileRename(staged, path) <= 0) return error.Publish;
-        published = true;
-        self.bytes = stream.offset;
+        try file.finish();
+        self.bytes = file.bytes();
         return 0;
     }
     pub fn collect(self: *Job) ?Result {
-        if (@atomicLoad(u32, &self.done, .acquire) == 0) return null;
+        if (@atomicLoad(u32, &self.done, .acquire) == 0 or self.reported) return null;
         switch (self.handle.join(r4os.time_contract.timeoutPoll())) {
             .timed_out => return null,
             .failure => if (self.handle.valid()) return null,
             .exited => {},
         }
-        const result: Result = .{ .code = self.result, .path = self.path, .bytes = self.bytes };
-        self.allocator.destroy(self); return result;
+        const result: Result = .{ .code = self.result, .path = self.path, .bytes = self.bytes, .retained = self.retainedFile() };
+        if (result.retained) self.reported = true else self.allocator.destroy(self);
+        return result;
     }
+    pub fn retainedFile(self: *const Job) bool { return if (self.file) |*file| file.retained() else false; }
     pub fn close(self: *Job) void {
         self.requestCancel();
         const end = (self.sys.monotonicNanoseconds() orelse 0) +| std.time.ns_per_s;

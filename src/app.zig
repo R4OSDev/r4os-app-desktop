@@ -6517,7 +6517,7 @@ pub const App = struct {
 
     fn pollComposition(self: *App) void {
         if (self.recorder) |recorder| if (recorder.collect()) |result| {
-            self.ctx.recording_state = 0;
+            self.ctx.recording_state = if (recorder.active()) 2 else 0;
             self.invalidateTaskbar();
             if (!argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
                 self.dialog = .message_window_info;
@@ -6527,7 +6527,9 @@ pub const App = struct {
             }
         };
         if (self.screenshot_job) |job| if (job.collect()) |result| {
-            self.screenshot_job = null;
+            // A failed exact abort keeps its heap owner and blocks replacement;
+            // polling the default frame never performs filesystem cleanup.
+            if (!result.retained) self.screenshot_job = null;
             self.screenshot_last = result;
             if (!self.diagnostic_screenshot and !argsContain(self.ctx.argsRaw(), "/SMOKE") and self.dialog == .none) {
                 self.dialog = .message_window_info;

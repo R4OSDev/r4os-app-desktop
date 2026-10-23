@@ -288,3 +288,15 @@ owned quiet QEMU guest: exact clipboard bytes and a real Unicode-path GUI
 launch, Close acknowledgement and Desktop-owned reap. Their manifests/builds
 are materialized only as temporary test projects. They are not a productive
 diagnostic or a replacement for Spectra's existing Desktop checks.
+
+## Capture files
+
+Screenshot and recording share `capture_file.zig`, which uses the existing
+SDK owned stage through flush and create-only atomic publication. Exact
+publication or abort acknowledgement retires the owner. A failed cleanup
+keeps the stable job and its stage identity, reports both failure stages and
+blocks replacement until process teardown. Frame polling performs no file
+cleanup. `capture-test` covers the changed SDK callback boundary;
+`Tests/CaptureFile` is a small source consumer for real guest receipts and
+BMP/software MKV output, materialized with the current original owners only
+in a temporary project.

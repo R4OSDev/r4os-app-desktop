@@ -8,6 +8,7 @@ const a = r.abi;
 const enc = @import("r4enc");
 const pixels = @import("r4enc_recording_pixels");
 const mux = @import("r4enc_recording_mux");
+const capture_file = @import("capture_file.zig");
 pub const directory = "C:\\RECORDINGS";
 pub const interval_ns = std.time.ns_per_s / 30;
 // The first native frame includes storage, GR preparation and cold engine
@@ -62,13 +63,14 @@ pub const Manager = struct {
     }
     pub fn collect(self: *Manager) ?Result {
         const job = self.job orelse return null;
-        if (@atomicLoad(u32, &job.done, .acquire) == 0) return null;
+        if (@atomicLoad(u32, &job.done, .acquire) == 0 or job.reported) return null;
         switch (job.thread.join(r.time_contract.timeoutPoll())) {
             .timed_out => return null,
             .failure => if (job.thread.valid()) return null,
             .exited => {},
         }
         const result = job.result;
+        if (job.file != null) { job.reported = true; return result; }
         self.allocator.destroy(job); self.job = null;
         return result;
     }
@@ -94,6 +96,7 @@ const Job = struct {
     thread: r.JoinHandle = undefined,
     stop_ns: u64 = 0,
     done: u32 = 0,
+    reported: bool = false,
     result: Result = .{ .ok = false, .parts = 0, .frames = 0, .bytes = 0, .fallback = false, .max_work_ns = 0 },
     demand: bool = false,
     encoder: ?enc.R4EncEncoder = null,
@@ -113,8 +116,7 @@ const Job = struct {
     last_capture_ns: u64 = 0,
     part: u32 = 0,
     path: [160:0]u8 = @splat(0),
-    staged: [168:0]u8 = @splat(0),
-    file: ?r.file_stream.WriterState = null,
+    file: ?capture_file.Output = null,
     writer: mux.Writer = undefined,
 
     fn now(self: *Job) !u64 { return self.owner.sys.monotonicNanoseconds() orelse error.Clock; }
@@ -133,7 +135,7 @@ const Job = struct {
         // Even a failed fence or delayed release retains all owners. Capture
         // demand is gone before retirement waits; no UI thread is involved.
         self.closeEncoder();
-        self.abortFile();
+        _ = self.abortFile();
         @atomicStore(u32, &self.done, 1, .release);
         return if (self.result.ok) 0 else -1;
     }
@@ -260,10 +262,7 @@ const Job = struct {
         self.writer = .{ .width = layout.width, .height = layout.height, .color = .{ .transfer = 13 } };
         self.part = std.math.add(u32, self.part, 1) catch return error.FileLimit;
         const path = try std.fmt.bufPrintZ(&self.path, "{s}\\REC-{x}-{d}.MKV", .{ directory, self.started_ns, self.part });
-        const staged = try std.fmt.bufPrintZ(&self.staged, "{s}.PART", .{path});
-        if (self.owner.sys.exists(path) or self.owner.sys.exists(staged)) return error.Exists;
-        self.file = .{ .path = staged };
-        if (!r.file_stream.begin(&self.owner.sys, &self.file.?, staged, a.file_stream_open_create)) return error.Open;
+        self.file = try capture_file.Output.open(self.owner.sys, path);
         self.owner.sys.println(switch (self.backend) {
             enc.backend_amd => "Recording: AMD H.264", enc.backend_nvidia => "Recording: NVIDIA H.264",
             else => "Recording: software H.264",
@@ -317,7 +316,7 @@ const Job = struct {
         self.pending = packet;
     }
     pub fn write(self: *Job, bytes: []const u8) bool {
-        return if (self.file) |*file| r.file_stream.write(&self.owner.sys, file, bytes) else false;
+        return if (self.file) |*file| file.write(bytes) else false;
     }
     fn writePending(self: *Job, until: u64) !void {
         const packet = self.pending orelse return;
@@ -356,16 +355,19 @@ const Job = struct {
     fn finishPart(self: *Job, until: u64) !void {
         try self.writePending(until);
         if (self.file) |*file| {
-            if (self.writer.frames == 0) { self.abortFile(); return; }
-            if (!r.file_stream.finish(&self.owner.sys, file)) return error.Finish;
-            if (self.owner.sys.fileRename(&self.staged, &self.path) <= 0) return error.Publish;
-            self.result.parts +|= 1; self.result.bytes +|= file.offset;
+            if (self.writer.frames == 0) { if (!self.abortFile()) return error.Abort; return; }
+            try file.finish();
+            self.result.parts +|= 1; self.result.bytes +|= file.bytes();
             self.file = null;
             self.owner.sys.write("Recording saved: "); self.owner.sys.println(std.mem.sliceTo(&self.path, 0));
         }
     }
-    fn abortFile(self: *Job) void {
-        if (self.file) |*file| { _ = r.file_stream.abort(&self.owner.sys, file); self.file = null; }
+    fn abortFile(self: *Job) bool {
+        if (self.file) |*file| {
+            if (!file.abort()) { self.result.ok = false; file.reportRetained(self.owner.sys); return false; }
+            self.file = null;
+        }
+        return true;
     }
     fn closeEncoder(self: *Job) void {
         if (self.pending) |packet| { self.releasePacket(packet); self.pending = null; }

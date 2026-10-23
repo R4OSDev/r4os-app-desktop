@@ -30,6 +30,10 @@ pub fn build(b: *std.Build) void {
     const console_text = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4std_console_text"), .target = test_target });
     const test_optimize: std.builtin.OptimizeMode = .Debug;
     const host_r4os = sdk.createR4osModule(test_target, test_optimize);
+    const capture_root = b.createModule(.{ .root_source_file = b.path("src/capture_file_test.zig"), .target = test_target, .optimize = test_optimize });
+    capture_root.addImport("r4os", host_r4os);
+    const capture_tests = b.addRunArtifact(b.addTest(.{ .root_module = capture_root }));
+    b.step("capture-test", "Exact capture stage publication and acknowledgement-only cleanup").dependOn(&capture_tests.step);
     const input_root = b.createModule(.{ .root_source_file = b.path("src/console_input.zig"), .target = test_target, .optimize = test_optimize });
     input_root.addImport("r4os", host_r4os);
     const input_tests = b.addRunArtifact(b.addTest(.{ .root_module = input_root }));
@@ -375,6 +379,7 @@ pub fn build(b: *std.Build) void {
     render_step.dependOn(&run_compositor_tests.step);
     render_step.dependOn(&run_wallpaper_tests.step);
     const test_step = b.step("test", "Run Desktop Zig tests");
+    test_step.dependOn(&capture_tests.step);
     test_step.dependOn(&input_tests.step);
     test_step.dependOn(&run_model_tests.step);
     test_step.dependOn(&run_window_tests.step);
