@@ -2,6 +2,7 @@ const cursor_asset = @import("cursor_asset.zig");
 const r4os = @import("r4os");
 const desk_api = @import("api.zig");
 const std = @import("std");
+const text_field = @import("text_field.zig");
 const appearance_colors = @import("appearance_colors.zig");
 const console_scroll = @import("console_scroll.zig");
 const console_text = @import("r4std_console_text");
@@ -1313,7 +1314,7 @@ pub fn messageBoxDialog(ctx: *const desk_api.Context, screen_w: i32, screen_h: i
 pub fn runDialog(ctx: *const desk_api.Context, screen_w: i32, screen_h: i32, path: [*:0]const u8, focus: model.UiTarget, hover_target: model.UiTarget, pressed_target: model.UiTarget) void {
     const x = @divTrunc(screen_w - run_dialog_w, 2);
     const y = @divTrunc(screen_h - run_dialog_h, 2);
-    var visible_path: [45]u8 = .{0} ** 45;
+    var visible_path: [128]u8 = @splat(0);
     copyTailZ(visible_path[0..], path);
     dialogFrameLit(ctx, x, y, run_dialog_w, run_dialog_h, "Run");
     textLit(ctx, x + 24, y + 48, "Program and arguments:", theme.text, theme.window_bg);
@@ -2750,23 +2751,7 @@ fn textLit(ctx: *const desk_api.Context, x: i32, y: i32, comptime value: []const
 }
 
 fn copyTailZ(out: []u8, value: [*:0]const u8) void {
-    @memset(out, 0);
-    if (out.len == 0) return;
-    var len: usize = 0;
-    while (len < 255 and value[len] != 0) : (len += 1) {}
-    const capacity = out.len - 1;
-    if (len <= capacity) {
-        var i: usize = 0;
-        while (i < len) : (i += 1) out[i] = value[i];
-        return;
-    }
-    if (capacity < 3) return;
-    out[0] = '.';
-    out[1] = '.';
-    const tail_len = capacity - 2;
-    const start = len - tail_len;
-    var i: usize = 0;
-    while (i < tail_len) : (i += 1) out[i + 2] = value[start + i];
+    _ = text_field.copyTailLabel(out, std.mem.span(value), if (out.len == 0) 0 else @min(44, out.len - 1));
 }
 
 fn writeI32Z(out: []u8, value: i32) void {

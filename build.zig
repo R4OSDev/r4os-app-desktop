@@ -33,7 +33,8 @@ pub fn build(b: *std.Build) void {
     const input_root = b.createModule(.{ .root_source_file = b.path("src/console_input.zig"), .target = test_target, .optimize = test_optimize });
     input_root.addImport("r4os", host_r4os);
     const input_tests = b.addRunArtifact(b.addTest(.{ .root_module = input_root }));
-    b.step("input-test", "Desktop typed input, retained partial suffix and exact window generation").dependOn(&input_tests.step);
+    const input_step = b.step("input-test", "Desktop typed input, exact Run UTF8/graphemes and current window generation");
+    input_step.dependOn(&input_tests.step);
     const r4gfx = b.createModule(.{
         .root_source_file = libraries_dep.namedLazyPath("r4gfx_zig_binding"),
         .target = test_target,
@@ -357,6 +358,10 @@ pub fn build(b: *std.Build) void {
     const run_icon_source_tests = b.addRunArtifact(icon_source_tests);
     const run_text_field_tests = b.addRunArtifact(text_field_tests);
     const run_run_command_tests = b.addRunArtifact(run_command_tests);
+    text_field_tests.root_module.addImport("r4os", host_r4os);
+    run_command_tests.root_module.addImport("r4os", host_r4os);
+    input_step.dependOn(&run_text_field_tests.step);
+    input_step.dependOn(&run_run_command_tests.step);
     console_scroll_tests.root_module.addImport("r4std_console_text", console_text);
     const run_console_scroll_tests = b.addRunArtifact(console_scroll_tests);
     const run_appearance_signal_tests = b.addRunArtifact(appearance_signal_tests);

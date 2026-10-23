@@ -524,7 +524,7 @@ pub const App = struct {
         self.initWindowTitles();
         self.fitWindowsToWorkArea();
         self.setConsoleLaunch("Terminal", terminal_path, terminal_desktop_args);
-        self.run_path.set(default_run_path);
+        _ = self.run_path.set(default_run_path);
         self.loadDesktopConfig();
         self.reloadWallpaper();
         self.loadTimeConfig();
@@ -3412,13 +3412,13 @@ pub const App = struct {
         self.setDialogFocus(.run_input);
         if (!self.handleRunKey(r4os.gui.Key.ctrl_v) or !bytesEqual(self.run_path.text(), sample)) {
             self.closeTop();
-            self.run_path.set(default_run_path);
+            _ = self.run_path.set(default_run_path);
             _ = self.ctx.clipboardClear();
             self.ctx.println("FAILED-paste");
             return false;
         }
         self.closeTop();
-        self.run_path.set(default_run_path);
+        _ = self.run_path.set(default_run_path);
         _ = self.ctx.clipboardClear();
         self.ctx.println("ok");
         return true;
@@ -5276,7 +5276,7 @@ pub const App = struct {
             return self.hasDamage();
         }
         if (self.volume_ui.popup_open and legacy_key != 0 and self.handleVolumeKey(legacy_key)) return true;
-        if (legacy_key != 0 and self.dialog == .run and self.handleRunKey(legacy_key)) return true;
+        if (self.dialog == .run and self.handleRunKey(key)) return true;
         if (legacy_key != 0 and self.dialog == .tasks and self.handleTaskInventoryKey(legacy_key)) return true;
         if (legacy_key != 0 and self.dialog == .none and !self.start_open and self.handleTerminalScrollKey(legacy_key)) return true;
         if (self.dialog == .none and !self.start_open and self.deliverTerminalKeyToActiveConsole(key)) return true;
@@ -7534,7 +7534,7 @@ pub const App = struct {
         self.menu_nested_focus = false;
         self.dialog_focus = defaultDialogFocus(dialog);
         self.keyboard_focus = self.dialog_focus;
-        if (dialog == .run and self.run_path.len == 0) self.run_path.set(default_run_path);
+        if (dialog == .run and self.run_path.len == 0) _ = self.run_path.set(default_run_path);
         if (was_system_menu_open) self.invalidateSystemMenu();
         if (was_time_menu_open) self.invalidateTimeMenu();
         if (was_volume_popup_open) self.invalidateVolumePopup();
@@ -7561,7 +7561,7 @@ pub const App = struct {
         switch (dialog) {
             .message_notepad => self.setDialogText("Notepad", "External app launch follows after launcher work."),
             .message_synth => self.setDialogText("R4Synth", "Use Terminal: SYNTH C:\\TEMP\\TADA.WAV"),
-            .message_run_invalid => self.setDialogText("Run", "Enter a program path, optionally followed by arguments."),
+            .message_run_invalid => self.setDialogText("Run", "Program path or arguments are invalid or too long. Input was kept."),
             .message_run_no_programs => self.setMessageBox(.warning, .ok, "Run", "No R4X program found in C:\\R4OS\\SOFTWARE\\DESKTOP."),
             .message_run_no_slots => self.setMessageBox(.warning, .ok, "Run", "No free GUI window slot is available."),
             .message_run_console_busy => self.setMessageBox(.warning, .ok, "Run", "No free console window slot is available."),
@@ -8888,19 +8888,13 @@ pub const App = struct {
         return false;
     }
 
-    fn pasteClipboardToRunPath(self: *App) bool {
+    fn pasteClipboardToRunPath(self: *App) !bool {
         var data: [clipboard_buffer_size]u8 = .{0} ** clipboard_buffer_size;
         const len = self.ctx.clipboardRead(data[0..]);
-        if (len <= 0) return false;
-        var changed = false;
-        var i: usize = 0;
-        while (i < @as(usize, @intCast(len))) : (i += 1) {
-            const ch = data[i];
-            if (ch == 0) break;
-            if (!isTextKey(ch)) continue;
-            changed = self.run_path.append(ch) or changed;
-        }
-        return changed;
+        if (len == 0) return false;
+        if (len < 0 or len >= data.len) return error.ClipboardRead;
+        if (!self.run_path.appendText(data[0..@intCast(len)])) return error.InvalidRunText;
+        return true;
     }
 
     fn isHostedAppWindow(self: *const App, index: usize) bool {
@@ -9919,7 +9913,7 @@ pub const App = struct {
         copyZPtr(self.console_args[0..], args);
     }
 
-    fn handleRunKey(self: *App, key: u8) bool {
+    fn handleRunKey(self: *App, key: u32) bool {
         switch (key) {
             0x1B => self.dispatchCommand(self.closeCommand(), .keyboard),
             0x84 => self.previousDialogFocus(),
@@ -9935,7 +9929,13 @@ pub const App = struct {
                 }
             },
             r4os.gui.Key.ctrl_v => {
-                if (self.dialog_focus == .run_input and self.pasteClipboardToRunPath()) self.invalidateDialog();
+                if (self.dialog_focus == .run_input) {
+                    const changed = self.pasteClipboardToRunPath() catch {
+                        self.openDialog(.message_run_invalid);
+                        return true;
+                    };
+                    if (changed) self.invalidateDialog();
+                }
             },
             0x08 => {
                 if (self.dialog_focus == .run_input and self.run_path.backspace()) self.invalidateDialog();
@@ -9943,30 +9943,38 @@ pub const App = struct {
             else => {
                 if (isTextKey(key)) {
                     self.setDialogFocus(.run_input);
-                    if (self.run_path.append(key)) self.invalidateDialog();
-                }
+                    if (self.run_path.append(key)) self.invalidateDialog()
+                    else self.openDialog(.message_run_invalid);
+                } else return false;
             },
         }
-        return self.hasDamage();
+        return true;
     }
 
     fn browseRunProgram(self: *App) void {
-        var path_buf: [run_path_max + 1]u8 = .{0} ** (run_path_max + 1);
+        var path_buf: [r4os.path.file_path_max + 1]u8 = @splat(0);
+        var formatted: [run_path_max]u8 = undefined;
         var index = self.run_browse_index;
         var scanned: u32 = 0;
         var wrapped = false;
         while (scanned < run_browse_scan_limit) : (scanned += 1) {
             @memset(path_buf[0..], 0);
-            const kind = self.ctx.dirEntry(run_browse_dir, index, path_buf[0 .. path_buf.len - 1]);
+            const kind = self.ctx.dirEntry(run_browse_dir, index, &path_buf);
             if (kind < 0) {
+                if (kind == -7) { self.openDialog(.message_run_invalid); return; }
                 if (wrapped) break;
                 index = run_browse_first_index;
                 wrapped = true;
                 continue;
             }
             if (kind == 0 and endsWithIgnoreCase(spanZ(path_buf[0..]), ".R4X")) {
-                self.run_path.set(spanZ(path_buf[0..]));
+                const value = run_command.browseText(spanZ(&path_buf), &formatted) orelse {
+                    self.openDialog(.message_run_invalid);
+                    return;
+                };
+                if (!self.run_path.set(value)) { self.openDialog(.message_run_invalid); return; }
                 self.run_browse_index = index + 1;
+                self.setDialogFocus(.run_input);
                 self.invalidateDialog();
                 return;
             }
@@ -11042,35 +11050,8 @@ fn legacyKey(key: u32) u8 {
     return if (key <= 0xff) @intCast(key) else 0;
 }
 
-fn isTextKey(key: u32) bool {
-    if (key < 0x20 or key > 0x10ffff) return false;
-    if (key >= 0x7f and key <= 0x9f) return false;
-    return key < 0xd800 or key > 0xdfff;
-}
-
-fn isAppKey(key: u32) bool {
-    return isTextKey(key) or
-        key == r4os.gui.Key.ctrl_a or
-        key == r4os.gui.Key.ctrl_c or
-        key == r4os.gui.Key.ctrl_v or
-        key == r4os.gui.Key.ctrl_x or
-        key == r4os.gui.Key.backspace or
-        key == r4os.gui.Key.enter or
-        key == '\n' or
-        key == r4os.gui.Key.escape or
-        key == r4os.gui.Key.delete or
-        key == r4os.gui.Key.up or
-        key == r4os.gui.Key.down or
-        key == r4os.gui.Key.f3 or
-        key == r4os.gui.Key.shift_tab or
-        key == r4os.gui.Key.left or
-        key == r4os.gui.Key.right or
-        key == r4os.gui.Key.home or
-        key == r4os.gui.Key.end or
-        key == r4os.gui.Key.page_up or
-        key == r4os.gui.Key.page_down or
-        key == r4os.gui.Key.f10;
-}
+const isTextKey = @import("input_keys.zig").isTextKey;
+const isAppKey = @import("input_keys.zig").isAppKey;
 
 fn isConsoleKey(key: u32) bool {
     return isTextKey(key) or

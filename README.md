@@ -273,3 +273,18 @@ Lifecycle and contract details: `Docs/Diagnostics/Spectra.txt` in the workspace.
 ## Console input
 
 Terminal key delivery uses typed Unicode scalars or explicit logical keys. Clipboard bytes80/81 remain text data. Each of the four window bindings retains up to4096 pending events and retires only the acknowledged prefix; pending input never follows a replacement process generation. `Build.sh input-test` checks retained suffixes and binding changes. `/INPUTTEST` exercises real terminal windows through typed keyboard delivery, clipboard paste and history/backspace; it returns normally.
+
+## Run input
+
+Since 0.86.84 the Run editor retains whole UTF8 scalar input and uses the
+original R4STD extended grapheme boundaries for Backspace. The 127-byte
+command limit rejects an invalid or oversized Set/Paste as a whole and keeps
+the prior input. Browse retains complete paths and quotes paths containing
+spaces; display-tail clipping does not change the launch identity.
+
+`input-test` includes the existing typed console, Run editor and command
+cases. `Tests/RunInput` contains small SDK-only comparison sources for an
+owned quiet QEMU guest: exact clipboard bytes and a real Unicode-path GUI
+launch, Close acknowledgement and Desktop-owned reap. Their manifests/builds
+are materialized only as temporary test projects. They are not a productive
+diagnostic or a replacement for Spectra's existing Desktop checks.

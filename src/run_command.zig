@@ -1,4 +1,5 @@
 const std = @import("std");
+const text_field = @import("text_field.zig");
 
 pub const max_input: usize = 127;
 pub const max_path: usize = 127;
@@ -18,6 +19,7 @@ pub const Command = struct {
 };
 
 pub fn parse(input: []const u8) ?Command {
+    if (input.len > max_input or !text_field.validText(input)) return null;
     const trimmed = trim(input);
     if (trimmed.len == 0) return null;
 
@@ -43,10 +45,20 @@ pub fn parse(input: []const u8) ?Command {
 }
 
 fn copyZ(out: []u8, value: []const u8) void {
-    @memset(out, 0);
-    const count = @min(value.len, out.len - 1);
-    if (count > 0) @memcpy(out[0..count], value[0..count]);
-    out[count] = 0;
+    @memcpy(out[0..value.len], value);
+    @memset(out[value.len..], 0);
+}
+
+pub fn browseText(path: []const u8, out: []u8) ?[]const u8 {
+    if (path.len == 0 or path.len > max_path or !text_field.validText(path) or std.mem.indexOfScalar(u8, path, '"') != null) return null;
+    const quoted = std.mem.indexOfScalar(u8, path, ' ') != null;
+    const count = path.len + @as(usize, if (quoted) 2 else 0);
+    if (count > max_input or count > out.len) return null;
+    if (quoted) out[0] = '"';
+    const offset: usize = if (quoted) 1 else 0;
+    @memcpy(out[offset..][0..path.len], path);
+    if (quoted) out[count - 1] = '"';
+    return out[0..count];
 }
 
 fn trim(value: []const u8) []const u8 {
@@ -96,9 +108,25 @@ test "parse quoted path with arguments" {
 
     try std.testing.expectEqualStrings("C:\\R4OS\\SOFTWARE\\DESKTOP\\MY APP.R4X", std.mem.span(command.pathZ()));
     try std.testing.expectEqualStrings("/v C:\\TEMP\\TADA.WAV", std.mem.span(command.argsZ()));
+    const path = "C:\\\u{e4}\\\u{4e2d}\\A\u{308} demo.R4X";
+    var text: [max_input]u8 = undefined;
+    const browsed = browseText(path, &text) orelse return error.BrowseFailed;
+    const exact = parse(browsed) orelse return error.ParseFailed;
+    try std.testing.expectEqualStrings(path, std.mem.span(exact.pathZ()));
+    try std.testing.expectEqualStrings("", std.mem.span(exact.argsZ()));
+    var field = text_field.TextField(max_input){};
+    try std.testing.expect(field.set("C:\\\u{e4}\\\u{4e2d}\\A\u{308}.R4X"));
+    for (0..5) |_| try std.testing.expect(field.backspace());
+    try std.testing.expectEqualStrings("C:\\\u{e4}\\\u{4e2d}\\", field.text());
 }
 
 test "reject empty or unterminated command" {
     try std.testing.expect(parse("   ") == null);
     try std.testing.expect(parse("\"C:\\R4OS\\SOFTWARE\\DESKTOP\\BROKEN.R4X") == null);
+    try std.testing.expect(parse("C:\\bad\xff.R4X") == null);
+    try std.testing.expect(parse("C:\\ok.R4X\x00different") == null);
+    try std.testing.expect(parse("a" ** (max_input + 1)) == null);
+    var text: [max_input]u8 = @splat(0x5a);
+    try std.testing.expect(browseText("a " ++ "b" ** (max_input - 2), &text) == null);
+    for (text) |byte| try std.testing.expectEqual(@as(u8, 0x5a), byte);
 }
