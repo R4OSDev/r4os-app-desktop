@@ -262,11 +262,9 @@ pub const App = struct {
     diagnostic_input_generation: u64 = 0,
     diagnostic_capture_override: bool = false,
     diagnostic_screenshot: bool = false,
-    diagnostic_launcher: r4os.abi.ProgramProcessHandle = .{},
-    diagnostic_export: [128:0]u8 = @splat(0),
+    diagnostic_console_child: r4os.abi.ProgramProcessHandle = .{},
     diagnostic_session: diagnostic.Session = .{},
     diagnostic_benchmark: @import("diagnostic_benchmark.zig").State = .{},
-    diagnostic_launcher_benchmark: bool = false,
     images: *const r4img.Context,
     png: *const r4img.PngContext,
     raster: *const r4img.RasterContext,
@@ -556,9 +554,6 @@ pub const App = struct {
         self.redraw();
         _ = self.ctx.bootReady();
         if (argsContain(self.ctx.argsRaw(), "/INPUTTEST")) return self.runConsoleInputSelftest();
-        if (argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES")) {
-            if (!self.startDiagnosticBenchmarkLauncher()) return 1;
-        }
         if (hasHeadlessSubsystemArg(self.ctx.argsRaw()) and !self.startHeadlessSubsystemAcceptance()) {
             if (!self.ctx.exists(subsystem_host_test_marker_path)) _ = self.headlessSubsystemFailure("unknown");
             self.forceCloseWindowsByLaunchPath(subsystem_host_test_path);
@@ -571,14 +566,13 @@ pub const App = struct {
             self.headless_acceptance_terminal = true;
         }
         if (argsContain(self.ctx.argsRaw(), "/SMOKE-AUDIO-OUTPUT")) self.runAudioOutputSmokeAndPoweroff();
+        // This boot path is only for distinct native-output qualifications.
+        // General window/idle/capture checks belong to Spectra.
         if (argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE")) {
             const native = argsContain(self.ctx.argsRaw(), "/OUTPUTS") or argsContain(self.ctx.argsRaw(), "/CURSOR") or
                 argsContain(self.ctx.argsRaw(), "/SCREEN-POWER") or argsContain(self.ctx.argsRaw(), "/SWAPCHAIN");
-            if (native) {
-                if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) return 2;
-                self.runWindowIdleSmokeAndPoweroff();
-            }
-            if (!self.startDiagnosticLauncher()) return 1;
+            if (!native or argsContain(self.ctx.argsRaw(), "/CAPTURE")) return 2;
+            self.runWindowIdleSmokeAndPoweroff();
         }
         if (hasKlickifaxSmokeArg(self.ctx.argsRaw())) self.runKlickifaxSmokeAndPoweroff();
         if (hasR4XSmokeArg(self.ctx.argsRaw())) self.runR4XSmokeAndPoweroff();
@@ -595,21 +589,6 @@ pub const App = struct {
                     self.smokePumpCooperativeFrames(1);
                     self.ctx.sleepTicks(1);
                     continue;
-                }
-            }
-            if (processHandleValid(self.diagnostic_launcher)) {
-                var completion: r4os.abi.ProgramProcessCompletion = .{};
-                if (self.ctx.sys.programHandleWait(&self.diagnostic_launcher, 0, &completion) == 0) {
-                    const valid = sameProcessHandle(completion.handle, self.diagnostic_launcher) and completion.sequence != 0;
-                    const exit_code = completion.exit_code;
-                    if (self.ctx.sys.programHandleReap(&self.diagnostic_launcher, &completion) != 0) return 1;
-                    self.diagnostic_launcher = .{};
-                    const removed = !self.ctx.sys.exists(&self.diagnostic_export) or self.ctx.sys.fileDelete(&self.diagnostic_export) >= 0;
-                    const ok = valid and exit_code == 0 and removed;
-                    self.ctx.println(if (self.diagnostic_launcher_benchmark)
-                        (if (ok) "DESKTOP benchmark result: OK (Spectra)" else "DESKTOP benchmark FAILED (Spectra)")
-                        else (if (ok) "DESKTOP window-idle result: OK (Spectra)" else "DESKTOP window-idle FAILED (Spectra)"));
-                    return if (valid and removed) exit_code else 1;
                 }
             }
             for (&self.console_pending, self.window_process_handles) |*pending, handle| {
@@ -666,41 +645,7 @@ pub const App = struct {
 
             self.idleWait(needs_redraw or remote_events != 0 or physical_events != 0);
         }
-        if (processHandleValid(self.diagnostic_launcher)) {
-            _ = self.ctx.sys.programHandleRequestClose(&self.diagnostic_launcher);
-            var completion: r4os.abi.ProgramProcessCompletion = .{};
-            if (self.ctx.sys.programHandleWait(&self.diagnostic_launcher, self.ctx.sys.ticksFromMilliseconds(15000), &completion) != 0 or
-                self.ctx.sys.programHandleReap(&self.diagnostic_launcher, &completion) != 0) return 1;
-            self.diagnostic_launcher = .{};
-            if (self.ctx.sys.exists(&self.diagnostic_export) and self.ctx.sys.fileDelete(&self.diagnostic_export) < 0) return 1;
-        }
         return 0;
-    }
-
-    fn startDiagnosticLauncher(self: *App) bool {
-        const path = std.fmt.bufPrintZ(&self.diagnostic_export, "C:\\TEMP\\DC{X:0>8}-{X:0>16}.JSON", .{ self.ctx.self_handle.instance_id, self.ctx.self_handle.generation }) catch return false;
-        if (self.ctx.sys.exists(path)) return false;
-        var command: [256:0]u8 = undefined;
-        const args = std.fmt.bufPrintZ(&command, "CHECK DESKTOP /RESTART {s} /JSON /EXPORT:{s}", .{
-            if (argsContain(self.ctx.argsRaw(), "/CAPTURE")) @as([]const u8, "/CAPTURE") else "", path,
-        }) catch return false;
-        return self.ctx.sys.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", args, .console, &self.diagnostic_launcher) == 0;
-    }
-
-    fn startDiagnosticBenchmarkLauncher(self: *App) bool {
-        const path = std.fmt.bufPrintZ(&self.diagnostic_export, "C:\\TEMP\\DB{X:0>8}-{X:0>16}.JSON", .{ self.ctx.self_handle.instance_id, self.ctx.self_handle.generation }) catch return false;
-        if (self.ctx.sys.exists(path)) return false;
-        var command: [384:0]u8 = undefined;
-        const raw = self.ctx.argsRaw();
-        const args = std.fmt.bufPrintZ(&command, "BENCH SNES /WINDOW {s} {s} {s} {s} {s} /JSON /EXPORT:{s}", .{
-            if (argsContain(raw, "/SNES-PAL")) @as([]const u8, "/PAL") else "/NTSC",
-            if (argsContain(raw, "/SNES-NORMAL")) @as([]const u8, "/NORMAL") else if (argsContain(raw, "/SNES-DETAIL")) "/DETAIL" else "/PAIRED",
-            if (argsContain(raw, "/SNES-MAXIMIZED")) @as([]const u8, "/MAXIMIZED") else "/SMALL",
-            if (argsContain(raw, "/SNES-OUTPUT-PROFILE")) @as([]const u8, "/OUTPUT-ANALYSIS") else "",
-            if (argsContain(raw, "/PERF-CHECK-R4SNES")) @as([]const u8, "/CHECK") else "", path,
-        }) catch return false;
-        self.diagnostic_launcher_benchmark = true;
-        return self.ctx.sys.programSpawnHandle("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", args, .console, &self.diagnostic_launcher) == 0;
     }
 
     fn noteDiagnosticInput(self: *App) void {
@@ -783,8 +728,7 @@ pub const App = struct {
             .target = request.target, .idle_timeouts = self.activity_wait_timeouts, .redraws = self.render_stats.redraws,
             .input_generation = self.diagnostic_input_generation, .service_handle = self.ctx.window_session.handle, .restart_state = self.diagnostic_restart_state,
             .restart_old_handle = self.diagnostic_restart_old_handle, .restart_result = self.diagnostic_restart_result };
-        const isolated = argsContain(self.ctx.argsRaw(), "/CHECK-ISOLATED") or argsContain(self.ctx.argsRaw(), "/SMOKE-WINDOW-IDLE") or
-            argsContain(self.ctx.argsRaw(), "/PERF-R4SNES") or argsContain(self.ctx.argsRaw(), "/PERF-CHECK-R4SNES");
+        const isolated = argsContain(self.ctx.argsRaw(), "/CHECK-ISOLATED");
         if (isolated) response.flags |= diagnostic.isolated;
         if (self.win_service_gate.available) response.flags |= diagnostic.service_available;
         response.result = r4os.abi.service_api_result_busy;
@@ -3536,7 +3480,7 @@ pub const App = struct {
             return false;
         }
 
-        if (!self.runRemoteFrameDiag()) return false;
+        if (!self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\SPECTRA.R4X", "CHECK REMOTEFRAME /JSON", "", "")) return false;
 
         self.ctx.write("Remote frame snapshot: ok mode=");
         self.ctx.printU64(@as(u64, info.width));
@@ -3552,83 +3496,57 @@ pub const App = struct {
         return true;
     }
 
-    fn runRemoteFrameDiag(self: *App) bool {
-        return self.runConsoleDiagnostic("C:\\R4OS\\SOFTWARE\\TERMINAL\\DIAG\\RFDIAG.R4X", "/DESKTOP", "RFDIAG snapshot: OK", "RFDIAG result: OK");
-    }
+    /// Retained hardware/product diagnostics use exact completion, never text
+    /// as a substitute for process exit. A failed retirement keeps its handle.
     fn runConsoleDiagnostic(self: *App, path: [*:0]const u8, args: [*:0]const u8, first: []const u8, second: []const u8) bool {
-        var handle: r4os.abi.ProgramProcessHandle = .{};
-        const spawn_rc = self.ctx.programSpawnHandle(path, args, .console, &handle);
-        if (spawn_rc != r4os.abi.program_handle_ok or !processHandleValid(handle)) {
-            self.ctx.print("FAILED-diag-spawn=");
-            self.ctx.printI32(spawn_rc);
-            self.ctx.println("");
+        const handle = &self.diagnostic_console_child;
+        if (processHandleValid(handle.*)) return false;
+        if (self.ctx.programSpawnHandle(path, args, .console, handle) != r4os.abi.program_handle_ok or !processHandleValid(handle.*)) {
+            self.ctx.println("FAILED-diag-spawn");
             return false;
         }
-
-        const instance_id = handle.instance_id;
-        var output: [2048]u8 = .{0} ** 2048;
-        var output_len: usize = 0;
-        var exit_code: i32 = -1;
-        var done = false;
-        var tries: u32 = 0;
-        while (tries < 80) : (tries += 1) {
-            self.ctx.sleepTicks(1);
-            var info: r4os.abi.ProgramInstanceInfo = .{};
-            const status = self.ctx.programHandleStatus(&handle, &info);
-            const got = self.ctx.consoleOutput(instance_id, output[0..]);
-            if (got > 0) output_len = @intCast(got);
-            if (status == r4os.abi.program_handle_ok and info.state == @intFromEnum(r4os.abi.ProgramInstanceState.done)) {
-                done = true;
-                exit_code = info.exit_code;
-                break;
-            }
-            if (status != r4os.abi.program_handle_ok and status != r4os.abi.program_handle_error_would_block) break;
-        }
-
-        const got = self.ctx.consoleOutput(instance_id, output[0..]);
-        if (got > 0) output_len = @intCast(got);
-        const text = output[0..output_len];
-        if (text.len > 0) self.ctx.write(text);
-
-        if (!done) {
-            var kill_attempt: u32 = 0;
-            while (kill_attempt < task_inventory_restart_limit) : (kill_attempt += 1) {
-                const kill_status = self.ctx.programHandleKill(&handle);
-                if (kill_status == r4os.abi.program_handle_ok or processHandleDefinitelyGone(kill_status)) break;
-                if (kill_status != r4os.abi.program_handle_error_would_block and kill_status != r4os.abi.program_handle_error_not_running) break;
-                self.ctx.sleepTicks(1);
+        const expected = handle.*;
+        var done: r4os.abi.ProgramProcessCompletion = .{};
+        var waited = self.ctx.sys.programHandleWait(handle, self.ctx.sys.ticksFromMilliseconds(15000), &done);
+        const normal = waited == 0 and sameProcessHandle(done.handle, expected) and done.sequence != 0 and done.exit_code == 0;
+        if (waited != 0) {
+            _ = self.ctx.sys.programHandleRequestClose(handle);
+            waited = self.ctx.sys.programHandleWait(handle, self.ctx.sys.ticksFromMilliseconds(1000), &done);
+            if (waited != 0) {
+                _ = self.ctx.programHandleKill(handle);
+                waited = self.ctx.sys.programHandleWait(handle, self.ctx.sys.ticksFromMilliseconds(3000), &done);
             }
         }
-
-        var reaped = false;
-        var reap_attempt: u32 = 0;
-        while (reap_attempt < 80) : (reap_attempt += 1) {
-            var completion: r4os.abi.ProgramProcessCompletion = .{};
-            const reap_status = self.ctx.programHandleReap(&handle, &completion);
-            if (reap_status == r4os.abi.program_handle_ok or processHandleDefinitelyGone(reap_status)) {
-                reaped = true;
-                break;
+        if (waited != 0 or !sameProcessHandle(done.handle, expected) or done.sequence == 0) {
+            self.ctx.println("FAILED-diag-completion-retained");
+            return false;
+        }
+        var output: [2048]u8 = undefined;
+        var text: []const u8 = &.{};
+        // Only distinct legacy hardware diagnostics still require their own
+        // output assertions. Spectra's result is its real process completion.
+        if (first.len != 0 or second.len != 0) {
+            const got = self.ctx.consoleOutput(expected.instance_id, &output);
+            if (got > 0 and got <= output.len) text = output[0..@as(usize, @intCast(got))];
+            if (text.len != 0) self.ctx.write(text);
+        }
+        const sequence = done.sequence;
+        const started = self.ctx.ticks();
+        while (true) {
+            const code = self.ctx.programHandleReap(handle, &done);
+            if (code == 0) break;
+            if (code != r4os.abi.program_handle_error_would_block or
+                self.ctx.ticks() -% started >= self.ctx.sys.ticksFromMilliseconds(3000))
+            {
+                self.ctx.println("FAILED-diag-reap-retained");
+                return false;
             }
-            if (reap_status != r4os.abi.program_handle_error_would_block and reap_status != r4os.abi.program_handle_error_not_running) break;
             self.ctx.sleepTicks(1);
         }
-        if (!reaped) {
-            self.ctx.println("FAILED-diag-reap");
-            return false;
-        }
-
-        if (!done) {
-            self.ctx.println("FAILED-diag-timeout");
-            return false;
-        }
-        if (exit_code != 0) {
-            self.ctx.print("FAILED-diag-exit=");
-            self.ctx.printI32(exit_code);
-            self.ctx.println("");
-            return false;
-        }
-        if (!containsBytes(text, first) or !containsBytes(text, second)) {
-            self.ctx.println("FAILED-diag-output");
+        if (!sameProcessHandle(done.handle, expected) or done.sequence != sequence) return false;
+        handle.* = .{};
+        if (!normal or (first.len != 0 and !containsBytes(text, first)) or (second.len != 0 and !containsBytes(text, second))) {
+            self.ctx.println("FAILED-diag-result");
             return false;
         }
         return true;
@@ -6501,7 +6419,7 @@ pub const App = struct {
             .started_ns = bench.started_ns, .ended_ns = self.ctx.sys.monotonicNanoseconds() orelse return error.ClockMissing,
             .presents = self.render_stats.present_successes -% bench.presents_before,
             .cursor_moves = self.render_stats.cursor_moves -% bench.cursor_before, .tick_hz = self.monotonic_hz,
-        }, diagnostic.snes_generations_path, diagnostic.snes_window_path);
+        }, diagnostic.snes_window_path);
         bench.report_ready = true;
     }
 

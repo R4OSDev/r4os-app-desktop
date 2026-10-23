@@ -33,12 +33,21 @@ controller's process completion.
 `Contract/desktop_check_v1.zig` is the language-neutral, fixed-byte owner
 boundary; the passive WINSVC operation4500 remains separate.
 
-During migration, `/SMOKE-WINDOW-IDLE` without hardware options forwards to
-the same Spectra body, returns its result and does not power off. Its `/CAPTURE`
-option selects the shared capture variant. Existing explicit native output,
-cursor, swapchain and screen-power boot cases retain their distinct owner
-purpose; combining those old hardware options with `/CAPTURE` is rejected.
-They do not grant physical visibility or hardware qualification to Spectra.
+Since 0.86.77 the generic `/SMOKE-WINDOW-IDLE` and old Desktop PERF
+forwarders are retired. Use the CHECK/BENCH commands above and below; they
+return to their caller. `/SMOKE-WINDOW-IDLE` remains only with an explicit
+`/OUTPUTS`, `/CURSOR`, `/SWAPCHAIN` or `/SCREEN-POWER` hardware purpose;
+without one of those options, or with `/CAPTURE`, it fails with Exit2.
+Those private boot qualifications remain poweroff harnesses. They neither
+extend Spectra's hardware scope nor replace its current functional checks.
+Their RemoteFrame consumer invokes `SPECTRA CHECK REMOTEFRAME /JSON` and
+requires the exact child completion/reap, without RFDIAG or success markers.
+Other DISPLAYD hardware probes keep their distinct output assertions.
+
+The SDK APPZCON `/TRAYSMOKE` fixture remains a separate console-facade and
+owner-exit test: it intentionally leaves an item behind and checks the real
+WINSVC cleanup. The audio-output boot probe also retains its receiver-choice
+purpose. Neither requires keeping the removed generic forwarders.
 
 ## Offscreen composition diagnostics
 

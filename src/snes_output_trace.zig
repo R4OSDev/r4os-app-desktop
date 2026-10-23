@@ -51,16 +51,9 @@ pub const ReportContext = struct {
 
 /// Original owner report, emitted after the measured child has actually ended.
 pub fn writeReport(ctx: *@import("api.zig").Context, trace: *const Trace, context: ReportContext,
-    generations_path: [*:0]const u8, report_path: [*:0]const u8) !void
+    report_path: [*:0]const u8) !void
 {
     if (trace.overflow or trace.count == 0 or context.ended_ns <= context.started_ns) return error.IncompleteTrace;
-    var output: [65536]u8 = undefined;
-    var length: usize = 0;
-    for (trace.samples[0..trace.count]) |sample| {
-        const line = try std.fmt.bufPrint(output[length..], "{d}\n", .{sample.generation});
-        length += line.len;
-    }
-    if (ctx.fileWrite(generations_path, output[0..length]) != @as(i32, @intCast(length))) return error.ReportWrite;
     const report = try std.json.Stringify.valueAlloc(ctx.allocator(), .{
         .contract = "desktop-window-output-v1", .receipt = "software-display-copy-present-success",
         .window_case = if (context.maximized) "maximized" else "small", .process = context.process,

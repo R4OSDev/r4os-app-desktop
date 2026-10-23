@@ -30,9 +30,8 @@ pub const SnesOptions = struct {
 // The native Core host runner and its comparison context remain independent.
 pub const snes_data_path = "C:\\TEMP\\SNES-PERF.JSONL";
 pub const snes_error_path = "C:\\TEMP\\SNES-PERF.ERROR";
-pub const snes_generations_path = "C:\\TEMP\\SNES-PRESENT.TXT";
 pub const snes_window_path = "C:\\TEMP\\SNES-WINDOW.JSON";
-pub const snes_paths = [_][*:0]const u8{ snes_data_path, snes_error_path, snes_generations_path, snes_window_path };
+pub const snes_paths = [_][*:0]const u8{ snes_data_path, snes_error_path, snes_window_path };
 pub fn softwareReportPath(buffer: []u8, owner: Identity) ![:0]u8 {
     if (!owner.valid()) return error.InvalidOwner;
     return std.fmt.bufPrintZ(buffer, "C:\\TEMP\\DP{X:0>8}-{X:0>16}.JSON", .{ owner.instance, owner.generation });
