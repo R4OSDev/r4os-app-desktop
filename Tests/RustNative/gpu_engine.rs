@@ -169,7 +169,7 @@ fn pump(
     for _ in 0..256 {
         let progress = {
             let s = device.bind(app).unwrap();
-            let progress = engine.advance(&s, cache, frame.as_deref_mut(), 1, || 1);
+            let progress = engine.advance(&s, cache, frame.as_deref_mut(), || 1);
             control(&s, 0, 0);
             progress
         };
@@ -197,10 +197,7 @@ fn original_upload_partial_cancel_alpha_and_primitive_reuse_oracles() {
         let serial = stats()[0];
         for _ in 0..8 {
             let s = device.bind(app).unwrap();
-            assert_eq!(
-                engine.advance(&s, &mut cache, None, 1, || 1),
-                Progress::Copied
-            );
+            assert_eq!(engine.advance(&s, &mut cache, None, || 1), Progress::Copied);
         }
         assert_eq!(stats()[0], serial);
         capture(&mut cache, PIXEL, 0x445566, None);
@@ -238,7 +235,7 @@ fn original_upload_partial_cancel_alpha_and_primitive_reuse_oracles() {
         begin(app, device, &mut engine, &cache, None);
         {
             let s = device.bind(app).unwrap();
-            let _ = engine.advance(&s, &mut cache, None, 1, || 1);
+            let _ = engine.advance(&s, &mut cache, None, || 1);
             engine.cancel(&s, Error::Deadline);
             assert_eq!(engine.close(&s), Err(Error::Busy));
         }
@@ -461,7 +458,8 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
             })
             .unwrap();
         cache.finish(Some(&frame)).unwrap();
-        for mode in 0..4 {
+        for mode in 0..7 {
+            let failed = mode == 1 || mode == 5;
             let mut engine = Engine::new().unwrap();
             {
                 let s = device.bind(app).unwrap();
@@ -469,7 +467,7 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
                 // startup Busy replies before entering the admission case.
                 control(&s, 1, 0);
                 control(&s, 10, if mode == 3 { 24 } else { 0 });
-                control(&s, 6, u64::from(mode != 2 && mode != 3));
+                control(&s, 6, u64::from(matches!(mode, 0 | 1 | 4 | 5)));
             }
             {
                 let s = device.bind(app).unwrap();
@@ -480,17 +478,42 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
             }
             {
                 let s = device.bind(app).unwrap();
+                let previous_retirement = if mode == 6 {
+                    assert_eq!(
+                        engine.advance(&s, &mut cache, Some(&mut frame), || 1),
+                        Progress::Pending
+                    );
+                    assert!(engine.jobs.depth > 0);
+                    engine.jobs.retirement_epoch
+                } else {
+                    0
+                };
                 let mut clock = 1;
-                let result = engine.advance(&s, &mut cache, Some(&mut frame), 1, || {
+                let mut arrival = mode == 6;
+                let result = engine.advance(&s, &mut cache, Some(&mut frame), || {
+                    // The event becomes visible on the first actual GPU
+                    // clock sample, before its introductory completion scan.
+                    if arrival {
+                        control(&s, 0, 0);
+                        arrival = false;
+                    }
+                    if mode == 5 {
+                        return 1_000_000_000;
+                    }
+                    if mode == 4 || mode == 6 {
+                        return 1_000_001;
+                    }
                     let now = clock;
                     if mode == 1 {
                         clock += 100_000;
                     }
                     now
                 });
-                assert_eq!(result, Progress::Pending);
+                if mode != 5 {
+                    assert_eq!(result, Progress::Pending);
+                }
                 match mode {
-                    0 => {
+                    0 | 4 => {
                         assert_eq!(engine.last_admission_steps, Engine::ADMISSION_LIMIT);
                         assert!(engine.immediate_work);
                     }
@@ -499,6 +522,12 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
                         engine.cancel(&s, Error::Deadline);
                     }
                     2 => assert!(!engine.immediate_work),
+                    5 => {
+                        assert_eq!(engine.fault, Some(Error::Deadline));
+                        assert_eq!(engine.last_admission_steps, 0);
+                        assert_eq!(engine.render_jobs, 0);
+                    }
+                    6 => assert!(engine.jobs.retirement_epoch > previous_retirement),
                     _ => (),
                 }
                 control(&s, 6, 0);
@@ -508,15 +537,15 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
             for _ in 0..512 {
                 let progress = {
                     let s = device.bind(app).unwrap();
-                    let value = engine.advance(&s, &mut cache, Some(&mut frame), 1, || 1);
+                    let value = engine.advance(&s, &mut cache, Some(&mut frame), || 1);
                     control(&s, 0, 0);
                     value
                 };
-                let _ = engine.finish_external(&mut NoExternal, mode == 1);
+                let _ = engine.finish_external(&mut NoExternal, failed);
                 if progress != Progress::Pending {
                     assert_eq!(
                         progress,
-                        if mode == 1 {
+                        if failed {
                             Progress::Failed
                         } else {
                             Progress::Copied
@@ -527,7 +556,7 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
                 }
             }
             assert!(completed, "finite original receipt pool must make progress");
-            if mode != 1 {
+            if !failed {
                 assert_eq!(visible(), [0x00ff00; 64]);
             }
             if mode == 3 {

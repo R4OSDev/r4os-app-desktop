@@ -599,9 +599,11 @@ impl Engine {
         s: &Session<'_, '_>,
         cache: &mut Cache,
         mut recording: Option<&mut Frame>,
-        now: u64,
         mut clock: impl FnMut() -> u64,
     ) -> Progress {
+        // This turn owns its budget, including its initial completion scan.
+        // Earlier topology/input/service work cannot consume it.
+        let entered = clock();
         self.immediate_work = false;
         self.last_admission_steps = 0;
         if let Err(error) = self.poll_presentation(s) {
@@ -619,7 +621,7 @@ impl Engine {
         if cache.frame() != self.frame || !cache.captured() {
             self.cancel(s, Error::State);
         }
-        if now >= self.deadline && self.fault.is_none() {
+        if entered >= self.deadline && self.fault.is_none() {
             self.cancel(s, Error::Deadline);
         }
         if let Err(error) = self.collect(s, cache, recording.as_deref_mut()) {
@@ -678,7 +680,9 @@ impl Engine {
                 self.cancel(s, Error::Deadline);
                 break;
             }
-            if self.last_admission_steps != 0 && instant.saturating_sub(now) >= Self::ADMISSION_NS {
+            if self.last_admission_steps != 0
+                && instant.saturating_sub(entered) >= Self::ADMISSION_NS
+            {
                 self.immediate_work = true;
                 break;
             }

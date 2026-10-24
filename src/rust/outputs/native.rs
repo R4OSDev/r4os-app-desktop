@@ -321,13 +321,17 @@ impl<'a> Output<'a> {
     pub fn execution_observation(&self) -> super::selection::Execution {
         let time = |value: u64| (value != 0).then_some(value);
         super::selection::Execution {
-            device_address: self.device_address, device_handle_generation: self.device_handle_generation,
-            backend_device_generation: self.device_generation, reset_generation: self.reset_generation,
-            completed_frames: self.frames_completed, visible_frames: self.frames_visible,
+            device_address: self.device_address,
+            device_handle_generation: self.device_handle_generation,
+            backend_device_generation: self.device_generation,
+            reset_generation: self.reset_generation,
+            completed_frames: self.frames_completed,
+            visible_frames: self.frames_visible,
             render_submit_jobs: self.state.as_ref().map(|s| s.engine.render_jobs),
             primitive_submit_jobs: self.state.as_ref().map(|s| s.engine.primitive_jobs),
             completed_frame: self.completed_frame,
-            result: self.completed_status.map(|s| s.result), phase: self.completed_status.map(|s| s.phase),
+            result: self.completed_status.map(|s| s.result),
+            phase: self.completed_status.map(|s| s.phase),
             frame_generation: self.completed_status.map(|s| s.frame.generation),
             frame_serial: self.completed_status.map(|s| s.frame.serial),
             render_end_ns: self.completed_status.and_then(|s| time(s.render_end_ns)),
@@ -360,10 +364,12 @@ impl<'a> Output<'a> {
             return Decision::new(Reason::NativeState);
         };
         let session = match state.device.bind(app) {
-            Ok(value) => value, Err(error) => return Decision::device(Reason::NativeBinding, error),
+            Ok(value) => value,
+            Err(error) => return Decision::device(Reason::NativeBinding, error),
         };
         let info = match session.refresh() {
-            Ok(value) => value, Err(error) => return Decision::device(Reason::NativeRefresh, error),
+            Ok(value) => value,
+            Err(error) => return Decision::device(Reason::NativeRefresh, error),
         };
         let required = state.engine.required_operations() | additional;
         Decision::operations(required, info.gpu_operations)
@@ -646,7 +652,6 @@ impl<'a> Output<'a> {
                     &session,
                     &mut state.cache,
                     Some(&mut state.frame),
-                    time,
                     || now(app).unwrap_or(self.deadline),
                 ) == GpuProgress::Copied;
                 if copied && !state.engine.uses_swapchain() {

@@ -128,7 +128,7 @@ fn pump_window(
     for _ in 0..256 {
         let progress = {
             let s = device.bind(app).unwrap();
-            let value = engine.advance(&s, cache, Some(frame), 1, || 1);
+            let value = engine.advance(&s, cache, Some(frame), || 1);
             control(&s, 0, 0);
             value
         };
@@ -244,7 +244,7 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
                 assert_eq!(stats()[11], 3);
                 unsafe { first.begin(&s, &one, Some(&frame), 1000) }.unwrap();
                 for _ in 0..32 {
-                    first.advance(&s, &mut one, Some(&mut frame), 1, || 1);
+                    first.advance(&s, &mut one, Some(&mut frame), || 1);
                     control(&s, 0, 0);
                 }
                 assert!(first.active());
