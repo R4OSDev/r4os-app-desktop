@@ -35,6 +35,17 @@ directly. Subsystem envelopes and guest filenames remain opaque, exact bytes.
 Path, header classification, window capacity, loader and host-attachment
 failures retain their own phase; reporting an error never reclassifies a file.
 
+During native GPU startup the boot output can temporarily have no published
+geometry. Desktop keeps the original provisional 1280x720 layout and adopts
+the real dimensions through its existing topology owner. This private layout
+does not create a scanout or acknowledge presentation. A temporarily held boot
+output therefore does not terminate the Desktop host.
+
+The SNES benchmark owner distinguishes actual software copy receipts from
+managed output context. Managed context reports geometry and published
+generations while keeping unmeasured copy, GPU completion and physical
+visibility fields unavailable. Qualification: `Docs/Diagnostics/SnesBenchmark.txt`.
+
 ## Build and focused checks
 
 Run `./Build.sh` on Linux or `Build.bat` on Windows. The thin launchers share
@@ -115,3 +126,11 @@ follows from the local software and native-model checks.
 
 Original R4OS material uses Apache License 2.0. See `LICENSE`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md` and the historical source transfer in `PROVENANCE.txt`.
+
+Explicit SNES reports bind their output source on the first actual observation
+and sample only the exact active child. Pending native image retirement keeps
+its owners and receives a distinct completion-pending reply; matching Spectra
+repeats only the idempotent final report within one bounded deadline. Mixed
+actual sources, geometry or generation changes and hard report failures remain
+errors. Managed reports retain context and leave presentation/GPU/physical
+receipts unmeasured. See `Docs/Diagnostics/SnesBenchmark.txt` in the workspace.

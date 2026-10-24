@@ -2,7 +2,7 @@
 //! borrows concrete domain owners; no callback receives the Desktop root.
 use super::{
     reservation::Session,
-    snes::{self, Ledger, Trace},
+    snes::{self, FinishFailure, Ledger, Trace},
     wire::{self as w, Identity, Op, Request, Response, Work},
 };
 use crate::{
@@ -33,7 +33,6 @@ pub struct View<'call, 'input> {
     pub work_areas: [Rect; 4],
     pub width: i32,
     pub height: i32,
-    pub managed_outputs: bool,
 }
 #[derive(Default)]
 pub struct Effects {
@@ -513,8 +512,7 @@ impl Owner {
                     out.result = a::service_api_result_invalid;
                     return out;
                 }
-                if v.managed_outputs
-                    || self.benchmark.trace.is_some()
+                if self.benchmark.trace.is_some()
                     || self.benchmark.child.valid()
                 {
                     out.result = -1;
@@ -549,9 +547,11 @@ impl Owner {
                     out.result = a::service_api_result_invalid;
                     return out;
                 }
-                if !self.finish_snes(v, env, programs, time, stats, cursor_moves) {
-                    out.result = -1
-                }
+                out.result = match self.finish_snes(v, env, programs, time, stats, cursor_moves) {
+                    Ok(true) => 0,
+                    Ok(false) => w::SNES_FINISH_PENDING,
+                    Err(failure) => failure as i32,
+                };
             }
             Op::SoftwareProfile => {
                 if !self.session.benchmark
@@ -587,24 +587,31 @@ impl Owner {
         time: Time,
         stats: &Stats,
         cursor_moves: u64,
-    ) -> bool {
+    ) -> Result<bool, FinishFailure> {
         if self.benchmark.report_ready {
-            return true;
+            return Ok(true);
         }
         let Some(trace) = &self.benchmark.trace else {
-            return false;
+            return Err(FinishFailure::MissingTrace);
         };
         if !matches!(programs.status(self.benchmark.child.handle()),Ok(Some(info)) if info.state==a::ProgramInstanceState::done.0 && info.exit_code==0)
         {
-            return false;
+            return Err(FinishFailure::ChildNotComplete);
         }
         let client = &v.hosted.model.clients.slots()[trace.window_index];
-        if client.bound()
-            || !client.completion().is_some_and(|c| {
+        if client.bound() {
+            if !Identity::of(client.handle()).same(self.benchmark.child) {
+                return Err(FinishFailure::ClientIdentity);
+            }
+            // Process completion precedes exact native-image retirement.
+            // Keep the real client/graphics owners until detach acknowledges it.
+            return Ok(false);
+        }
+        if !client.completion().is_some_and(|c| {
                 Identity::of(c.handle).same(self.benchmark.child) && c.exit_code == 0
             })
         {
-            return false;
+            return Err(FinishFailure::ClientCompletion);
         }
         let report = trace.report(snes::Report {
             maximized: self.benchmark.options.maximized,
@@ -617,15 +624,15 @@ impl Owner {
             cursor_moves: cursor_moves.wrapping_sub(self.benchmark.cursor_before),
             tick_hz: u64::from(time.hz),
         });
-        let Ok(report) = report else { return false };
+        let Ok(report) = report else { return Err(FinishFailure::TraceInvalid) };
         let Ok(path) = FilePath::parse(w::SNES_PATHS[2]) else {
-            return false;
+            return Err(FinishFailure::ReportPath);
         };
         if env.system.files().write(&path, report.as_bytes()) != Ok(report.len()) {
-            return false;
+            return Err(FinishFailure::ReportWrite);
         }
         self.benchmark.report_ready = true;
-        true
+        Ok(true)
     }
     pub fn end(
         &mut self,

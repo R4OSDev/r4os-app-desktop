@@ -376,3 +376,5 @@ pub fn software_path(owner: Identity) -> Option<alloc::string::String> {
         )
     })
 }
+/// desktop_check_v2.snes_finish_pending; exact child retirement is pending.
+pub const SNES_FINISH_PENDING: i32 = 1;

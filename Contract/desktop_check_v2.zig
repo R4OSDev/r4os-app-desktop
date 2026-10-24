@@ -79,6 +79,9 @@ pub const isolated: u32 = 16;
 pub const service_available: u32 = 32;
 /// The actual Desktop has a committed, generation-bound producer frame.
 pub const frame_valid: u32 = 64;
+/// snes_finish only: exact completed child still owned by graphics retirement.
+/// No completion/report receipt; caller may repeat this idempotent operation.
+pub const snes_finish_pending: i32 = 1;
 pub fn screenshotPath(buffer: []u8, owner: Identity) ![:0]u8 {
     if (!owner.valid()) return error.InvalidOwner;
     return std.fmt.bufPrintZ(buffer, "C:\\TEMP\\SS{X:0>8}-{X:0>16}.BMP", .{ owner.instance, owner.generation });

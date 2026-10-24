@@ -117,7 +117,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
         run: &'input mut [u8],
         time: Time,
     ) -> Result<Self> {
-        let (width, height) = Display(env.graphics).size().ok_or("display geometry")?;
+        // The native driver can still hold the boot output at shell start.
+        // Keep the original provisional layout; topology() adopts the real
+        // dimensions once an output is published. This creates no scanout.
+        let (width, height) = Display(env.graphics).size().unwrap_or((1280, 720));
         let shell = owned(
             || Shell::new(run).map_err(|_| "shell state"),
             "shell allocation",
@@ -607,8 +610,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
             work_areas,
             width: self.width,
             height: self.height,
-            managed_outputs: self.outputs.active()
-                || self.primary_admission != outputs::primary::Admission::Cpu,
         };
         let effects = self.diagnostics.poll(
             &mut view,
@@ -708,11 +709,18 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         let mut regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
         let count = self.dirty.take_regions(&mut regions);
-        let trace_input = self.diagnostics.benchmark.trace.as_ref().map(|trace| {
+        let trace_input = self.diagnostics.benchmark.trace.as_ref().and_then(|trace| {
             let i = trace.window_index;
+            let slot = &self.hosted.model.clients.slots()[i];
+            let target = self.diagnostics.benchmark.child;
+            let handle = slot.handle();
+            if !slot.bound() || slot.retiring()
+                || handle.instance_id != target.instance || handle.generation != target.generation {
+                return None;
+            }
             let win = &self.hosted.model.windows.windows()[i];
-            let frame = self.hosted.model.clients.slots()[i].frames().view();
-            (
+            let frame = slot.frames().view();
+            Some((
                 win.geometry(),
                 win.client_surface().rect,
                 if frame.valid {
@@ -721,8 +729,16 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     0
                 },
                 i,
-            )
+            ))
         });
+        if let Some((frame, client, generation, _)) = trace_input {
+            if let Some(trace) = &mut self.diagnostics.benchmark.trace {
+                trace.observe_context(
+                    self.outputs.active() || self.primary_admission != outputs::primary::Admission::Cpu,
+                    frame, client, generation,
+                );
+            }
+        }
         let software_cursor =
             self.cursor.software() && !self.cursor.clean_pending() && !self.hosted.terminal_mode;
         let mut scene = views::scene(
@@ -1540,7 +1556,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         work_areas: areas,
                         width: self.width,
                         height: self.height,
-                        managed_outputs: self.outputs.active(),
                     };
                     self.diagnostics.end(
                         &mut view,
