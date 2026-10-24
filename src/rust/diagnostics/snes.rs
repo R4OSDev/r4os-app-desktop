@@ -61,13 +61,15 @@ impl Trace {
             selections,
         })
     }
-    /// Selected owner and its admission proof, never a render/visibility receipt.
+    /// Admission plus optional actual provider receipts for the exact output
+    /// owner. Those lifetime observations never bind a window generation.
     pub fn observe_choice(&mut self, choice: Choice, generation: u64) {
         if generation == 0 { return; }
         if let Some(previous) = self.selections.iter_mut().rev().find(|s| s.choice.target == choice.target) {
-            if previous.choice == choice {
+            if previous.choice.same_selection(choice) {
                 if generation < previous.last_generation { self.overflow = true; }
                 previous.last_generation = generation;
+                previous.choice.execution = choice.execution;
                 return;
             }
         }
@@ -171,6 +173,20 @@ impl Trace {
             out.push_str(",\"provider_status\":"); optional(&mut out, c.decision.status);
             out.push_str(",\"required_operations\":"); optional(&mut out, c.decision.required_operations);
             out.push_str(",\"available_operations\":"); optional(&mut out, c.decision.available_operations);
+            out.push_str(",\"owner_execution\":");
+            if let Some(e) = c.execution {
+                write!(out,"{{\"scope\":\"Exact native owner lifetime counters; admitted render jobs and actual provider frame receipts, including background/warmup work. Not per-window generations or optical visibility.\",\"device_address\":{},\"device_handle_generation\":{},\"backend_device_generation\":{},\"reset_generation\":{},\"completed_frames\":{},\"visible_frames\":{},\"completed_frame\":{},\"render_submit_jobs\":",e.device_address,e.device_handle_generation,e.backend_device_generation,e.reset_generation,e.completed_frames,e.visible_frames,e.completed_frame).unwrap();
+                optional(&mut out,e.render_submit_jobs);
+                out.push_str(",\"primitive_submit_jobs\":"); optional(&mut out,e.primitive_submit_jobs);
+                out.push_str(",\"result\":"); optional(&mut out,e.result);
+                out.push_str(",\"phase\":"); optional(&mut out,e.phase);
+                out.push_str(",\"frame_generation\":"); optional(&mut out,e.frame_generation);
+                out.push_str(",\"frame_serial\":"); optional(&mut out,e.frame_serial);
+                out.push_str(",\"render_end_ns\":"); optional(&mut out,e.render_end_ns);
+                out.push_str(",\"copied_ns\":"); optional(&mut out,e.copied_ns);
+                out.push_str(",\"visible_ns\":"); optional(&mut out,e.visible_ns);
+                out.push('}');
+            } else { out.push_str("null"); }
             out.push('}');
         }
         out.push_str("],\"records\":[");
@@ -314,7 +330,7 @@ mod tests {
         let mut choice = Choice {
             target: Some(Target { adapter_id: 8, connector_id: 2048, head_id: 0,
                 device_generation: 2, connection_generation: 9, display_generation: 4 }),
-            owner: "managed-cpu", active: true, decision: Decision::operations(7, 3),
+            owner: "managed-cpu", active: true, decision: Decision::operations(7, 3), execution: None,
         };
         trace.observe_choice(choice, 3);
         trace.observe_choice(choice, 4);
@@ -331,20 +347,33 @@ mod tests {
     }
     #[test]
     fn composition_history_retains_transitions_and_rejects_regressing_observations() {
-        use crate::outputs::selection::{Decision, Reason};
+        use crate::outputs::selection::{Decision, Execution, Reason};
         let (frame, client) = geometry();
         let mut trace = Trace::new(1).unwrap();
         trace.observe_context(true, frame, client, 3);
-        let mut choice = Choice { target: None, owner: "primary-native-gr", active: true, decision: Decision::operations(7, 7) };
+        let mut choice = Choice { target: None, owner: "primary-native-gr", active: true, decision: Decision::operations(7, 7), execution: None };
+        choice.execution = Some(Execution { device_address: 4096, device_handle_generation: 2,
+            backend_device_generation: 3, reset_generation: 1, completed_frames: 2, visible_frames: 2,
+            render_submit_jobs: Some(4), primitive_submit_jobs: Some(2), completed_frame: 2,
+            result: Some(1), phase: Some(4), frame_generation: Some(2), frame_serial: Some(2),
+            render_end_ns: Some(5), copied_ns: Some(6), visible_ns: Some(7) });
         trace.observe_choice(choice, 3);
-        choice.owner = "primary-cpu";
-        choice.decision = Decision::new(Reason::PriorNativeFailure);
+        choice.execution.as_mut().unwrap().visible_frames = 3;
         trace.observe_choice(choice, 4);
-        choice.decision = Decision::device(Reason::NativeBinding, crate::render::gpu::device::Error::Native(-17));
+        assert_eq!(trace.selections.len(), 1, "changing owner counters is not another selection");
+        assert!(trace.report(context()).unwrap().contains("\"visible_frames\":3"));
+        choice.execution.as_mut().unwrap().device_handle_generation += 1;
         trace.observe_choice(choice, 5);
-        assert_eq!(trace.selections.len(), 3);
+        assert_eq!(trace.selections.len(), 2, "a reused device address has a distinct owner generation");
+        choice.owner = "primary-cpu";
+        choice.execution = None;
+        choice.decision = Decision::new(Reason::PriorNativeFailure);
+        trace.observe_choice(choice, 6);
+        choice.decision = Decision::device(Reason::NativeBinding, crate::render::gpu::device::Error::Native(-17));
+        trace.observe_choice(choice, 7);
+        assert_eq!(trace.selections.len(), 4);
         assert!(trace.report(context()).unwrap().contains("\"provider_status\":-17"));
-        trace.observe_choice(choice, 4);
+        trace.observe_choice(choice, 6);
         assert!(trace.report(context()).is_err());
     }
 }

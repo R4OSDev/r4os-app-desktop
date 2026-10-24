@@ -150,6 +150,7 @@ fn scene<M: Memory>(
     owner: &mut Output<'_>,
     windows: &mut Set<M, Consumer>,
     primary: bool,
+    background: u32,
 ) {
     use crate::{
         hosted::runtime as hosted,
@@ -180,7 +181,7 @@ fn scene<M: Memory>(
     let hosted = hosted::State::new(&mut keys).unwrap();
     let mut run = [0; 128];
     let mut shell = State::new(&mut run).unwrap();
-    shell.config.background = 0x882244;
+    shell.config.background = background;
     let input = input::State::default();
     let tray = Mirror::new(a::ProgramProcessHandle {
         instance_id: 1,
@@ -269,7 +270,7 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         let mut windows = Set::<_, Consumer>::new(NativeMemory(&graphics));
         let mut owner = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
             .unwrap_or_else(|_| panic!("original device open"));
-        scene(&app, &mut owner, &mut windows, false);
+        scene(&app, &mut owner, &mut windows, false, 0x882244);
         assert!(unsafe { owner.start(&app, &resources, &EXPECTED, 1) });
         assert!(owner.state.is_none());
         MODE.store(1, Ordering::Release);
@@ -288,6 +289,28 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         assert!(owner.state.is_some());
         assert!(owner.frames_visible != 0);
         assert_eq!(fixture::visible(), [0x882244; 64]);
+        // A visible front still owns its scanout lease. The original swapchain
+        // nevertheless admits a distinct free back buffer for the next frame.
+        assert!(owner.busy());
+        assert!(owner.state.as_ref().unwrap().engine.pending());
+        assert!(!owner.state.as_ref().unwrap().engine.active());
+        let next_time = 1_000_000_000;
+        assert!(owner.available(&app, 2, next_time, 0));
+        scene(&app, &mut owner, &mut windows, false, 0x445566);
+        assert!(unsafe { owner.start(&app, &resources, &EXPECTED, next_time) });
+        until("second visible frame with retained front", || {
+            let progress = owner.poll(&app, &mut windows, &graphics, next_time);
+            assert_ne!(progress, Progress::Failed);
+            owner.frames_completed == 2
+        });
+        assert_eq!(fixture::visible(), [0x445566; 64]);
+        assert!(owner.busy(), "the visible front remains a real lifetime/close barrier");
+        let observation = owner.execution_observation();
+        assert_eq!(observation.completed_frames, 2);
+        assert_eq!(observation.visible_frames, 2);
+        assert!(observation.primitive_submit_jobs.unwrap() >= 2);
+        assert_eq!(observation.result, Some(1));
+        assert!(observation.visible_ns.is_some());
         until("first close", || {
             owner.close(&app, &mut windows, &graphics, 1)
         });
@@ -296,7 +319,7 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         // ordinary single-display capture without a connector transformation.
         let mut primary_frame = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
             .unwrap_or_else(|_| panic!("primary device"));
-        scene(&app, &mut primary_frame, &mut windows, true);
+        scene(&app, &mut primary_frame, &mut windows, true, 0x882244);
         assert!(unsafe { primary_frame.start(&app, &resources, &EXPECTED, 1) });
         until("primary visible", || {
             let progress = primary_frame.poll(&app, &mut windows, &graphics, 1);
@@ -315,8 +338,14 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         }
         assert!(route.output().is_some());
         assert!(route.admit(&app, &graphics, 1, 1, 0) == crate::outputs::primary::Admission::Cpu);
+        let mut manager = crate::outputs::manager::Manager::new().unwrap();
+        assert!(!manager.owns_output_route());
+        manager.slots[0].target = a::GfxOutputTarget { adapter_id: 1, connector_id: 2048,
+            device_generation: 2, connection_generation: 9, display_generation: 2, ..Default::default() };
+        assert!(!manager.active());
+        assert!(manager.owns_output_route(), "temporarily empty layout still owns its bound output");
         unsafe {
-            route.poll(&app, &graphics, &mut windows, true, 1);
+            route.poll(&app, &graphics, &mut windows, manager.owns_output_route(), 1);
         }
         assert!(route.output().is_none());
         unsafe {
@@ -330,7 +359,7 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         // A stop request and even completed-but-unjoined work own no free.
         let mut cancelled = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
             .unwrap_or_else(|_| panic!("cancel device"));
-        scene(&app, &mut cancelled, &mut windows, false);
+        scene(&app, &mut cancelled, &mut windows, false, 0x882244);
         ALLOW.store(false, Ordering::Release);
         assert!(unsafe { cancelled.start(&app, &resources, &EXPECTED, 1) });
         assert!(!cancelled.close(&app, &mut windows, &graphics, 1));
@@ -350,7 +379,7 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         // Native create refusal returns the same captured state to its owner.
         let mut refused = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
             .unwrap_or_else(|_| panic!("refusal device"));
-        scene(&app, &mut refused, &mut windows, false);
+        scene(&app, &mut refused, &mut windows, false, 0x882244);
         MODE.store(3, Ordering::Release);
         assert!(!unsafe { refused.start(&app, &resources, &EXPECTED, 1) });
         assert!(refused.state.is_some());

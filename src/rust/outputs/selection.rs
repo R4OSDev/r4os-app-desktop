@@ -74,16 +74,48 @@ impl From<a::GfxOutputTarget> for Target {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Execution {
+    pub device_address: u64,
+    pub device_handle_generation: u64,
+    pub backend_device_generation: u64,
+    pub reset_generation: u64,
+    pub completed_frames: u64,
+    pub visible_frames: u64,
+    pub render_submit_jobs: Option<u64>,
+    pub primitive_submit_jobs: Option<u64>,
+    pub completed_frame: u64,
+    pub result: Option<u32>,
+    pub phase: Option<u32>,
+    pub frame_generation: Option<u64>,
+    pub frame_serial: Option<u64>,
+    pub render_end_ns: Option<u64>,
+    pub copied_ns: Option<u64>,
+    pub visible_ns: Option<u64>,
+}
+impl Execution {
+    fn same_owner(self, other: Self) -> bool {
+        (self.device_address, self.device_handle_generation, self.backend_device_generation, self.reset_generation)
+            == (other.device_address, other.device_handle_generation, other.backend_device_generation, other.reset_generation)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Choice {
     pub target: Option<Target>, pub owner: &'static str, pub active: bool, pub decision: Decision,
+    pub execution: Option<Execution>,
 }
 impl Choice {
+    pub fn same_selection(self, other: Self) -> bool {
+        self.target == other.target && self.owner == other.owner && self.active == other.active && self.decision == other.decision
+            && match (self.execution, other.execution) {
+                (Some(a), Some(b)) => a.same_owner(b), (None, None) => true, _ => false,
+            }
+    }
     pub fn primary(admission: super::primary::Admission) -> Self {
         let (owner, active, reason) = match admission {
             super::primary::Admission::Cpu => ("primary-cpu", true, Reason::PrimaryCpu),
             super::primary::Admission::Native => ("primary-native-gr", true, Reason::PrimaryNative),
             super::primary::Admission::Pending => ("primary-pending", false, Reason::PrimaryPending),
         };
-        Self { target: None, owner, active, decision: Decision::new(reason) }
+        Self { target: None, owner, active, decision: Decision::new(reason), execution: None }
     }
 }

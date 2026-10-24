@@ -318,6 +318,23 @@ impl<'a> Output<'a> {
     pub fn external_receipts(&self) -> usize {
         self.receipts.external()
     }
+    pub fn execution_observation(&self) -> super::selection::Execution {
+        let time = |value: u64| (value != 0).then_some(value);
+        super::selection::Execution {
+            device_address: self.device_address, device_handle_generation: self.device_handle_generation,
+            backend_device_generation: self.device_generation, reset_generation: self.reset_generation,
+            completed_frames: self.frames_completed, visible_frames: self.frames_visible,
+            render_submit_jobs: self.state.as_ref().map(|s| s.engine.render_jobs),
+            primitive_submit_jobs: self.state.as_ref().map(|s| s.engine.primitive_jobs),
+            completed_frame: self.completed_frame,
+            result: self.completed_status.map(|s| s.result), phase: self.completed_status.map(|s| s.phase),
+            frame_generation: self.completed_status.map(|s| s.frame.generation),
+            frame_serial: self.completed_status.map(|s| s.frame.serial),
+            render_end_ns: self.completed_status.and_then(|s| time(s.render_end_ns)),
+            copied_ns: self.completed_status.and_then(|s| time(s.copied_ns)),
+            visible_ns: self.completed_status.and_then(|s| time(s.visible_ns)),
+        }
+    }
     pub fn clean_frame(
         &self,
         target: a::GfxOutputTarget,
@@ -435,7 +452,11 @@ impl<'a> Output<'a> {
         icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
         shapes: &mut impl Shapes,
     ) -> Result<Stats, CaptureError> {
-        if self.busy() {
+        // A retained visible front still makes lifetime teardown busy. It
+        // does not block capture into the distinct back buffer admitted by
+        // available(). The scene owner separately checks active GPU work and
+        // exact outstanding source reads before changing its capture.
+        if self.preparation.is_some() || self.awaiting_visible {
             return Err(CaptureError::State);
         }
         let state = self.state.as_deref_mut().ok_or(CaptureError::State)?;

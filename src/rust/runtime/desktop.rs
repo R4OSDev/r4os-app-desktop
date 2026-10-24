@@ -391,7 +391,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 env.app,
                 env.graphics,
                 &mut *self.windows,
-                self.outputs.active(),
+                self.outputs.owns_output_route(),
                 time.nanoseconds,
             )
         };
@@ -742,7 +742,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         trace.observe_choice(choice, generation);
                     }
                 } else {
-                    trace.observe_choice(outputs::selection::Choice::primary(self.primary_admission), generation);
+                    let mut choice = outputs::selection::Choice::primary(self.primary_admission);
+                    if self.primary_admission == outputs::primary::Admission::Native {
+                        choice.execution = self.primary.output().map(outputs::native::Output::execution_observation);
+                    }
+                    trace.observe_choice(choice, generation);
                 }
             }
         }

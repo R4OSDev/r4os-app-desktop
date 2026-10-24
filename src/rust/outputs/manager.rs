@@ -236,6 +236,13 @@ impl<'a> Manager<'a> {
     pub fn active(&self) -> bool {
         !self.layout.outputs().is_empty()
     }
+    /// Managed ownership includes a draining/temporarily empty layout. Do not
+    /// open a private native primary on that same known head while it retires.
+    pub fn owns_output_route(&self) -> bool {
+        self.active() || self.slots.iter().any(Slot::occupied)
+            || self.snapshot.as_ref().is_some_and(|s| s.entries().iter().any(|e|
+                e.active() && e.presentation.flags & a::display_presentation_info_native != 0))
+    }
     pub fn composition_choices(&self, region: Rect) -> impl Iterator<Item = super::selection::Choice> + '_ {
         self.slots.iter().filter(move |s| s.logical_index.is_some() && s.bounds().is_some_and(|bounds| bounds.intersects(region))).map(|s| {
             let active = !s.failed && !s.paused && !s.sleeping && !s.disabled && !s.reconfiguring
@@ -247,7 +254,8 @@ impl<'a> Manager<'a> {
                 Resource::Cpu(_) => "inactive-cpu",
                 Resource::Empty => "unavailable",
             };
-            super::selection::Choice { target: Some(s.target.into()), owner, active, decision: s.selection }
+            super::selection::Choice { target: Some(s.target.into()), owner, active, decision: s.selection,
+                execution: s.resource.gpu().map(native::Output::execution_observation) }
         })
     }
     pub fn software_only(&self, target: a::GfxOutputTarget) -> bool {

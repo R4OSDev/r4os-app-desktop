@@ -41,10 +41,20 @@ the real dimensions through its existing topology owner. This private layout
 does not create a scanout or acknowledge presentation. A temporarily held boot
 output therefore does not terminate the Desktop host.
 
-The SNES benchmark owner distinguishes actual software copy receipts from
-managed output context. Managed context reports geometry and published
-generations while keeping unmeasured copy, GPU completion and physical
-visibility fields unavailable. Qualification: `Docs/Diagnostics/SnesBenchmark.txt`.
+Explicit SNES reports bind their output source on the first actual observation
+and sample only the exact active child. Pending native image retirement keeps
+its owners and receives a distinct completion-pending reply; matching Spectra
+repeats only the idempotent final report within one bounded deadline. Mixed
+actual sources, geometry or generation changes and hard report failures remain
+errors. Managed reports retain context and leave per-window presentation/GPU/
+physical receipts unmeasured. Separate native-owner observations retain their
+actual completion status and timestamps, with unavailable values left null. See `Docs/Diagnostics/SnesBenchmark.txt` in the workspace.
+
+Native capture and lifetime retirement use distinct barriers. A retained visible
+front remains busy for teardown while an admitted free back buffer can capture
+the next scene. Preparation, pending visibility, active GPU work and outstanding
+source reads retain their original guards. Existing managed/retiring targets
+and known active native routes exclude private primary native reopening.
 
 ## Build and focused checks
 
@@ -126,11 +136,3 @@ follows from the local software and native-model checks.
 
 Original R4OS material uses Apache License 2.0. See `LICENSE`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md` and the historical source transfer in `PROVENANCE.txt`.
-
-Explicit SNES reports bind their output source on the first actual observation
-and sample only the exact active child. Pending native image retirement keeps
-its owners and receives a distinct completion-pending reply; matching Spectra
-repeats only the idempotent final report within one bounded deadline. Mixed
-actual sources, geometry or generation changes and hard report failures remain
-errors. Managed reports retain context and leave presentation/GPU/physical
-receipts unmeasured. See `Docs/Diagnostics/SnesBenchmark.txt` in the workspace.
