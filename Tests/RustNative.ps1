@@ -144,6 +144,7 @@ try {
         $source,$geometry,$contractSource,$graphicsSource,(Join-Path $libraries 'R4GFX/color_build.zig'),(Join-Path $libraries 'R4GFX/Contract/Generated/implementation_abi.zig'),(Join-Path $libraries 'R4STD/Bindings/Rust/src/helpers.rs'),(Join-Path $libraries 'R4STD/Contract/Generated/implementation_abi.zig'),
         (Join-Path $sdk 'Inventory/LanguageParity.json'),(Join-Path $sdk 'Tests/Conformance/BoundedGraphemeChecks.c'),$clockSource,
         (Join-Path $sdk 'r4os/gui_value_bridge.zig'),(Join-Path $sdk 'r4os/data_value_bridge.zig'),(Join-Path $sdk 'Tests/Fixtures/Icons/windows32.ico'),(Join-Path $sdk 'Shared/C/include/r4os/storage_helpers.h'))+$cSources+@((Join-Path $external 'blake3.h'),(Join-Path $external 'blake3_impl.h'))
+    $paths+=@('Application.ico','Terminal.ico'|ForEach-Object {Join-Path $workspaceRoot ('Repositories/Distribution/Injection/R4OS/Media/Icons/'+$_)})
     foreach($path in $paths|Sort-Object -Unique){$inputs[[IO.Path]::GetRelativePath($workspaceRoot,$path).Replace('\','/')]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
     $observations=@($desktopResult|Where-Object {$_ -is [string] -and $_.StartsWith('{"schema":"r4os.desktop-work"')}|ForEach-Object {ConvertFrom-Json -InputObject $_ -AsHashtable})
     $proof=[ordered]@{schema=1;scope='current Desktop Rust owner/original comparison; native only';passed=$true;common_geometry_cases=$caseCounts[0];desktop_cases=$desktopCases;sdk_precise_clock_cases=1;filter=$Filter;observations=$observations;

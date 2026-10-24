@@ -134,6 +134,7 @@ impl Frames {
         let mut canvas =
             CpuScene::new(&mut self.pixels, self.width, self.height).ok_or(Error::State)?;
         let mut fonts = SessionFonts::new(session, app);
+        self.icons.begin_frame(start);
         let mut loader = icons::Native { app };
         let mut icons = icons::Paint {
             cache: &mut self.icons,
@@ -258,6 +259,7 @@ impl Frames {
                 continue;
             }
             let mut fonts = SessionFonts::new(session, app);
+            self.icons.begin_frame(time);
             let mut loader = icons::Native { app };
             let mut icons = icons::Paint {
                 cache: &mut self.icons,
@@ -349,6 +351,7 @@ impl Frames {
             return false;
         }
         let mut fonts = SessionFonts::new(session, app);
+        self.icons.begin_frame(time);
         let mut loader = icons::Native { app };
         let mut icons = icons::Paint {
             cache: &mut self.icons,

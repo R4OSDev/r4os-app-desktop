@@ -539,8 +539,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 .files()
                 .poll_directory_changes(&mut self.directory)
                 .is_ok_and(|n| n > 0)
-            && self.shell.reload_folder(env, self.width, self.height)
         {
+            self.frames.icons.invalidate();
+            let _ = self.shell.reload_folder(env, self.width, self.height);
             self.full();
         }
         if self.shell.folder.layout_rewrite {

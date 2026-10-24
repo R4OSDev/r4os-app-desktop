@@ -8,6 +8,7 @@ use super::{
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use r4os_sdk::{App, data::raw as c, path::FilePath, storage::System};
+mod misses;
 pub const PATH_MAX: usize = 127;
 pub const SIZE_MAX: usize = 32;
 const CAPACITY: usize = 32;
@@ -67,6 +68,7 @@ pub struct Entry {
     size: u16,
     pixels: [u32; SIZE_MAX * SIZE_MAX],
     alpha: [u8; SIZE_MAX * SIZE_MAX],
+    loaded_ns: Option<u64>,
 }
 impl Entry {
     fn empty() -> Self {
@@ -77,16 +79,38 @@ impl Entry {
             size: 0,
             pixels: [0; 1024],
             alpha: [0; 1024],
+            loaded_ns: None,
         }
     }
     pub fn paint<F: Fonts>(&self, ui: &mut Ui<'_, '_, F>, x: i32, y: i32) -> Result<()> {
-        for py in 0..self.size as usize {
-            for px in 0..self.size as usize {
+        let Some(area) = super::scene::intersect(
+            ui.painter.clip(),
+            super::geometry::Rect::new(x, y, self.size as i32, self.size as i32),
+        ) else {
+            return Ok(());
+        };
+        let left = (area.x - x) as usize;
+        let right = left + area.w as usize;
+        for py in (area.y - y) as usize..(area.bottom() - y) as usize {
+            let mut px = left;
+            while px < right {
                 let n = py * SIZE_MAX + px;
-                // Original Desktop policy is binary visibility at alpha 128.
-                if self.alpha[n] >= 128 {
-                    ui.rect(x + px as i32, y + py as i32, 1, 1, self.pixels[n])?;
+                if self.alpha[n] < 128 {
+                    px += 1;
+                    continue;
                 }
+                let first = px;
+                let rgb = self.pixels[n] & 0xffffff;
+                px += 1;
+                while px < right
+                    && self.alpha[py * SIZE_MAX + px] >= 128
+                    && self.pixels[py * SIZE_MAX + px] & 0xffffff == rgb
+                {
+                    px += 1;
+                }
+                // Same opaque threshold/color as each original pixel. The
+                // existing recorder may additionally merge equal whole rows.
+                ui.rect(x + first as i32, y + py as i32, (px - first) as i32, 1, rgb)?;
             }
         }
         Ok(())
@@ -96,6 +120,8 @@ pub struct Cache {
     entries: Vec<Entry>,
     input: Vec<u8>,
     next: usize,
+    now_ns: Option<u64>,
+    misses: misses::Ledger,
 }
 impl Cache {
     pub fn new() -> Result<Self> {
@@ -113,7 +139,26 @@ impl Cache {
             entries,
             input,
             next: 0,
+            now_ns: None,
+            misses: misses::Ledger::default(),
         })
+    }
+    /// One copied current frame instant, supplied by the render owner.
+    pub fn begin_frame(&mut self, now_ns: u64) {
+        if self.now_ns.is_some_and(|prior| now_ns < prior) {
+            self.invalidate();
+        }
+        self.now_ns = Some(now_ns);
+    }
+    /// Existing folder/update hints discard only owned cache data. Buffer
+    /// reservations remain bounded and available for the next real paint.
+    pub fn invalidate(&mut self) {
+        for entry in &mut self.entries {
+            entry.used = false;
+            entry.loaded_ns = None;
+        }
+        self.next = 0;
+        self.misses.clear();
     }
     pub fn load(
         &mut self,
@@ -140,86 +185,112 @@ impl Cache {
         if let Some(index) = self.entries.iter().position(|e| {
             e.used && e.size == size && e.path_len == len && e.path[..len] == key[..len]
         }) {
-            return Some(&self.entries[index]);
+            let fresh = match (self.now_ns, self.entries[index].loaded_ns) {
+                (Some(now), Some(loaded)) => now >= loaded && now - loaded < 5_000_000_000,
+                (None, _) => true,
+                _ => false,
+            };
+            if fresh {
+                return Some(&self.entries[index]);
+            }
+            self.entries[index].used = false;
         }
-        let n = if container {
-            loader.container(path, &mut self.input)
-        } else {
-            loader.file(path, &mut self.input)
-        }?;
-        if n == 0 || n > self.input.len() {
+        if let Some(now) = self.now_ns
+            && self.misses.blocked(&key[..len], size, now)
+        {
             return None;
         }
-        let bytes = &self.input[..n];
-        let mut choice = MaybeUninit::uninit();
-        if !present(unsafe {
-            c::R4SdkDataIco_chooseBest(0, bytes.as_ptr(), n as u64, size, choice.as_mut_ptr())
-        }) {
-            return None;
-        }
-        let mut image = MaybeUninit::uninit();
-        if !present(unsafe {
-            c::R4SdkDataIco_parseBmpImage(
-                0,
-                bytes.as_ptr(),
-                n as u64,
-                choice.as_ptr(),
-                image.as_mut_ptr(),
-            )
-        }) {
-            return None;
-        }
-        let width = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_width(image.as_ptr()) })?;
-        let height = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_height(image.as_ptr()) })?;
-        if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
-            return None;
-        }
-        let index = if let Some(i) = self.entries.iter().position(|e| !e.used) {
-            i
-        } else {
-            let i = self.next;
-            self.next = (i + 1) % CAPACITY;
-            i
-        };
-        let e = &mut self.entries[index];
-        e.used = false;
-        e.path = key;
-        e.path_len = len;
-        e.size = size;
-        e.pixels.fill(0);
-        e.alpha.fill(0);
-        let w = (size as u64).min(width);
-        let h = (size as u64).min(height);
-        let ox = (size as u64 - w) / 2;
-        let oy = (size as u64 - h) / 2;
-        for py in 0..h {
-            for px in 0..w {
-                let mut pixel = MaybeUninit::uninit();
-                if !present(unsafe {
-                    c::R4SdkDataIco_pixelAt(
-                        0,
-                        bytes.as_ptr(),
-                        n as u64,
-                        image.as_ptr(),
-                        (px * width / w) as u32,
-                        (py * height / h) as u32,
-                        pixel.as_mut_ptr(),
-                    )
-                }) {
-                    continue;
-                }
-                if let (Some(rgb), Some(alpha)) = (
-                    scalar(unsafe { c::R4SdkDataIcoPixel_get_rgb(pixel.as_ptr()) }),
-                    scalar(unsafe { c::R4SdkDataIcoPixel_get_alpha(pixel.as_ptr()) }),
-                ) {
-                    let dst = ((oy + py) * SIZE_MAX as u64 + ox + px) as usize;
-                    e.pixels[dst] = rgb as u32;
-                    e.alpha[dst] = alpha as u8;
+        // Keep all original file/decode failures on one bounded admission path.
+        let loaded = (|| -> Option<usize> {
+            let n = if container {
+                loader.container(path, &mut self.input)
+            } else {
+                loader.file(path, &mut self.input)
+            }?;
+            if n == 0 || n > self.input.len() {
+                return None;
+            }
+            let bytes = &self.input[..n];
+            let mut choice = MaybeUninit::uninit();
+            if !present(unsafe {
+                c::R4SdkDataIco_chooseBest(0, bytes.as_ptr(), n as u64, size, choice.as_mut_ptr())
+            }) {
+                return None;
+            }
+            let mut image = MaybeUninit::uninit();
+            if !present(unsafe {
+                c::R4SdkDataIco_parseBmpImage(
+                    0,
+                    bytes.as_ptr(),
+                    n as u64,
+                    choice.as_ptr(),
+                    image.as_mut_ptr(),
+                )
+            }) {
+                return None;
+            }
+            let width = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_width(image.as_ptr()) })?;
+            let height = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_height(image.as_ptr()) })?;
+            if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+                return None;
+            }
+            let index = if let Some(i) = self.entries.iter().position(|e| !e.used) {
+                i
+            } else {
+                let i = self.next;
+                self.next = (i + 1) % CAPACITY;
+                i
+            };
+            let e = &mut self.entries[index];
+            e.used = false;
+            e.path = key;
+            e.path_len = len;
+            e.size = size;
+            e.pixels.fill(0);
+            e.alpha.fill(0);
+            let w = (size as u64).min(width);
+            let h = (size as u64).min(height);
+            let ox = (size as u64 - w) / 2;
+            let oy = (size as u64 - h) / 2;
+            for py in 0..h {
+                for px in 0..w {
+                    let mut pixel = MaybeUninit::uninit();
+                    if !present(unsafe {
+                        c::R4SdkDataIco_pixelAt(
+                            0,
+                            bytes.as_ptr(),
+                            n as u64,
+                            image.as_ptr(),
+                            (px * width / w) as u32,
+                            (py * height / h) as u32,
+                            pixel.as_mut_ptr(),
+                        )
+                    }) {
+                        continue;
+                    }
+                    if let (Some(rgb), Some(alpha)) = (
+                        scalar(unsafe { c::R4SdkDataIcoPixel_get_rgb(pixel.as_ptr()) }),
+                        scalar(unsafe { c::R4SdkDataIcoPixel_get_alpha(pixel.as_ptr()) }),
+                    ) {
+                        let dst = ((oy + py) * SIZE_MAX as u64 + ox + px) as usize;
+                        e.pixels[dst] = rgb as u32;
+                        e.alpha[dst] = alpha as u8;
+                    }
                 }
             }
+            e.used = true;
+            e.loaded_ns = self.now_ns;
+            Some(index)
+        })();
+        if let Some(index) = loaded {
+            self.misses.forget(&key[..len], size);
+            Some(&self.entries[index])
+        } else {
+            if let Some(now) = self.now_ns {
+                self.misses.remember(&key[..len], size, now);
+            }
+            None
         }
-        e.used = true;
-        Some(e)
     }
 }
 fn present(v: c::R4SdkDataSlot) -> bool {
@@ -244,6 +315,13 @@ impl<L: Loader> Paint<'_, L> {
             desktop_items::LaunchKind,
             icon_source::{self, Source, Stage},
         };
+        if !ui
+            .painter
+            .clip()
+            .intersects(super::geometry::Rect::new(x, y, 32, 32))
+        {
+            return Ok(true);
+        }
         let source = icon_source::classify(item.icon());
         let plan = icon_source::plan(source, item.launch_kind == LaunchKind::Program);
         for stage in plan.stages() {
@@ -282,6 +360,13 @@ impl<L: Loader> crate::shell::taskbar_view::Icons for Paint<'_, L> {
         x: i32,
         y: i32,
     ) -> Result<bool> {
+        if !ui
+            .painter
+            .clip()
+            .intersects(super::geometry::Rect::new(x, y, 16, 16))
+        {
+            return Ok(true);
+        }
         match self.cache.load(self.loader, path, 16, false) {
             Some(e) => {
                 e.paint(ui, x, y)?;
@@ -347,5 +432,367 @@ mod tests {
         assert!(cache.load(&mut source, b"C:\\X", 33, false).is_none());
         assert!(cache.load(&mut source, &[b'x'; 123], 16, true).is_none());
         assert_eq!(source.reads, n);
+    }
+    struct NoFonts;
+    impl Fonts for NoFonts {
+        fn revision(&mut self) -> u32 {
+            0
+        }
+        fn has_glyph_row(&self) -> bool {
+            false
+        }
+        fn info(&mut self, _: u32, _: &mut r4os_contract::GuiFontInfo) -> i32 {
+            -1
+        }
+        fn bitmap(&mut self, _: u32, _: u32, _: &mut r4os_contract::GuiGlyphBitmap) -> i32 {
+            -1
+        }
+        fn row(&mut self, _: u32, _: u32, _: u32) -> u64 {
+            0
+        }
+    }
+    struct AssetSource {
+        bytes: &'static [u8],
+        reads: usize,
+    }
+    impl Loader for AssetSource {
+        fn file(&mut self, _: &[u8], out: &mut [u8]) -> Option<usize> {
+            self.reads += 1;
+            out[..self.bytes.len()].copy_from_slice(self.bytes);
+            Some(self.bytes.len())
+        }
+        fn container(&mut self, path: &[u8], out: &mut [u8]) -> Option<usize> {
+            self.file(path, out)
+        }
+    }
+    #[test]
+    fn d091_current_icon_source_reads_and_real_asset_paint_work() {
+        use crate::render::{
+            geometry::Rect, painter::Painter, primitive_frame::Frame, scene::CpuScene,
+            text::cache::Cache as FontCache,
+        };
+        let mut miss_cache = Cache::new().unwrap();
+        let mut bad = Source {
+            reads: 0,
+            bad: true,
+        };
+        for i in 0..32 {
+            miss_cache.begin_frame(1_000_000_000 + i * 1_000_000);
+            assert!(
+                miss_cache
+                    .load(&mut bad, b"C:\\BAD.ICO", 32, false)
+                    .is_none()
+            );
+        }
+        let mut warm_cache = Cache::new().unwrap();
+        let mut good = Source {
+            reads: 0,
+            bad: false,
+        };
+        for i in 0..32 {
+            warm_cache.begin_frame(2_000_000_000 + i * 1_000_000);
+            assert!(
+                warm_cache
+                    .load(&mut good, b"C:\\GOOD.ICO", 32, false)
+                    .is_some()
+            );
+        }
+        println!(
+            "{{\"schema\":\"r4os.desktop-work\",\"case\":\"d091-icon-io\",\"repaints\":32,\"bad_source_reads\":{},\"warm_good_reads\":{}}}",
+            bad.reads, good.reads
+        );
+        for (name, bytes) in [
+            (
+                "Application",
+                include_bytes!(
+                    "../../../../../Distribution/Injection/R4OS/Media/Icons/Application.ico"
+                )
+                .as_slice(),
+            ),
+            (
+                "Terminal",
+                include_bytes!(
+                    "../../../../../Distribution/Injection/R4OS/Media/Icons/Terminal.ico"
+                )
+                .as_slice(),
+            ),
+        ] {
+            let mut cache = Cache::new().unwrap();
+            let mut source = AssetSource { bytes, reads: 0 };
+            cache.begin_frame(3_000_000_000);
+            let icon = cache
+                .load(&mut source, b"C:\\ACTUAL.ICO", 32, false)
+                .unwrap();
+            let bounds = Rect::new(0, 0, 64, 64);
+            let clip = Rect::new(9, 11, 27, 26);
+            let mut pixels = alloc::vec![0x123456u32; 64 * 64];
+            let mut expected = pixels.clone();
+            for y in 0..32usize {
+                for x in 0..32usize {
+                    let (gx, gy) = (7 + x as i32, 9 + y as i32);
+                    if icon.alpha[y * 32 + x] >= 128 && clip.contains(gx, gy) {
+                        expected[gy as usize * 64 + gx as usize] =
+                            icon.pixels[y * 32 + x] & 0xffffff;
+                    }
+                }
+            }
+            let mut canvas = CpuScene::new(&mut pixels, 64, 64).unwrap();
+            let mut frame = Frame::new().unwrap();
+            frame.start(1).unwrap();
+            frame.begin(0, bounds).unwrap();
+            let mut fonts = NoFonts;
+            let mut font_cache = FontCache::new().unwrap();
+            let mut ui = Ui::new(
+                Painter::recorded(Some(&mut canvas), &mut frame, bounds, clip),
+                &mut font_cache,
+                &mut fonts,
+            );
+            icon.paint(&mut ui, 7, 9).unwrap();
+            frame.end().unwrap();
+            assert_eq!(
+                pixels, expected,
+                "original per-pixel threshold/colors/clip, real asset {name}"
+            );
+            let commands = frame.commands().len();
+            let requests = commands as u64 + frame.merged_fills;
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"case\":\"d091-icon-paint\",\"asset\":\"{name}\",\"paint_requests\":{requests},\"primitive_commands\":{commands}}}"
+            );
+        }
+    }
+
+    struct ChangingSource {
+        kind: u8,
+        reads: usize,
+    }
+    impl Loader for ChangingSource {
+        fn file(&mut self, _: &[u8], out: &mut [u8]) -> Option<usize> {
+            self.reads += 1;
+            let bytes: &[u8] = match self.kind {
+                0 => return None,
+                1 => b"bad",
+                2 => include_bytes!(
+                    "../../../../../Distribution/Injection/R4OS/Media/Icons/Application.ico"
+                ),
+                _ => include_bytes!(
+                    "../../../../../Distribution/Injection/R4OS/Media/Icons/Terminal.ico"
+                ),
+            };
+            out[..bytes.len()].copy_from_slice(bytes);
+            Some(bytes.len())
+        }
+        fn container(&mut self, path: &[u8], out: &mut [u8]) -> Option<usize> {
+            self.file(path, out)
+        }
+    }
+    #[test]
+    fn d091_retry_arrival_replacement_invalidation_clock_and_independent_budgets() {
+        let mut cache = Cache::new().unwrap();
+        let mut source = ChangingSource { kind: 0, reads: 0 };
+        cache.begin_frame(1_000_000_000);
+        assert!(
+            cache
+                .load(&mut source, b"C:\\LATE.ICO", 32, false)
+                .is_none()
+        );
+        source.kind = 2;
+        cache.begin_frame(1_100_000_000);
+        assert!(
+            cache
+                .load(&mut source, b"C:\\LATE.ICO", 32, false)
+                .is_none()
+        );
+        assert_eq!(source.reads, 1, "no repeat until exact bounded retry");
+        cache.begin_frame(2_000_000_000);
+        let application = cache
+            .load(&mut source, b"C:\\LATE.ICO", 32, false)
+            .unwrap()
+            .pixels;
+        assert_eq!(source.reads, 2);
+        source.kind = 3;
+        cache.begin_frame(2_100_000_000);
+        assert_eq!(
+            cache
+                .load(&mut source, b"C:\\LATE.ICO", 32, false)
+                .unwrap()
+                .pixels,
+            application
+        );
+        assert_eq!(source.reads, 2);
+        cache.begin_frame(7_000_000_000);
+        let terminal = cache
+            .load(&mut source, b"C:\\LATE.ICO", 32, false)
+            .unwrap()
+            .pixels;
+        assert_ne!(
+            terminal, application,
+            "valid same-path replacement is revalidated"
+        );
+        cache.invalidate();
+        source.kind = 2;
+        assert_eq!(
+            cache
+                .load(&mut source, b"C:\\LATE.ICO", 32, false)
+                .unwrap()
+                .pixels,
+            application
+        );
+        cache.begin_frame(6_000_000_000);
+        source.kind = 3;
+        assert_eq!(
+            cache
+                .load(&mut source, b"C:\\LATE.ICO", 32, false)
+                .unwrap()
+                .pixels,
+            terminal
+        );
+        assert_eq!(
+            source.reads, 5,
+            "explicit hint and backwards clock admit fresh source"
+        );
+        source.kind = 1;
+        cache.begin_frame(10_000_000_000);
+        assert!(
+            cache
+                .load(&mut source, b"C:\\BROKEN.ICO", 16, false)
+                .is_none()
+        );
+        source.kind = 2;
+        cache.begin_frame(10_900_000_000);
+        assert!(
+            cache
+                .load(&mut source, b"C:\\BROKEN.ICO", 16, false)
+                .is_none()
+        );
+        cache.begin_frame(11_000_000_000);
+        assert!(
+            cache
+                .load(&mut source, b"C:\\BROKEN.ICO", 16, false)
+                .is_some()
+        );
+        let mut cache = Cache::new().unwrap();
+        source.kind = 2;
+        cache.begin_frame(100_000_000_000);
+        for i in 0..32 {
+            let path = alloc::format!("C:\\P{i}.ICO");
+            assert!(
+                cache
+                    .load(&mut source, path.as_bytes(), 16, false)
+                    .is_some()
+            );
+        }
+        let positive = source.reads;
+        source.kind = 0;
+        for i in 0..80 {
+            let path = alloc::format!("C:\\M{i}.ICO");
+            assert!(
+                cache
+                    .load(&mut source, path.as_bytes(), 16, false)
+                    .is_none()
+            );
+            assert!(cache.misses.len() <= CAPACITY);
+        }
+        assert_eq!(cache.entries.iter().filter(|e| e.used).count(), 32);
+        for i in 0..32 {
+            let path = alloc::format!("C:\\P{i}.ICO");
+            assert!(
+                cache
+                    .load(&mut source, path.as_bytes(), 16, false)
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            source.reads,
+            positive + 80,
+            "failed keys cannot evict positive reservations"
+        );
+        let before = source.reads;
+        assert!(cache.load(&mut source, b"C:\\M0.ICO", 16, false).is_none());
+        assert_eq!(source.reads, before + 1, "old bounded miss can be evicted");
+        assert!(cache.load(&mut source, b"C:\\M79.ICO", 32, false).is_none());
+        assert!(cache.load(&mut source, b"C:\\M79.ICO", 16, true).is_none());
+        assert_eq!(
+            source.reads,
+            before + 3,
+            "size and container identities stay separate"
+        );
+    }
+    #[test]
+    fn d091_binary_alpha_threshold_partial_clip_and_invisible_source_cull() {
+        use crate::render::{
+            geometry::Rect, painter::Painter, scene::CpuScene, text::cache::Cache as FontCache,
+        };
+        let bounds = Rect::new(0, 0, 48, 48);
+        let clip = Rect::new(2, 3, 29, 28);
+        for size in [16u16, 32] {
+            for (x, y) in [(-3, 7), (7, -4)] {
+                let mut entry = Entry::empty();
+                entry.size = size;
+                for py in 0..size as usize {
+                    for px in 0..size as usize {
+                        let at = py * SIZE_MAX + px;
+                        entry.pixels[at] = if (px / 4 + py / 4) % 2 == 0 {
+                            0x80a0c0
+                        } else {
+                            0x030507
+                        };
+                        entry.alpha[at] = match (px + py) % 5 {
+                            0 => 127,
+                            1 => 128,
+                            _ => 255,
+                        };
+                    }
+                }
+                let mut pixels = alloc::vec![0x123456; 48 * 48];
+                let mut expected = pixels.clone();
+                for py in 0..size as usize {
+                    for px in 0..size as usize {
+                        let (gx, gy) = (x + px as i32, y + py as i32);
+                        if bounds.contains(gx, gy)
+                            && clip.contains(gx, gy)
+                            && entry.alpha[py * SIZE_MAX + px] >= 128
+                        {
+                            expected[gy as usize * 48 + gx as usize] =
+                                entry.pixels[py * SIZE_MAX + px];
+                        }
+                    }
+                }
+                let mut canvas = CpuScene::new(&mut pixels, 48, 48).unwrap();
+                canvas.set_paint_clip(clip);
+                let mut fonts = NoFonts;
+                let mut cache = FontCache::new().unwrap();
+                let mut ui = Ui::new(Painter::cpu(&mut canvas), &mut cache, &mut fonts);
+                entry.paint(&mut ui, x, y).unwrap();
+                assert_eq!(pixels, expected);
+            }
+        }
+        let mut pixels = alloc::vec![0x123456; 48 * 48];
+        let mut canvas = CpuScene::new(&mut pixels, 48, 48).unwrap();
+        let mut fonts = NoFonts;
+        let mut font_cache = FontCache::new().unwrap();
+        let mut ui = Ui::new(Painter::cpu(&mut canvas), &mut font_cache, &mut fonts);
+        let mut cache = Cache::new().unwrap();
+        cache.begin_frame(1);
+        let mut source = ChangingSource { kind: 0, reads: 0 };
+        let mut paint = Paint {
+            cache: &mut cache,
+            loader: &mut source,
+        };
+        let item = crate::shell::desktop_items::Item::new(
+            b"C:\\MISSING.R4X",
+            crate::shell::desktop_items::FsKind::File,
+        );
+        assert!(paint.desktop(&mut ui, &item, 100, 100).unwrap());
+        assert!(
+            crate::shell::taskbar_view::Icons::quick(
+                &mut paint,
+                &mut ui,
+                b"C:\\MISSING.ICO",
+                100,
+                100
+            )
+            .unwrap()
+        );
+        assert_eq!(source.reads, 0, "unaffected icon source must not be read");
     }
 }
