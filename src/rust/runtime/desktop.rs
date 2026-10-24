@@ -642,7 +642,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         let mut info = a::DisplayCursorInfo::default();
         let mut native = Native(env.graphics);
         let wanted = !self.hosted.terminal_mode
-            && native.info(&mut info) == 0
+            && native.info(&mut info) == a::gfx_output_ok
             && self
                 .outputs
                 .cursor_target(info, self.width as u32, self.height as u32)
