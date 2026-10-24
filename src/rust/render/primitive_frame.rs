@@ -191,6 +191,27 @@ impl Frame {
         if self.commands.len() == CAPACITY {
             return Err(Error::Capacity);
         }
+        // Join a nearby compatible run only across disjoint destination
+        // footprints. Alpha operations that touch the same pixels keep their
+        // original order; source rectangles and sampling grids stay intact.
+        if let Some(footprint) = intersect(value.target, value.scissor) {
+            let start = self.commands.len().saturating_sub(16);
+            for index in (start..self.commands.len()).rev() {
+                let prior = self.commands[index];
+                if prior.layer != value.layer {
+                    break;
+                }
+                if prior.texture == value.texture && prior.over == value.over {
+                    self.commands.insert(index + 1, value);
+                    return Ok(());
+                }
+                if intersect(prior.target, prior.scissor)
+                    .is_some_and(|area| intersect(area, footprint).is_some())
+                {
+                    break;
+                }
+            }
+        }
         self.commands.push(value);
         Ok(())
     }

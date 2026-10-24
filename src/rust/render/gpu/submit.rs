@@ -8,7 +8,13 @@ impl Engine {
         cache: &Cache,
         recording: Option<&Frame>,
     ) -> Result<()> {
-        let dependency = self.jobs.dependency()?.first().copied();
+        // Staging is reused only after its real completion. Asset/layer
+        // uploads precede all readers and need no unrelated producer fence.
+        let dependency = if matches!(self.phase, Phase::AssetUpload | Phase::Upload) {
+            None
+        } else {
+            self.jobs.dependency()?.first().copied()
+        };
         let dependencies = dependency.as_ref().map_or(&[][..], core::slice::from_ref);
         let pointer = if dependencies.is_empty() {
             0
@@ -99,16 +105,35 @@ impl Engine {
             }
             Phase::Primitives => {
                 let frame = recording.ok_or(Error::State)?;
-                while self.next_primitive < frame.commands().len()
-                    && self.reuse_layers[frame.commands()[self.next_primitive].layer as usize]
-                {
+                while self.next_primitive < frame.commands().len() {
+                    let command = frame.commands()[self.next_primitive];
+                    if !self.reuse_layers[command.layer as usize]
+                        && self.primitive_clip(command).is_some()
+                    {
+                        break;
+                    }
                     self.next_primitive += 1;
                 }
                 if self.next_primitive == frame.commands().len() {
+                    // Join physically completed layer writers before linear
+                    // composition. Independent layer chains never depend on
+                    // the last writer of a different target.
+                    if !self.jobs.physically_retired() {
+                        return Err(Error::Busy);
+                    }
+                    self.jobs.last = None;
+                    self.jobs.depth = 0;
                     self.phase = Phase::LinearClear;
                     return Ok(());
                 }
                 let first = frame.commands()[self.next_primitive];
+                let dependency = self.jobs.layer_dependency(first.layer as usize)?;
+                let dependencies = dependency.as_ref().map_or(&[][..], core::slice::from_ref);
+                let pointer = if dependencies.is_empty() {
+                    0
+                } else {
+                    dependencies.as_ptr() as u64
+                };
                 let mut requests =
                     [g::R4GfxRenderRequest::default(); g::render_list_capacity as usize];
                 let mut grids = [g::R4GfxLogicalGrid::default(); g::render_list_capacity as usize];
@@ -127,6 +152,9 @@ impl Engine {
                     {
                         break;
                     }
+                    let Some(clip) = self.primitive_clip(command) else {
+                        break;
+                    };
                     grids[count] = logical_grid(command.grid);
                     mapped |= command.grid.enabled != 0;
                     requests[count] = g::R4GfxRenderRequest {
@@ -150,7 +178,7 @@ impl Engine {
                         },
                         source_rect: rect(command.source),
                         target_rect: rect(command.target),
-                        scissor: rect(command.scissor),
+                        scissor: rect(clip),
                         color: command.color,
                         opacity: 255,
                         transfer: 0,
@@ -196,6 +224,7 @@ impl Engine {
                 };
                 accepted(rc)?;
                 self.jobs.track(s, slot, handle, None, 0, 0)?;
+                self.jobs.mark_layer_write(first.layer as usize, slot)?;
                 self.next_primitive += count;
                 self.render_jobs = self.render_jobs.saturating_add(1);
                 self.primitive_jobs = self.primitive_jobs.saturating_add(1);
@@ -483,6 +512,11 @@ impl Engine {
             _ => return Err(Error::State),
         }
         Ok(())
+    }
+    fn primitive_clip(&self, command: Command) -> Option<Rect> {
+        let clip = intersect(command.target, command.scissor)?;
+        self.redraw_regions[command.layer as usize]
+            .map_or(Some(clip), |dirty| intersect(clip, dirty))
     }
     fn draw_external(
         &mut self,

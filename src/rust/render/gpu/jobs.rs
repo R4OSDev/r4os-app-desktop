@@ -32,6 +32,7 @@ pub struct Jobs {
     pub stage: Option<usize>,
     pub depth: usize,
     external: [Option<usize>; CAPACITY],
+    layer_writes: [Option<usize>; CAPACITY],
     pub retirement_epoch: u64,
     pub uploaded_bytes: u64,
 }
@@ -48,6 +49,7 @@ impl Jobs {
             stage: None,
             depth: 0,
             external: [None; CAPACITY],
+            layer_writes: [None; CAPACITY],
             retirement_epoch: 0,
             uploaded_bytes: 0,
         })
@@ -84,6 +86,26 @@ impl Jobs {
                 Ok(core::slice::from_ref(&job.fence))
             }
         }
+    }
+    pub fn layer_dependency(&self, layer: usize) -> Result<Option<g::R4GfxCopyFence>> {
+        let index = *self.layer_writes.get(layer).ok_or(Error::State)?;
+        match index {
+            None => Ok(None),
+            Some(index) => {
+                let job = self.job(index).ok_or(Error::State)?;
+                if !job.fence_known {
+                    return Err(Error::Graphics);
+                }
+                Ok(Some(job.fence))
+            }
+        }
+    }
+    pub fn mark_layer_write(&mut self, layer: usize, index: usize) -> Result<()> {
+        if self.job(index).is_none() {
+            return Err(Error::State);
+        }
+        *self.layer_writes.get_mut(layer).ok_or(Error::State)? = Some(index);
+        Ok(())
     }
     pub fn track(
         &mut self,
@@ -189,6 +211,12 @@ impl Jobs {
                 continue;
             }
             accepted(rc)?;
+            // Clear the exact writer before its slot can name another job.
+            for writer in &mut self.layer_writes {
+                if *writer == Some(index) {
+                    *writer = None;
+                }
+            }
             self.slots[index] = None;
             self.retirement_epoch = self.retirement_epoch.wrapping_add(1);
         }

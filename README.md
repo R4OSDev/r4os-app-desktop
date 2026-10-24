@@ -56,6 +56,28 @@ the next scene. Preparation, pending visibility, active GPU work and outstanding
 source reads retain their original guards. Existing managed/retiring targets
 and known active native routes exclude private primary native reopening.
 
+## Incremental primitive work (0.87.8)
+
+The native recorder joins compatible commands across at most sixteen disjoint
+write footprints within one layer. Operations that overlap retain their order,
+including alpha; source coordinates and sampling grids stay unchanged. The
+original sixteen-command provider limit and resource/pipeline grouping remain.
+
+For an equal-length ordered layer capture on the same resident image, changed
+old/new commands and texture generations define a conservative local redraw
+rectangle. The complete layer is replayed inside that rectangle, including its
+original background/clear. Unchanged layers and texture uploads remain reusable.
+A changed command count can use the existing output damage contract on the
+same retained image; without that contract it requires the complete layer.
+Replaced images and missing snapshots always require the complete layer. Cancellation invalidates the snapshot before another capture.
+
+Staging waits for real completion before reuse. Primitive writes depend on the
+previous writer of their exact layer instead of another layer's last job. The
+linear compositor starts after all admitted primitive jobs physically retire;
+its own ordered working-target writes, external producer dependencies, consumer
+receipts, deadlines and source read leases retain their existing barriers.
+This reduces dependency bookkeeping without asserting parallel GR execution.
+
 ## Build and focused checks
 
 Run `./Build.sh` on Linux or `Build.bat` on Windows. The thin launchers share

@@ -343,11 +343,12 @@ impl Engine {
                 return Err(Error::Limit);
             }
             if self.snapshot.capacity() < frame.commands().len() {
-                let mut replacement = Vec::new();
-                replacement
-                    .try_reserve_exact(frame.commands().len())
+                // Growing the next capture must preserve the last complete
+                // snapshot: a GUI delta can add commands while its retained
+                // image remains reusable outside the declared damage.
+                self.snapshot
+                    .try_reserve_exact(frame.commands().len() - self.snapshot.len())
                     .map_err(|_| Error::Limit)?;
-                self.snapshot = replacement;
             }
             for i in 0..primitive_assets::TEXTURE_CAPACITY {
                 let texture = frame.assets.texture(i);
@@ -373,6 +374,7 @@ impl Engine {
     }
     pub(super) fn plan_reuse(&mut self, cache: &Cache, recording: Option<&Frame>) {
         self.reuse_layers = [false; layers::CAPACITY];
+        self.redraw_regions = [None; layers::CAPACITY];
         let Some(frame) = recording else {
             return;
         };
@@ -391,15 +393,15 @@ impl Engine {
             }
             let mut previous = self.snapshot.iter().filter(|c| c.layer as usize == i);
             let mut matched = 0;
-            let mut identical = true;
+            let mut comparable = true;
+            let mut changed = Rect::ZERO;
             for command in frame.commands().iter().filter(|c| c.layer as usize == i) {
                 let Some(old) = previous.next() else {
-                    identical = false;
+                    comparable = false;
                     break;
                 };
                 if !same_command(command, old) {
-                    identical = false;
-                    break;
+                    changed = changed.merged(footprint(command)).merged(footprint(old));
                 }
                 if let Some(texture) = command.texture {
                     let generation = frame.assets.texture(texture as usize).generation;
@@ -407,13 +409,35 @@ impl Engine {
                         || generation != self.snapshot_assets[texture as usize]
                         || generation != self.resources.assets[texture as usize].generation
                     {
-                        identical = false;
-                        break;
+                        changed = changed.merged(footprint(command));
                     }
                 }
                 matched += 1;
             }
-            self.reuse_layers[i] = identical && matched != 0 && previous.next().is_none();
+            if comparable && matched != 0 && previous.next().is_none() {
+                // Replay the complete ordered layer inside the conservative
+                // old/new changed footprint. Its original clear/background
+                // commands restore removed pixels too; unchanged assets and
+                // pixels outside this region remain resident.
+                self.reuse_layers[i] = changed.is_empty();
+                self.redraw_regions[i] = (!changed.is_empty()).then_some(changed);
+            } else if matched != 0 {
+                // GUI delta chains can change command count. The existing
+                // output damage contract still bounds all changed pixels on
+                // this retained image; newly allocated images never enter.
+                if let Some(damage) = self.capture_damage {
+                    if let Some(area) = intersect(damage, entry.bounds) {
+                        self.redraw_regions[i] = Some(Rect::new(
+                            area.x - entry.bounds.x,
+                            area.y - entry.bounds.y,
+                            area.w,
+                            area.h,
+                        ));
+                    } else {
+                        self.reuse_layers[i] = true;
+                    }
+                }
+            }
         }
     }
     pub fn reuse_capture(
@@ -504,6 +528,9 @@ fn same_external(image: &Image, source: External) -> bool {
         && image
             .external_color
             .is_some_and(|v| color::same_description(v, source.color))
+}
+fn footprint(command: &Command) -> Rect {
+    intersect(command.target, command.scissor).unwrap_or(Rect::ZERO)
 }
 fn same_command(x: &Command, y: &Command) -> bool {
     let grid = |v: a::GfxSampleGrid| {

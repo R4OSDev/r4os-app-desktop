@@ -320,6 +320,116 @@ fn original_upload_partial_cancel_alpha_and_primitive_reuse_oracles() {
 }
 
 #[test]
+fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
+    with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut engine = Engine::new().unwrap();
+        let mut frame = Frame::new().unwrap();
+        frame.set_mirror(false).unwrap();
+        let white = [0x80ffffff];
+        for (turn, color) in [0xff0000, 0x00ff00, 0x0000ff].into_iter().enumerate() {
+            cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+            cache
+                .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
+                    p.fill(FULL, 0)?;
+                    for x in [1, 3] {
+                        p.picture(Picture {
+                            view: View::new(
+                                Format::Argb,
+                                1,
+                                1,
+                                4,
+                                PixelBytes::from_words(&white).bytes(),
+                            ),
+                            viewport: Rect::new(x, 1, 1, 1),
+                            clip: FULL,
+                            source_x: 0,
+                            source_y: 0,
+                            guest_w: 1,
+                            guest_h: 1,
+                        })?;
+                        if x == 1 {
+                            p.fill(Rect::new(6, 6, 1, 1), color)?;
+                        }
+                    }
+                    if turn == 2 {
+                        p.fill(Rect::new(5, 5, 1, 1), 0xffffff)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            cache.finish(Some(&frame)).unwrap();
+            engine
+                .composition_damage(
+                    geometry::topology::Viewport {
+                        pixel_w: 8,
+                        pixel_h: 8,
+                        scale: 120,
+                        ..Default::default()
+                    },
+                    Some(match turn {
+                        0 => FULL,
+                        1 => Rect::new(6, 6, 1, 1),
+                        _ => Rect::new(5, 5, 2, 2),
+                    }),
+                )
+                .unwrap();
+            let draws = engine.primitive_draws;
+            let jobs = engine.primitive_jobs;
+            let uploads = engine.jobs.uploaded_bytes;
+            begin(app, device, &mut engine, &cache, Some(&frame));
+            if turn == 2 {
+                assert_eq!(engine.capture_damage, Some(Rect::new(5, 5, 2, 2)));
+                let layer = frame.commands()[0].layer as usize;
+                assert_eq!(
+                    engine.redraw_regions[layer],
+                    Some(Rect::new(5, 5, 2, 2)),
+                    "retained image, command-count change and original output damage"
+                );
+            }
+            pump(
+                app,
+                device,
+                &mut engine,
+                &mut cache,
+                Some(&mut frame),
+                Progress::Copied,
+            );
+            let mut expected = [0; 64];
+            // These two images blend into an opaque ARGB layer before its
+            // sRGB decode, unlike the separate linear-alpha layer oracle.
+            expected[9] = 0x808080;
+            expected[11] = 0x808080;
+            expected[54] = color;
+            if turn == 2 {
+                expected[45] = 0xffffff;
+            }
+            assert_eq!(visible(), expected, "ordered alpha and unchanged pixels");
+            if turn == 0 {
+                assert_eq!(engine.primitive_draws - draws, 4);
+                assert_eq!(
+                    engine.primitive_jobs - jobs,
+                    2,
+                    "disjoint fill can cross the first alpha image"
+                );
+            } else {
+                assert_eq!(
+                    engine.primitive_draws - draws,
+                    if turn == 1 { 2 } else { 3 },
+                    "complete ordered replay only inside actual changed pixels"
+                );
+                assert_eq!(
+                    engine.jobs.uploaded_bytes, uploads,
+                    "unchanged alpha texture stays resident"
+                );
+            }
+        }
+        let s = device.bind(app).unwrap();
+        engine.close(&s).unwrap();
+    });
+}
+
+#[test]
 fn original_dependency_pool_and_64_step_250us_admission_oracles() {
     with(|app, device| {
         let mut cache = Cache::new(1024 * 1024).unwrap();
