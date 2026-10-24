@@ -180,3 +180,51 @@ fn original_whole_1080p_software_output_hashes_at_both_client_sizes() {
         }
     }
 }
+
+#[test]
+fn d089_changing_opaque_rows_keep_pixels_generations_and_warm_budget() {
+    // Use the current real capture/compositor, not a test-side copy algorithm.
+    // The explicit local work invocation uses checked O3 integer loops. The
+    // ordinary correctness run keeps only two changed frames.
+    let measured = std::env::var_os("R4OS_DESKTOP_ROW_WORK").is_some();
+    let (batches, frames) = if measured { (5, 12) } else { (1, 2) };
+    let bounds = Rect::new(-17, 23, 742, 650);
+    let count = (bounds.w * bounds.h) as usize;
+    let mut owner = Owner::new(16 * 1024 * 1024).unwrap();
+    let mut pixels = vec![0x1357_2468u32; count];
+    let mut sums = Vec::new();
+    let mut serial = 0u32;
+    let mut reserved = None;
+    let mut prior_generation = 0;
+    let mut before_bytes = 0;
+    for frame in 0..2 + batches * frames {
+        serial += 1;
+        let color = (0x24_68_acu32 ^ serial.wrapping_mul(0x01_03_07)) & 0xff_ffff;
+        owner.begin(bounds).unwrap();
+        owner.cache.paint(1, bounds, bounds, None, None, |p| p.fill(bounds, color)).unwrap();
+        let mut scene = CpuScene::output(&mut pixels, bounds).unwrap();
+        let started = std::time::Instant::now();
+        let stats = owner.finish(&OriginalColors, &mut scene).unwrap();
+        let elapsed = started.elapsed().as_nanos();
+        assert_eq!(stats.direct_pixels, count as u64);
+        assert!(pixels.iter().all(|v| *v == color), "whole target incl zero XRGB padding");
+        let generation = owner.cache.entries()[0].generation;
+        assert_eq!(generation, prior_generation + 1);
+        prior_generation = generation;
+        if frame == 1 {
+            reserved = Some(owner.cache.reserved());
+            before_bytes = owner.cache.changed_bytes;
+        }
+        if frame >= 2 {
+            assert_eq!(reserved, Some(owner.cache.reserved()));
+            let index = (frame - 2) / frames;
+            if sums.len() == index { sums.push(0u128); }
+            sums[index] += elapsed;
+        }
+    }
+    let changed = owner.cache.changed_bytes - before_bytes;
+    assert_eq!(changed, (count * 4 * batches * frames) as u64);
+    if measured {
+        println!("{{\"schema\":\"r4os.desktop-work\",\"case\":\"d089-changing-opaque-rows\",\"batches\":{batches},\"frames_per_batch\":{frames},\"pixels_per_frame\":{count},\"changed_bytes\":{changed},\"compose_batch_ns\":{sums:?}}}");
+    }
+}
