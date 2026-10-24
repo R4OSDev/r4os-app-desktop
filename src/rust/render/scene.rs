@@ -1,7 +1,7 @@
 //! Borrowed CPU scene view. Its VM/pixel allocation stays with the render
 //! owner; construction adds no allocation or pixel copy. Recording/native
 //! command sinks are coordinated outside this exclusive raster loan.
-use super::{geometry::Rect, pixels::PixelBytes};
+use super::{geometry::Rect, nearest::Axis, pixels::PixelBytes};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Mapping {
@@ -351,17 +351,28 @@ impl<'p> CpuScene<'p> {
             }
             return true;
         }
+        let columns = Axis::new(m.guest_w, m.viewport.w as u32, (r.x - m.viewport.x) as u32);
+        let mut rows = Axis::new(m.guest_h, m.viewport.h as u32, (r.y - m.viewport.y) as u32);
+        let mut previous = None::<(u32, usize)>;
         for y in r.y..r.bottom() {
-            let gy =
-                ((y - m.viewport.y) as u64 * u64::from(m.guest_h) / m.viewport.h as u64) as u32;
+            let gy = rows.next();
             if gy < m.source_y || gy >= m.source_y + m.source_h {
                 return false;
             }
+            let output = self.row(i64::from(y)) + self.column(i64::from(r.x));
+            if let Some((old, first)) = previous
+                && old == gy
+            {
+                // Only this call's immutable source/geometry and exact clip
+                // are shared. No content is retained across frames or clips.
+                self.repeat_row(first, output, r.w as usize);
+                continue;
+            }
             let src_row = (gy - m.source_y) as usize * m.source_stride as usize;
             let dst_row = self.row(i64::from(y));
+            let mut columns = columns;
             for x in r.x..r.right() {
-                let gx =
-                    ((x - m.viewport.x) as u64 * u64::from(m.guest_w) / m.viewport.w as u64) as u32;
+                let gx = columns.next();
                 if gx < m.source_x || gx >= m.source_x + m.source_w {
                     return false;
                 }
@@ -369,6 +380,7 @@ impl<'p> CpuScene<'p> {
                 let dst = dst_row + self.column(i64::from(x));
                 self.pixels[dst] = pixel;
             }
+            previous = Some((gy, output));
         }
         true
     }
@@ -419,17 +431,26 @@ impl<'p> CpuScene<'p> {
             }
             return true;
         }
+        let columns = Axis::new(m.guest_w, m.viewport.w as u32, (r.x - m.viewport.x) as u32);
+        let mut rows = Axis::new(m.guest_h, m.viewport.h as u32, (r.y - m.viewport.y) as u32);
+        let mut previous = None::<(u32, usize)>;
         for y in r.y..r.bottom() {
-            let gy =
-                ((y - m.viewport.y) as u64 * u64::from(m.guest_h) / m.viewport.h as u64) as u32;
+            let gy = rows.next();
             if gy < m.source_y || gy >= m.source_y + m.source_h {
                 return false;
             }
+            let output = self.row(i64::from(y)) + self.column(i64::from(r.x));
+            if let Some((old, first)) = previous
+                && old == gy
+            {
+                self.repeat_row(first, output, r.w as usize);
+                continue;
+            }
             let src_row = (gy - m.source_y) as usize * m.source_stride as usize;
             let dst_row = self.row(i64::from(y));
+            let mut columns = columns;
             for x in r.x..r.right() {
-                let gx =
-                    ((x - m.viewport.x) as u64 * u64::from(m.guest_w) / m.viewport.w as u64) as u32;
+                let gx = columns.next();
                 if gx < m.source_x || gx >= m.source_x + m.source_w {
                     return false;
                 }
@@ -438,6 +459,7 @@ impl<'p> CpuScene<'p> {
                 let dst = dst_row + self.column(i64::from(x));
                 self.pixels[dst] = color;
             }
+            previous = Some((gy, output));
         }
         true
     }
@@ -908,5 +930,107 @@ mod tests {
         let before = guard;
         assert!(CpuScene::layer(&mut guard[4..24], Rect::new(i32::MAX, 0, 5, 4)).is_none());
         assert_eq!(before, guard);
+    }
+    #[test]
+    fn d090_fractional_current_viewport_matches_whole_original_sampling() {
+        use std::{hint::black_box, time::Instant};
+        let work = std::env::var_os("R4OS_DESKTOP_ROW_WORK").is_some();
+        let (batches, frames) = if work { (5usize, 12usize) } else { (1, 2) };
+        let bounds = Rect::new(8, 30, 1264, 650);
+        let viewport = Rect::new(269, 30, 742, 650);
+        let mapping = map(256, 224, viewport);
+        let count = (bounds.w * bounds.h) as usize;
+        // Independent original floor rule, outside the measured operation.
+        let reference = (0..count)
+            .map(|i| {
+                let x = bounds.x + (i % bounds.w as usize) as i32;
+                let y = bounds.y + (i / bounds.w as usize) as i32;
+                if !viewport.contains(x, y) {
+                    return usize::MAX;
+                }
+                let gx = ((x - viewport.x) as u64 * 256 / viewport.w as u64) as usize;
+                let gy = ((y - viewport.y) as u64 * 224 / viewport.h as u64) as usize;
+                gy * 256 + gx
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        let mut source = alloc::vec![0u32; 256 * 224];
+        let indices = (0..256 * 224)
+            .map(|i| (i * 17 + i / 256 * 7) as u8)
+            .collect::<alloc::vec::Vec<_>>();
+        let mut palette = [0u32; 256];
+        let sentinel = 0x1250_2498;
+        for indexed in [false, true] {
+            let mut output = alloc::vec![sentinel; count + 8];
+            let mut sums = alloc::vec::Vec::new();
+            for frame in 0..2 + batches * frames {
+                let seed = (frame as u32 + 1).wrapping_mul(0x03_07_13);
+                for (i, p) in source.iter_mut().enumerate() {
+                    *p = 0x4000_0000 | ((i as u32).wrapping_mul(0x01_03_07) ^ seed) & 0xff_ffff;
+                }
+                for (i, p) in palette.iter_mut().enumerate() {
+                    *p = 0xa000_0000 | ((i as u32).wrapping_mul(0x01_02_03) ^ seed) & 0xff_ffff;
+                }
+                output.fill(sentinel);
+                let mut scene = CpuScene::layer(&mut output[4..4 + count], bounds).unwrap();
+                let current = black_box(mapping);
+                let begin = Instant::now();
+                let ok = if indexed {
+                    scene.blit_indexed8_nearest(
+                        viewport,
+                        Indexed8Nearest {
+                            indices: black_box(&indices),
+                            palette: PixelBytes::from_words(black_box(&palette)),
+                            mapping: current,
+                        },
+                    )
+                } else {
+                    scene.blit_xrgb32_nearest(
+                        viewport,
+                        Xrgb32Nearest {
+                            pixels: PixelBytes::from_words(black_box(&source)),
+                            mapping: current,
+                        },
+                    )
+                };
+                assert!(ok);
+                black_box(scene.pixels());
+                let elapsed = begin.elapsed().as_nanos();
+                for (i, original) in reference.iter().copied().enumerate() {
+                    let expected = if original == usize::MAX {
+                        sentinel
+                    } else {
+                        let value = if indexed {
+                            palette[indices[original] as usize] & 0xff_ffff
+                        } else {
+                            source[original]
+                        };
+                        value | 0xff00_0000
+                    };
+                    assert_eq!(
+                        output[4 + i],
+                        expected,
+                        "whole target, format {indexed}, pixel {i}"
+                    );
+                }
+                assert!(
+                    output[..4]
+                        .iter()
+                        .chain(&output[4 + count..])
+                        .all(|v| *v == sentinel)
+                );
+                if frame >= 2 {
+                    let batch = (frame - 2) / frames;
+                    if sums.len() == batch {
+                        sums.push(0u128);
+                    }
+                    sums[batch] += elapsed;
+                }
+            }
+            if work {
+                println!(
+                    "{{\"schema\":\"r4os.desktop-work\",\"case\":\"d090-fractional\",\"indexed\":{indexed},\"batches\":{batches},\"frames_per_batch\":{frames},\"viewport_pixels\":482300,\"source_width\":256,\"source_height\":224,\"raster_batch_ns\":{sums:?}}}"
+                );
+            }
+        }
     }
 }

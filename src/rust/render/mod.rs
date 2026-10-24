@@ -11,6 +11,7 @@ pub mod gpu;
 pub mod icons;
 pub mod layers;
 pub mod native_scene;
+mod nearest;
 pub mod output_damage;
 pub mod output_geometry;
 pub mod painter;
