@@ -8,7 +8,7 @@ const RESTART_LIMIT: usize = 8;
 const PAGE_CAPACITY: usize = a::program_inventory_page_max as usize;
 trait Read {
     fn cursor(&self) -> &a::ProgramInventoryCursor;
-    fn summary(&self) -> &a::ProgramInventorySummary;
+    fn reserve_total(&self) -> usize;
     fn programs(
         &mut self,
         out: &mut [a::ProgramInstanceSnapshot],
@@ -18,8 +18,8 @@ impl Read for NativeInventory<'_> {
     fn cursor(&self) -> &a::ProgramInventoryCursor {
         NativeInventory::cursor(self)
     }
-    fn summary(&self) -> &a::ProgramInventorySummary {
-        NativeInventory::summary(self)
+    fn reserve_total(&self) -> usize {
+        NativeInventory::summary(self).program_total as usize
     }
     fn programs(
         &mut self,
@@ -28,8 +28,67 @@ impl Read for NativeInventory<'_> {
         NativeInventory::programs(self, out)
     }
 }
+struct LifecycleReader<'a>(r4os_sdk::resources::Lifecycle<'a>);
+impl Read for LifecycleReader<'_> {
+    fn cursor(&self) -> &a::ProgramInventoryCursor {
+        self.0.cursor()
+    }
+    fn reserve_total(&self) -> usize {
+        0
+    }
+    fn programs(
+        &mut self,
+        out: &mut [a::ProgramInstanceSnapshot],
+    ) -> Result<a::ProgramInventoryPageInfo> {
+        let mut rows = [a::ProgramLifecycleSnapshot::default(); PAGE_CAPACITY];
+        let capacity = out.len().min(rows.len());
+        let page = self.0.programs(&mut rows[..capacity])?;
+        // This is the existing private UI/model cache, never a diagnostic export.
+        // Lifecycle uses only these state fields. The explicit Tasks path still
+        // requests full native inventory; no memory value is inferred from zero.
+        for (dst, row) in out.iter_mut().zip(&rows[..page.returned as usize]) {
+            *dst = a::ProgramInstanceSnapshot {
+                handle: row.handle,
+                state_generation: row.handle.generation,
+                info: a::ProgramInstanceInfo {
+                    id: row.handle.instance_id,
+                    task_id: row.task_id,
+                    role: row.role,
+                    app_class: row.app_class,
+                    state: row.state,
+                    flags: row.flags,
+                    exit_code: row.exit_code,
+                    window_id: row.window_id,
+                    ..a::ProgramInstanceInfo::default()
+                },
+                ..a::ProgramInstanceSnapshot::default()
+            };
+        }
+        Ok(page)
+    }
+}
+// Full diagnostic acquisition is opt-in and bounded while Tasks is visible.
+// Process metadata keeps its independent fresh acquisition every refresh.
+#[derive(Default)]
+struct DiagnosticRefresh {
+    next: Option<u64>,
+    last_tick: Option<u64>,
+}
+impl DiagnosticRefresh {
+    fn due(&mut self, requested: bool, tick: u64) -> bool {
+        if !requested || self.last_tick.is_some_and(|last| tick < last) {
+            self.next = None;
+        }
+        self.last_tick = Some(tick);
+        requested && self.next.is_none_or(|next| tick >= next)
+    }
+    fn captured(&mut self, tick: u64, interval: u64) {
+        self.next = Some(tick.saturating_add(interval.max(1)));
+    }
+}
 #[derive(Default)]
 pub struct Inventory {
+    diagnostic_refresh: DiagnosticRefresh,
     active: Vec<a::ProgramInstanceSnapshot>,
     staging: Vec<a::ProgramInstanceSnapshot>,
     authoritative: bool,
@@ -71,8 +130,22 @@ impl Inventory {
             items: &self.active,
         })
     }
-    pub fn refresh(&mut self, resources: &Resources<'_>) -> bool {
-        self.refresh_with(|| resources.inventory())
+    pub fn refresh(
+        &mut self,
+        resources: &Resources<'_>,
+        diagnostics: bool,
+        tick: u64,
+        interval: u64,
+    ) -> bool {
+        if self.diagnostic_refresh.due(diagnostics, tick) {
+            let complete = self.refresh_with(|| resources.inventory());
+            if complete {
+                self.diagnostic_refresh.captured(tick, interval);
+            }
+            complete
+        } else {
+            self.refresh_with(|| resources.lifecycle().map(LifecycleReader))
+        }
     }
     fn refresh_with<S: Read>(&mut self, mut begin: impl FnMut() -> Result<S>) -> bool {
         self.authoritative = false;
@@ -82,7 +155,7 @@ impl Inventory {
                 self.restart_pending = true;
                 return false;
             };
-            let total = reader.summary().program_total as usize;
+            let total = reader.reserve_total();
             if self.staging.try_reserve(total).is_err() {
                 self.out_of_memory = true;
                 return false;
@@ -168,8 +241,8 @@ mod tests {
         fn cursor(&self) -> &a::ProgramInventoryCursor {
             &self.cursor
         }
-        fn summary(&self) -> &a::ProgramInventorySummary {
-            &self.summary
+        fn reserve_total(&self) -> usize {
+            self.summary.program_total as usize
         }
         fn programs(
             &mut self,
@@ -179,6 +252,30 @@ mod tests {
             out[..data.len()].copy_from_slice(&data);
             Ok(page)
         }
+    }
+    #[test]
+    fn explicit_task_diagnostics_are_bounded_retry_without_authority_and_reopen_fresh() {
+        let mut schedule = DiagnosticRefresh::default();
+        for tick in 0..100 {
+            assert!(!schedule.due(false, tick));
+        }
+        assert!(schedule.due(true, 100));
+        schedule.captured(100, 25);
+        for tick in 101..125 {
+            assert!(!schedule.due(true, tick));
+        }
+        assert!(schedule.due(true, 125));
+        // A failed/Busy full snapshot does not acknowledge a refresh or defer
+        // the next attempt. Inventory's existing cases below check authority.
+        assert!(schedule.due(true, 126));
+        schedule.captured(126, 25);
+        assert!(!schedule.due(true, 127));
+        assert!(!schedule.due(false, 128));
+        assert!(schedule.due(true, 129));
+        schedule.captured(129, 25);
+        assert!(schedule.due(true, 1)); // clock rollback cannot freeze Tasks
+        schedule.captured(1, 0);
+        assert!(schedule.due(true, 2));
     }
     #[test]
     fn current_restart_or_partial_failure_never_replaces_complete_generation() {

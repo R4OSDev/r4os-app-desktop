@@ -418,6 +418,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 time.hz,
                 &areas,
                 true,
+                self.shell.dialog == crate::shell::state::Dialog::Tasks,
                 self.shell.config.terminal_size,
                 self.shell.config.terminal_codepage,
             );
@@ -1503,8 +1504,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             &mut *self.windows,
                             &mut self.dirty,
                             time.tick,
-                            u64::from(time.hz) * 2,
+                            time.hz,
                             0,
+                            self.shell.dialog == crate::shell::state::Dialog::Tasks,
                             &areas,
                         );
                     }

@@ -114,12 +114,18 @@ impl Model {
         graphics: &mut impl GraphicsRetirement,
         dirty: &mut Dirty,
         now: u64,
-        kill_timeout: u64,
+        tick_hz: u32,
         last_global_exit: i32,
+        diagnostics: bool,
         work_areas: &[Rect; SLOT_COUNT],
     ) -> Report {
         let mut report = Report::default();
-        if !self.inventory.refresh(resources) {
+        if !self.inventory.refresh(
+            resources,
+            diagnostics,
+            now,
+            u64::from(tick_hz).div_ceil(4).max(1),
+        ) {
             return report;
         }
         let Some(current) = self.inventory.current() else {
@@ -140,7 +146,7 @@ impl Model {
                         programs,
                         &mut gui,
                         now,
-                        kill_timeout,
+                        u64::from(tick_hz) * 2,
                         last_global_exit,
                     )
                 }

@@ -329,6 +329,7 @@ impl<'input> State<'input> {
         hz: u32,
         areas: &[Rect; 4],
         lifecycle_due: bool,
+        diagnostics: bool,
         font_size: u8,
         codepage: u16,
     ) -> bool {
@@ -353,8 +354,9 @@ impl<'input> State<'input> {
                     graphics,
                     dirty,
                     tick,
-                    u64::from(hz) * 2,
+                    hz,
                     last,
+                    diagnostics,
                     areas,
                 )
             }
