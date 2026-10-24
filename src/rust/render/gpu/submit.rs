@@ -2,6 +2,14 @@
 //! Every admitted job is tracked before metadata queries; no native wait here.
 use super::*;
 impl Engine {
+    fn composition_target(&self) -> g::R4GfxResource {
+        if self.direct_sdr {
+            self.resources.outputs[self.output_index].resource
+        } else {
+            self.resources.workings[self.output_index].resource
+        }
+    }
+
     pub(super) fn step(
         &mut self,
         s: &Session<'_, '_>,
@@ -310,7 +318,7 @@ impl Engine {
                     let request = g::R4GfxRenderRequest {
                         version: 1,
                         size: core::mem::size_of::<g::R4GfxRenderRequest>() as u32,
-                        target: self.resources.workings[self.output_index].resource,
+                        target: self.composition_target(),
                         pipeline: self.resources.fill,
                         target_rect: rect(self.encode_area),
                         scissor: rect(self.encode_area),
@@ -359,9 +367,15 @@ impl Engine {
                 let request = g::R4GfxRenderRequest {
                     version: 1,
                     size: core::mem::size_of::<g::R4GfxRenderRequest>() as u32,
-                    source: self.resources.layers[command.entry as usize].color_view,
-                    target: self.resources.workings[self.output_index].resource,
-                    pipeline: if self.replace_background && self.next_command == 0 {
+                    source: if self.direct_sdr {
+                        self.resources.layers[command.entry as usize].opaque_view
+                    } else {
+                        self.resources.layers[command.entry as usize].color_view
+                    },
+                    target: self.composition_target(),
+                    pipeline: if self.direct_sdr
+                        || (self.replace_background && self.next_command == 0)
+                    {
                         self.resources.blit
                     } else {
                         self.resources.over
@@ -377,7 +391,7 @@ impl Engine {
                     scissor: rect(clip),
                     color: 0,
                     opacity: 255,
-                    transfer: if self.hdr_frame {
+                    transfer: if self.direct_sdr || self.hdr_frame {
                         g::render_transfer_identity
                     } else {
                         g::render_transfer_srgb_decode
@@ -411,6 +425,14 @@ impl Engine {
                 self.render_jobs = self.render_jobs.saturating_add(1);
             }
             Phase::Encode => {
+                if self.direct_sdr {
+                    self.phase = if self.destination == Destination::Display {
+                        Phase::Present
+                    } else {
+                        Phase::Drain
+                    };
+                    return Ok(());
+                }
                 let slot = self.jobs.reserve()?;
                 let area = rect(self.encode_area);
                 let request = g::R4GfxRenderRequest {
@@ -576,8 +598,12 @@ impl Engine {
             version: 1,
             size: core::mem::size_of::<g::R4GfxRenderRequest>() as u32,
             source: self.resources.layers[index].resource,
-            target: self.resources.workings[self.output_index].resource,
-            pipeline: self.resources.over,
+            target: self.composition_target(),
+            pipeline: if self.direct_sdr {
+                self.resources.blit
+            } else {
+                self.resources.over
+            },
             sampler: self.resources.sampler,
             source_rect: g::R4GfxSignedRect {
                 x: 0,
@@ -603,18 +629,19 @@ impl Engine {
             reserved: 0,
         };
         let mut handle = g::R4GfxJob::default();
-        accepted(unsafe {
+        let result = unsafe {
             s.colors.color_render_submit_grid(
                 s.raw(),
                 &list,
-                if color::absolute(source.color) {
+                if self.direct_sdr || color::absolute(source.color) {
                     0
                 } else {
                     g::color_transform_relative_white
                 },
                 &mut handle,
             )
-        })?;
+        };
+        accepted(result)?;
         // Track before metadata queries, then mark this exact external tail.
         let tracked = self.jobs.track(s, slot, handle, None, 0, 0);
         self.jobs.mark_external(index, slot)?;

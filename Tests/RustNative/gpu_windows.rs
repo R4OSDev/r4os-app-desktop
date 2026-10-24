@@ -143,15 +143,22 @@ fn pump_window(
 #[test]
 fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
     with(|app, device| {
-        for rotation in [
+        let rotations = [
             Rotation::Normal,
             Rotation::Clockwise90,
             Rotation::Clockwise180,
             Rotation::Clockwise270,
-        ] {
+        ];
+        for (opaque, rotation) in [false, true].into_iter().flat_map(|opaque| {
+            rotations
+                .into_iter()
+                .map(move |rotation| (opaque, rotation))
+        }) {
             let mut message = a::WindowGraphicsFrame::default();
             assert_eq!(
-                unsafe { r4desk_gpu_window_memory(0, 0, 0, &mut message as *mut _ as usize) },
+                unsafe {
+                    r4desk_gpu_window_memory(0, opaque as usize, 0, &mut message as *mut _ as usize)
+                },
                 0
             );
             assert_eq!(unsafe { r4desk_gpu_window_transport(0, 0, 0) }, 0);
@@ -237,10 +244,43 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
                 control(&s, 9, 1);
                 first
                     .prepare(&s, &one, Some(&frame), 1000, || 1, || false)
-                    .unwrap();
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "prepare opaque={opaque} rotation={rotation:?}: {error:?}; layers={:?}",
+                            first
+                                .resources
+                                .layers
+                                .iter()
+                                .filter(|image| image.resource.slot != 0)
+                                .map(|image| (
+                                    image.resource.slot,
+                                    image.info.image.format,
+                                    image.color_view.slot,
+                                    image.opaque_view.slot
+                                ))
+                                .collect::<Vec<_>>()
+                        )
+                    });
                 second
                     .prepare(&s, &two, Some(&frame2), 1000, || 1, || false)
                     .unwrap();
+                assert_eq!((first.direct_sdr, second.direct_sdr), (opaque, opaque));
+                if opaque {
+                    assert!(
+                        first
+                            .resources
+                            .workings
+                            .iter()
+                            .all(|image| image.resource.slot == 0)
+                    );
+                    assert!(
+                        second
+                            .resources
+                            .workings
+                            .iter()
+                            .all(|image| image.resource.slot == 0)
+                    );
+                }
                 assert_eq!(stats()[11], 3);
                 unsafe { first.begin(&s, &one, Some(&frame), 1000) }.unwrap();
                 for _ in 0..32 {
@@ -283,7 +323,7 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
                         if lx == 0 && ly == 0 {
                             0x007f00
                         } else if sx % 2 == 0 {
-                            0xbcbcbc
+                            if opaque { 0x808080 } else { 0xbcbcbc }
                         } else {
                             0x800000
                         }

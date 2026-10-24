@@ -21,6 +21,7 @@ pub type Result<T> = core::result::Result<T, Error>;
 #[repr(C)]
 pub struct Entry {
     pub live: bool,
+    pub opaque: bool,
     pub key: [u8; 32],
     pub texture: u8,
     pub rect: Rect,
@@ -224,11 +225,13 @@ impl Cache {
         let texture = &mut self.textures[index];
         let rect = texture.placement(width, height).ok_or(Error::Capacity)?;
         let generation = self.generation.checked_add(1).ok_or(Error::Overflow)?;
+        let mut opaque = true;
         for y in 0..height as usize {
             for x in 0..width as usize {
+                let pixel = view.raster_pixel(x, y);
+                opaque &= pixel >> 24 == 255;
                 texture.pixels
-                    [(rect.y as usize + y) * texture.width as usize + rect.x as usize + x] =
-                    view.raster_pixel(x, y);
+                    [(rect.y as usize + y) * texture.width as usize + rect.x as usize + x] = pixel;
             }
         }
         if texture.y != rect.y as u32 {
@@ -244,6 +247,7 @@ impl Cache {
         texture.dirty = Some(texture.dirty.map_or(rect, |prior| prior.merged(rect)));
         let entry = Entry {
             live: true,
+            opaque,
             key,
             texture: index as u8,
             rect,
@@ -346,5 +350,30 @@ mod tests {
             ))
             .unwrap();
         assert!(atlas.converted_pixels > conversions);
+        // Opacity belongs to the exact interned entry, including cache hits;
+        // transparent pixels elsewhere on the same atlas page are irrelevant.
+        let mut opacity = Cache::new(metadata + 512 * 512 * 4).unwrap();
+        opacity.start(1).unwrap();
+        let mixed = [0xff123456, 0x80123456];
+        let argb = View::new(
+            Format::Argb,
+            2,
+            1,
+            8,
+            PixelBytes::from_words(&mixed).bytes(),
+        );
+        let first = opacity.intern(argb).unwrap();
+        assert!(!first.opaque);
+        let xrgb = View::new(
+            Format::Xrgb,
+            2,
+            1,
+            8,
+            PixelBytes::from_words(&mixed).bytes(),
+        );
+        let second = opacity.intern(xrgb).unwrap();
+        assert!(second.opaque);
+        assert_eq!(first.texture, second.texture);
+        assert!(!opacity.intern(argb).unwrap().opaque);
     }
 }

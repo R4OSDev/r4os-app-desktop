@@ -2,13 +2,71 @@
 //! Jobs/scanout/borrowed consumer receipts are drained by its coordinator.
 use super::*;
 impl Engine {
+    pub(super) fn allows_direct_sdr(&self, cache: &Cache, recording: Option<&Frame>) -> bool {
+        if self.output_format != g::format_xrgb8888
+            || self.color_output
+            || !color::same_description(self.output_color, software::description(false, true))
+            || self.has_hdr(cache)
+        {
+            return false;
+        }
+        let Some(frame) = recording else {
+            return false;
+        };
+        // Establish full-layer opacity from the captured ordered writes.
+        // Source opacity was measured during the existing atlas conversion,
+        // never by rescanning pixels in a composition turn. Over preserves
+        // an opaque destination; an unproven replacement revokes that proof.
+        let mut opaque = [false; layers::CAPACITY];
+        for command in frame.commands() {
+            if command.over {
+                continue;
+            }
+            let i = command.layer as usize;
+            let Some(area) = intersect(command.target, command.scissor) else {
+                continue;
+            };
+            if !command.opaque {
+                opaque[i] = false;
+            } else if command.grid.enabled == 0
+                && intersect(
+                    area,
+                    Rect::new(
+                        0,
+                        0,
+                        cache.entries()[i].bounds.w,
+                        cache.entries()[i].bounds.h,
+                    ),
+                ) == Some(Rect::new(
+                    0,
+                    0,
+                    cache.entries()[i].bounds.w,
+                    cache.entries()[i].bounds.h,
+                ))
+            {
+                opaque[i] = true;
+            }
+        }
+        cache.commands().iter().all(|command| {
+            let i = command.entry as usize;
+            if let Some(source) = self.external_source(i) {
+                source.descriptor.format == g::format_xrgb8888
+                    && color::same_description(source.color, self.output_color)
+            } else {
+                !cache.entries()[i].external && opaque[i]
+            }
+        })
+    }
+
     pub fn prepared(
         &mut self,
         s: &Session<'_, '_>,
         cache: &Cache,
         recording: Option<&Frame>,
     ) -> bool {
-        if self.chain_status.is_some_and(|status| status.life >= 2) {
+        if self.chain_status.is_some_and(|status| status.life >= 2)
+            || self.direct_sdr != self.allows_direct_sdr(cache, recording)
+        {
             return false;
         }
         let resources = &mut self.resources;
@@ -17,12 +75,13 @@ impl Engine {
             || resources.blit.slot == 0
             || resources.fill.slot == 0
             || resources.sampler.slot == 0
-            || !resources.workings[self.output_index].fits(
-                s,
-                screen.w,
-                screen.h,
-                g::format_abgr16161616f,
-            )
+            || (!self.direct_sdr
+                && !resources.workings[self.output_index].fits(
+                    s,
+                    screen.w,
+                    screen.h,
+                    g::format_abgr16161616f,
+                ))
             || !resources.outputs[self.output_index].fits(s, screen.w, screen.h, self.output_format)
             || !resources.staging.fits(
                 s,
@@ -70,7 +129,13 @@ impl Engine {
                 return false;
             }
             if !self.resources.layers[i].fits(s, entry.bounds.w, entry.bounds.h, g::format_argb8888)
-                || self.resources.layers[i].color_view.slot == 0
+                || (if self.direct_sdr {
+                    self.resources.layers[i].opaque_view
+                } else {
+                    self.resources.layers[i].color_view
+                })
+                .slot
+                    == 0
             {
                 return false;
             }
@@ -227,11 +292,13 @@ impl Engine {
             }
         }
         let hdr = self.has_hdr(cache);
-        if hdr != self.hdr_frame {
+        let direct_sdr = self.allows_direct_sdr(cache, recording);
+        if hdr != self.hdr_frame || direct_sdr != self.direct_sdr {
             for image in &mut self.resources.workings {
                 image.release(s, &mut self.resources.charged)?;
             }
             self.hdr_frame = hdr;
+            self.direct_sdr = direct_sdr;
             self.invalidate();
         }
         let working = if self.hdr_frame {
@@ -239,7 +306,7 @@ impl Engine {
         } else {
             software::description(true, false)
         };
-        for image in &mut self.resources.workings[..count] {
+        for image in &mut self.resources.workings[..if self.direct_sdr { 0 } else { count }] {
             check()?;
             image.prepare(
                 s,
@@ -335,7 +402,7 @@ impl Engine {
                 software::description(false, false),
             )?;
             check()?;
-            self.resources.layers[i].color_view(s)?;
+            self.resources.layers[i].color_view(s, self.direct_sdr)?;
         }
         if let Some(frame) = recording {
             check()?;
@@ -560,5 +627,6 @@ fn same_command(x: &Command, y: &Command) -> bool {
         && x.scissor == y.scissor
         && x.color == y.color
         && x.over == y.over
+        && x.opaque == y.opaque
         && grid(x.grid) == grid(y.grid)
 }

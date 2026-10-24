@@ -22,6 +22,7 @@ pub struct Command {
     pub scissor: Rect,
     pub color: u32,
     pub over: bool,
+    pub opaque: bool,
     pub grid: GfxSampleGrid,
 }
 impl Command {
@@ -34,6 +35,7 @@ impl Command {
             scissor: rect,
             color,
             over: false,
+            opaque: color >> 24 == 255,
             grid: GfxSampleGrid::default(),
         }
     }
@@ -302,6 +304,7 @@ impl Frame {
                     scissor: self.local(clip)?,
                     color: 0,
                     over: matches!(picture.view.format, Format::Argb | Format::Alpha),
+                    opaque: entry.opaque,
                     grid: GfxSampleGrid::default(),
                 })
             }
@@ -355,6 +358,7 @@ impl Frame {
             scissor: self.local(clip)?,
             color: 0,
             over: matches!(asset.format, Format::Argb | Format::Alpha),
+            opaque: entry.opaque,
             grid: GfxSampleGrid {
                 enabled: 1,
                 rotation: view.rotation as u32,

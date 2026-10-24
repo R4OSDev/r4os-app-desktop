@@ -81,6 +81,7 @@ pub struct Engine {
     pub output_color: g::R4GfxColorDescription,
     color_output: bool,
     hdr_frame: bool,
+    direct_sdr: bool,
     pub output_index: usize,
     chain: g::R4GfxSwapchain,
     presentation: Option<g::R4GfxPresentationInfo>,
@@ -144,6 +145,7 @@ impl Engine {
             output_color: software::description(false, true),
             color_output: false,
             hdr_frame: false,
+            direct_sdr: false,
             output_index: 0,
             chain: Default::default(),
             presentation: None,
@@ -524,7 +526,9 @@ impl Engine {
             return Err(Error::Incomplete);
         }
         self.acquire(s, self.input_ns)?;
-        if self.hdr_frame != self.has_hdr(cache) {
+        if self.hdr_frame != self.has_hdr(cache)
+            || self.direct_sdr != self.allows_direct_sdr(cache, recording)
+        {
             return Err(Error::State);
         }
         self.clear_working = self.needs_full(cache.screen().w, cache.screen().h);

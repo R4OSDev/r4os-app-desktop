@@ -375,6 +375,14 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
             let jobs = engine.primitive_jobs;
             let uploads = engine.jobs.uploaded_bytes;
             begin(app, device, &mut engine, &cache, Some(&frame));
+            assert!(engine.direct_sdr);
+            assert!(
+                engine
+                    .resources
+                    .workings
+                    .iter()
+                    .all(|image| image.resource.slot == 0)
+            );
             if turn == 2 {
                 assert_eq!(engine.capture_damage, Some(Rect::new(5, 5, 2, 2)));
                 let layer = frame.commands()[0].layer as usize;
@@ -402,6 +410,16 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
                 expected[45] = 0xffffff;
             }
             assert_eq!(visible(), expected, "ordered alpha and unchanged pixels");
+            assert_eq!(
+                engine.render_jobs - engine.primitive_jobs,
+                turn as u64 + 1,
+                "one composition draw per frame, no encode job; primitive jobs counted separately"
+            );
+            assert_eq!(
+                stats()[2],
+                turn as u64 + 1,
+                "actual presentation still required"
+            );
             if turn == 0 {
                 assert_eq!(engine.primitive_draws - draws, 4);
                 assert_eq!(
@@ -421,6 +439,86 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
                 );
             }
         }
+        // A separately translucent layer must return to linear composition.
+        cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+        cache
+            .paint(1, FULL, FULL, Some(&mut frame), None, |p| p.fill(FULL, 0))
+            .unwrap();
+        cache
+            .paint(2, PIXEL, PIXEL, Some(&mut frame), None, |p| {
+                p.clear(PIXEL)?;
+                p.picture(Picture {
+                    view: View::new(
+                        Format::Argb,
+                        1,
+                        1,
+                        4,
+                        PixelBytes::from_words(&white).bytes(),
+                    ),
+                    viewport: PIXEL,
+                    clip: PIXEL,
+                    source_x: 0,
+                    source_y: 0,
+                    guest_w: 1,
+                    guest_h: 1,
+                })
+            })
+            .unwrap();
+        cache.finish(Some(&frame)).unwrap();
+        begin(app, device, &mut engine, &cache, Some(&frame));
+        assert!(!engine.direct_sdr);
+        assert_ne!(
+            engine.resources.workings[engine.output_index].resource.slot,
+            0
+        );
+        pump(
+            app,
+            device,
+            &mut engine,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        let mut expected = [0; 64];
+        expected[27] = 0xbcbcbc;
+        assert_eq!(visible(), expected, "original separate linear-alpha oracle");
+        cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+        cache
+            .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
+                p.fill(FULL, 0x225588)
+            })
+            .unwrap();
+        cache.finish(Some(&frame)).unwrap();
+        begin(app, device, &mut engine, &cache, Some(&frame));
+        assert!(engine.direct_sdr);
+        assert!(
+            engine
+                .resources
+                .workings
+                .iter()
+                .all(|image| image.resource.slot == 0)
+        );
+        pump(
+            app,
+            device,
+            &mut engine,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        assert_eq!(visible(), [0x225588; 64]);
+        let original = engine.output_color;
+        for field in 0..4 {
+            engine.output_color = original;
+            match field {
+                0 => engine.output_color.transfer = g::color_transfer_pq,
+                1 => engine.output_color.flags = 1,
+                2 => engine.output_color.reference_white += 1,
+                _ => engine.output_color.range = g::color_range_limited,
+            }
+            assert!(!engine.allows_direct_sdr(&cache, Some(&frame)));
+        }
+        engine.output_color = original;
         let s = device.bind(app).unwrap();
         engine.close(&s).unwrap();
     });

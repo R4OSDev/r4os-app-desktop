@@ -552,12 +552,14 @@ var native_window_transport: WindowTransport = .{};
 pub fn nativeWindowMemory(op:u32,input:usize,bytes:u64,output:usize) i32 {
     switch(op) {
         0=>{
+            if(input>1)return -1;
             if(WindowMemory.count()!=0 or WindowMemory.mapped!=0)return -1;
-            WindowMemory.descriptor=.{.byte_length=256,.width=8,.height=8,.format=c.format_argb8888,.plane_count=1,.plane_pitches=.{32,0,0,0},.usage=31};
+            WindowMemory.descriptor=.{.byte_length=256,.width=8,.height=8,.format=if(input==1)c.format_xrgb8888 else c.format_argb8888,.plane_count=1,.plane_pitches=.{32,0,0,0},.usage=31};
             WindowMemory.refs=@splat(false);WindowMemory.refs[0]=true;WindowMemory.generations[0]=1;
             WindowMemory.cpu_ready=false;WindowMemory.cpu_failed=false;WindowMemory.map_busy=false;WindowMemory.unmap_busy=false;
             for(&WindowMemory.pixels,0..)|*pixel,i|pixel.*=if(i%2==0)0x80808080 else 0xff800000;
-            const out:*a.WindowGraphicsFrame=@ptrFromInt(output);out.*=windowMessage();return 0;
+            const out:*a.WindowGraphicsFrame=@ptrFromInt(output);out.*=windowMessage();
+            return 0;
         },
         1=>return WindowMemory.import(.{},@ptrFromInt(input),@ptrFromInt(output)),
         2=>return WindowMemory.describe(.{},@ptrFromInt(input),@ptrFromInt(output)),
@@ -1299,7 +1301,7 @@ fn windowCapture(cache: *layers.Cache, frame: *window_image.Frame, view: @import
 fn windowMessage() a.WindowGraphicsFrame {
     return .{ .surface = .{ .serial = 1, .window_id = 1, .owner = .{ .instance_id = 17, .generation = 3 } },
         .chain = 1, .acquire_token = 1, .present_serial = 1, .source = WindowMemory.source(), .descriptor = WindowMemory.descriptor,
-        .format = .{ .format = WindowMemory.descriptor.format, .color = @bitCast(@import("composition_software.zig").description(false, false)) },
+        .format = .{ .format = WindowMemory.descriptor.format, .color = @bitCast(@import("composition_software.zig").description(false, WindowMemory.descriptor.format == c.format_xrgb8888)) },
         .ready = .{ .slot = 1, .adapter_id = 9, .timeline = 456, .point = 1, .device_generation = 1, .reset_generation = 1 } };
 }
 fn checkWindowImages(graphics: anytype, device: *const c.R4GfxDevice) !void {

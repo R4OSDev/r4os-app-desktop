@@ -9,6 +9,7 @@ use r4os_contract as a;
 pub struct Image {
     pub resource: g::R4GfxResource,
     pub color_view: g::R4GfxResource,
+    pub opaque_view: g::R4GfxResource,
     pub info: g::R4GfxResourceInfo,
     pub generation: u64,
     pub charge: u64,
@@ -147,8 +148,13 @@ impl Image {
         self.info = info;
         true
     }
-    pub fn color_view(&mut self, s: &Session<'_, '_>) -> Result<()> {
-        if self.color_view.slot != 0 {
+    pub fn color_view(&mut self, s: &Session<'_, '_>, opaque: bool) -> Result<()> {
+        let output = if opaque {
+            &mut self.opaque_view
+        } else {
+            &mut self.color_view
+        };
+        if output.slot != 0 {
             return Ok(());
         }
         let mut d = descriptor(g::resource_image);
@@ -158,13 +164,10 @@ impl Image {
             version: 1,
             size: core::mem::size_of::<g::R4GfxColorResourceDesc>() as u32,
             resource: d,
-            description: software::description(false, false),
+            description: software::description(false, opaque),
             ..Default::default()
         };
-        accepted(unsafe {
-            s.colors
-                .color_resource_create(s.raw(), &color, &mut self.color_view)
-        })
+        accepted(unsafe { s.colors.color_resource_create(s.raw(), &color, output) })
     }
     pub fn prepare(
         &mut self,
@@ -338,6 +341,10 @@ impl Image {
         Ok(())
     }
     pub fn release(&mut self, s: &Session<'_, '_>, charged: &mut u64) -> Result<()> {
+        if self.opaque_view.slot != 0 {
+            accepted(unsafe { s.client.resource_release(s.raw(), &self.opaque_view) })?;
+            self.opaque_view = Default::default();
+        }
         if self.color_view.slot != 0 {
             accepted(unsafe { s.client.resource_release(s.raw(), &self.color_view) })?;
             self.color_view = Default::default();
