@@ -1,3 +1,4 @@
+param([string]$Filter='')
 # Current Rust Desktop owners against retained independent original oracles.
 # General compiler selection and native GUI implementation remain in the SDK.
 $ErrorActionPreference='Stop'
@@ -89,7 +90,7 @@ try {
     # The freestanding SDK closes memcpy/memset inside this executable too.
     # Match its normal size optimization; debug byte helpers make the original
     # per-pixel GPU model spend minutes resetting otherwise empty resources.
-    InvokeChecked $rustc @('--edition=2024','--crate-name','r4os_sdk','--crate-type','rlib',$sdkSource,'-C','opt-level=s','--extern',('r4os_contract='+$contractLib),'-L',('dependency='+$work),'-o',$sdkLib)
+    InvokeChecked $rustc @('--edition=2024','--crate-name','r4os_sdk','--crate-type','rlib',$sdkSource,'--cfg','feature="alloc"','-C','opt-level=s','--extern',('r4os_contract='+$contractLib),'-L',('dependency='+$work),'-o',$sdkLib)
     $clockSource=Join-Path $sdk 'Tests/Simulation/PreciseClock.rs'
     $clockTest=Join-Path $work ('clock-tests'+$suffix)
     InvokeChecked $rustc @('--edition=2024','--test',$clockSource,'--extern',('r4os_sdk='+$sdkLib),'-L',('dependency='+$work),
@@ -118,11 +119,19 @@ try {
         '-C',('link-arg='+(Join-Path $native 'lib/r4sdk_storage.o')),'-C',('link-arg='+$textOracle),
         '-C',('link-arg='+(Join-Path $native 'lib/r4libraries_helpers.o')),'-C',('link-arg='+(Join-Path $native 'lib/r4libraries_facades.o')),
         '-C',('link-arg='+(Join-Path $native 'lib/desktop-rust-standard.o')),'-o',$binary)+$hostLinkArgs)
-    $desktopResult=& $binary
-    if($LASTEXITCODE -ne 0){$desktopResult|ForEach-Object {Write-Host $_};throw 'Desktop Rust owner cases failed'}
+    $selections=@(if($Filter){$Filter.Split(',')|ForEach-Object {$_.Trim()}}else{''})
+    $desktopResult=@()
+    foreach($selection in $selections){
+        if($Filter -and $selection -cnotmatch '^[A-Za-z0-9_:]+$'){throw 'Use comma-separated literal Rust case scopes for -Filter.'}
+        $part=if($selection){& $binary $selection --nocapture}else{& $binary}
+        if($LASTEXITCODE -ne 0){$part|ForEach-Object {Write-Host $_};throw 'Desktop Rust owner cases failed'}
+        if($selection -and ($part -join "`n") -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed;'){throw ('Empty Desktop Rust selection: '+$selection)}
+        $desktopResult+=@($part)
+    }
     $allResults=(@($geometryResult)+@($desktopResult)) -join "`n"
     $caseCounts=@([regex]::Matches($allResults,'test result: ok\. (\d+) passed; 0 failed;')|ForEach-Object {[int]$_.Groups[1].Value})
-    if($caseCounts.Count -ne 2){throw 'Missing native test summaries'}
+    if($caseCounts.Count -ne (1+$selections.Count)){throw 'Missing native test summaries'}
+    $desktopCases=[int](($caseCounts|Select-Object -Skip 1|Measure-Object -Sum).Sum)
     $inputs=@{}
     $files=@(Get-ChildItem -LiteralPath (Join-Path $moduleRoot 'src/rust') -Recurse -File -Filter '*.rs')+@(Get-ChildItem -LiteralPath (Join-Path $sdk 'Rust/src') -Recurse -File -Filter '*.rs')+@(Get-ChildItem -LiteralPath (Join-Path $libraries 'R4STD/Rust') -File -Filter '*.rs')
     $files+=@(Get-ChildItem -LiteralPath (Join-Path $libraries 'R4STD/Source') -Recurse -File -Filter '*.zig')+@(Get-ChildItem -LiteralPath (Join-Path $libraries 'Shared/Rust/src') -File -Filter '*.rs')+@(Get-ChildItem -LiteralPath (Join-Path $moduleRoot 'Tests/RustNative') -File -Filter '*.rs')
@@ -136,7 +145,8 @@ try {
         (Join-Path $sdk 'Inventory/LanguageParity.json'),(Join-Path $sdk 'Tests/Conformance/BoundedGraphemeChecks.c'),$clockSource,
         (Join-Path $sdk 'r4os/gui_value_bridge.zig'),(Join-Path $sdk 'r4os/data_value_bridge.zig'),(Join-Path $sdk 'Tests/Fixtures/Icons/windows32.ico'),(Join-Path $sdk 'Shared/C/include/r4os/storage_helpers.h'))+$cSources+@((Join-Path $external 'blake3.h'),(Join-Path $external 'blake3_impl.h'))
     foreach($path in $paths|Sort-Object -Unique){$inputs[[IO.Path]::GetRelativePath($workspaceRoot,$path).Replace('\','/')]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
-    $proof=[ordered]@{schema=1;scope='current Desktop Rust owner/original comparison; native only';passed=$true;common_geometry_cases=$caseCounts[0];desktop_cases=$caseCounts[1];sdk_precise_clock_cases=1;
+    $observations=@($desktopResult|Where-Object {$_ -is [string] -and $_.StartsWith('{"schema":"r4os.desktop-work"')}|ForEach-Object {ConvertFrom-Json -InputObject $_ -AsHashtable})
+    $proof=[ordered]@{schema=1;scope='current Desktop Rust owner/original comparison; native only';passed=$true;common_geometry_cases=$caseCounts[0];desktop_cases=$desktopCases;sdk_precise_clock_cases=1;filter=$Filter;observations=$observations;
         compiler=((& $rustc --version)-join '');compiler_sha256=(Get-FileHash -LiteralPath $rustc -Algorithm SHA256).Hash.ToLowerInvariant();
         zig_sha256=(Get-FileHash -LiteralPath $zig -Algorithm SHA256).Hash.ToLowerInvariant();toolset_manifest_sha256=$description.toolset_manifest_sha256;
         host=$description.host;sdk_optimization='s';productive_rust_entry=$true;inputs=$inputs;
@@ -146,7 +156,7 @@ try {
         library_native_sha256=(Get-FileHash -LiteralPath (Join-Path $native 'lib/r4libraries_helpers.o') -Algorithm SHA256).Hash.ToLowerInvariant();
         provider_native_sha256=(Get-FileHash -LiteralPath (Join-Path $native 'lib/desktop-rust-standard.o') -Algorithm SHA256).Hash.ToLowerInvariant()}
     [IO.File]::WriteAllText($receipt,($proof|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
-    Write-Host ('R4GFX geometry: '+$caseCounts[0]+' passed; Desktop Rust owners: '+$caseCounts[1]+' passed. Native only.')
+    Write-Host ('R4GFX geometry: '+$caseCounts[0]+' passed; Desktop Rust owners: '+$desktopCases+' passed. Native only.')
     $success=$true
 }finally{
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

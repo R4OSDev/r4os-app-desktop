@@ -31,6 +31,7 @@ pub struct Owner {
     want_off: bool,
     wake_pending: bool,
     faulted: bool,
+    observed_current: bool,
 }
 impl Owner {
     pub fn want_off(&self) -> bool {
@@ -43,6 +44,7 @@ impl Owner {
         self.faulted
     }
     fn discover(&mut self, outputs: &mut impl OutputPower) -> Result<(), Error> {
+        self.observed_current = false;
         let before = outputs.revision().map_err(|_| Error::Unavailable)?;
         if before.present as usize > self.entries.len() {
             return Err(Error::Unavailable);
@@ -97,6 +99,7 @@ impl Owner {
         }
         self.entries = found;
         self.count = count;
+        self.observed_current = true;
         Ok(())
     }
     pub fn sleep(&mut self, outputs: &mut impl OutputPower, now: u64) -> Result<(), Error> {
@@ -116,8 +119,18 @@ impl Owner {
     }
     /// The waking event is consumed, so it cannot activate a hidden control.
     pub fn input(&mut self, outputs: &mut impl OutputPower, now: u64) -> bool {
+        self.input_observed(outputs, now, true)
+    }
+    /// Only for later samples of the same poll_input burst, after input() took
+    /// its fresh copied snapshot. No snapshot is reused across loop iterations.
+    pub fn input_cached(&mut self, outputs: &mut impl OutputPower, now: u64) -> bool {
+        self.input_observed(outputs, now, false)
+    }
+    fn input_observed(&mut self, outputs: &mut impl OutputPower, now: u64, fresh: bool) -> bool {
         self.last_activity_ns = now;
-        let _ = self.discover(outputs);
+        if fresh {
+            let _ = self.discover(outputs);
+        }
         let mut sleeping = self.want_off || self.wake_pending;
         for entry in &self.entries[..self.count] {
             if (entry.state.phase >= a::gfx_power_phase_stopping
@@ -135,15 +148,21 @@ impl Owner {
         self.want_off = false;
         self.faulted = false;
         if sleeping {
-            if !self.wake_pending {
+            let begin_wake = !self.wake_pending;
+            if begin_wake {
                 self.transition_deadline = now.saturating_add(35 * SECOND);
                 for entry in &mut self.entries[..self.count] {
                     entry.request = a::GfxPowerRequest::default();
                 }
             }
             self.wake_pending = true;
-            self.poll_ns = 0;
-            self.tick(outputs, now, 0);
+            if fresh || begin_wake {
+                self.poll_ns = 0;
+                if now != 0 && self.observed_current {
+                    self.poll_ns = now.saturating_add(500_000_000);
+                    self.drive(outputs, now, 0);
+                }
+            }
         }
         sleeping
     }
@@ -158,6 +177,11 @@ impl Owner {
         if self.discover(outputs).is_err() {
             return;
         }
+        self.drive(outputs, now, idle_seconds);
+    }
+    // Act only on the already copied discovery. A wake request never requires
+    // a second catalog pass inside the same input event.
+    fn drive(&mut self, outputs: &mut impl OutputPower, now: u64, idle_seconds: u32) {
         if !self.want_off
             && !self.wake_pending
             && !self.faulted
@@ -238,6 +262,7 @@ mod tests {
         serial: u64,
         supported: bool,
         stale: bool,
+        reads: usize,
     }
     impl Default for Model {
         fn default() -> Self {
@@ -258,11 +283,13 @@ mod tests {
                 serial: 0,
                 supported: true,
                 stale: false,
+                reads: 0,
             }
         }
     }
     impl OutputCatalog for Model {
         fn revision(&mut self) -> NativeResult<a::GfxDisplayRevision> {
+            self.reads += 1;
             Ok(a::GfxDisplayRevision {
                 revision: 1,
                 present: 1,
@@ -270,6 +297,7 @@ mod tests {
             })
         }
         fn info(&mut self, index: u32) -> NativeResult<a::GfxOutputInfo> {
+            self.reads += 1;
             assert_eq!(index, 0);
             Ok(a::GfxOutputInfo {
                 identity: self.state.identity,
@@ -278,6 +306,7 @@ mod tests {
             })
         }
         fn power(&mut self, id: &a::GfxOutputId) -> NativeResult<a::GfxOutputPower> {
+            self.reads += 1;
             assert!(same_id(*id, self.state.identity));
             if self.supported {
                 Ok(self.state)
@@ -362,5 +391,51 @@ mod tests {
         assert!(owner.want_off() && draw.intent.off == 1);
         draw.stale = true;
         assert_eq!(owner.sleep(&mut draw, 133 * SECOND), Err(Error::Stale));
+    }
+    #[test]
+    fn d088_awake_and_waking_bursts_share_reads_and_keep_fresh_ack() {
+        let mut draw = Model::default();
+        let mut owner = Owner::default();
+        assert!(!owner.input(&mut draw, SECOND));
+        for _ in 1..32 {
+            assert!(!owner.input_cached(&mut draw, SECOND));
+        }
+        assert_eq!(draw.reads, 4);
+        std::println!(
+            "{{\"schema\":\"r4os.desktop-work\",\"case\":\"power-after88\",\"events\":32,\"catalog_power_reads\":{}}}",
+            draw.reads
+        );
+        assert!(!owner.input(&mut draw, SECOND + 1));
+        assert_eq!(draw.reads, 8);
+        owner.sleep(&mut draw, 2 * SECOND).unwrap();
+        owner.tick(&mut draw, 2 * SECOND, 0);
+        draw.state.phase = a::gfx_power_phase_off;
+        draw.reads = 0;
+        assert!(owner.input(&mut draw, 3 * SECOND));
+        let wake_requests = draw.calls;
+        for _ in 1..32 {
+            assert!(owner.input_cached(&mut draw, 3 * SECOND));
+        }
+        assert_eq!((draw.reads, draw.calls), (4, wake_requests));
+        // A later burst sees a real ACK even without a topology revision.
+        draw.state.phase = a::gfx_power_phase_on;
+        draw.state.request_sequence = draw.intent.sequence;
+        assert!(owner.input(&mut draw, 3 * SECOND + 1));
+        assert!(!owner.input_cached(&mut draw, 3 * SECOND + 1));
+        // A sleep intent inside this burst still consumes the next wake event.
+        owner.sleep(&mut draw, 4 * SECOND).unwrap();
+        owner.tick(&mut draw, 4 * SECOND, 0);
+        assert!(owner.input_cached(&mut draw, 4 * SECOND));
+        assert_eq!(draw.intent.off, 0);
+        draw.stale = true;
+        let requests = draw.calls;
+        assert!(owner.input(&mut draw, 4 * SECOND + 1));
+        for _ in 0..32 {
+            assert!(owner.input_cached(&mut draw, 4 * SECOND + 1));
+        }
+        assert_eq!(draw.calls, requests); // Failed discovery grants no new request.
+        draw.stale = false;
+        owner.tick(&mut draw, 4 * SECOND + 2, 0);
+        assert!(owner.wake_pending());
     }
 }

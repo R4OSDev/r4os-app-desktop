@@ -5,7 +5,7 @@ use crate::diagnostics::wire as diagnostic;
 use alloc::vec::Vec;
 use r4os_contract as a;
 use r4os_sdk::{
-    resources::Timeout,
+    resources::{Resources, Timeout},
     services::{Call, Connection, Services},
     storage::Error as SdkError,
 };
@@ -24,6 +24,9 @@ impl From<SdkError> for Error {
 }
 pub struct Host<'a> {
     services: &'a Services<'a>,
+    resources: &'a Resources<'a>,
+    mode_io: super::mode_io::ModeIo<'a>,
+    retiring: bool,
     connection: Option<Connection<'a>>,
     owner: a::ProgramProcessHandle,
     claimed: bool,
@@ -32,7 +35,11 @@ pub struct Host<'a> {
     work: Option<diagnostic::Work>,
 }
 impl<'a> Host<'a> {
-    pub fn new(services: &'a Services<'a>, owner: a::ProgramProcessHandle) -> Result<Self> {
+    pub fn new(
+        services: &'a Services<'a>,
+        resources: &'a Resources<'a>,
+        owner: a::ProgramProcessHandle,
+    ) -> Result<Self> {
         if owner.instance_id == 0 || owner.generation == 0 || owner.reserved != 0 {
             return Err(Error::InvalidProvider);
         }
@@ -47,6 +54,9 @@ impl<'a> Host<'a> {
             .map_err(|_| Error::OutOfMemory)?;
         Ok(Self {
             services,
+            resources,
+            mode_io: super::mode_io::ModeIo::new()?,
+            retiring: false,
             connection: None,
             owner,
             claimed: false,
@@ -65,6 +75,10 @@ impl<'a> Host<'a> {
         self.connection.as_ref().map_or(0, Connection::handle)
     }
     pub fn claim(&mut self) -> Result<a::TrayDesktopExchange> {
+        if self.retiring {
+            self.close()?;
+            self.retiring = false;
+        }
         if self.connection.is_none() {
             self.connection = Some(self.services.open(c"WINSVC")?);
         }
@@ -251,16 +265,41 @@ impl<'a> Host<'a> {
     ) -> Result<a::WindowGraphicsReply> {
         self.graphics_call(a::window_graphics_op_publish, request)
     }
-    pub fn window_mode(&mut self, request: &a::WindowModeExchange) -> Result<a::WindowModeReply> {
-        if !self.claimed || !same(request.identity.desktop, self.owner) {
+    pub fn mode_busy(&self) -> bool {
+        self.mode_io.busy()
+    }
+    pub fn mode_start(
+        &mut self,
+        request: a::WindowModeExchange,
+        timeout_ticks: u64,
+    ) -> Result<bool> {
+        if !self.claimed || self.retiring || !same(request.identity.desktop, self.owner) {
             return Err(Error::InvalidProvider);
         }
-        let response: a::WindowModeReply = self.exchange(a::window_mode_op_exchange, request)?;
-        if response.version != 1 || response.size as usize != a::WindowModeReply::SIZE {
-            self.fail();
-            return Err(Error::InvalidProvider);
+        let connection = self.connection.as_ref().ok_or(Error::InvalidProvider)?;
+        self.mode_io.start(
+            self.resources,
+            connection.handle(),
+            connection.info.instance_id,
+            request,
+            timeout_ticks,
+        )
+    }
+    pub fn mode_poll(&mut self) -> Result<Option<super::mode_io::Completed>> {
+        if self.retiring {
+            let _ = self.mode_io.retire();
+            return Err(Error::Raw(a::err_closed));
         }
-        Ok(response)
+        match self.mode_io.poll() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.fail();
+                Err(error)
+            }
+        }
+    }
+    pub fn drain_modes(&mut self) -> bool {
+        self.mode_io.retire().unwrap_or(false)
     }
     pub fn graphics_consumer(
         &mut self,
@@ -332,8 +371,19 @@ impl<'a> Host<'a> {
     }
     pub fn close(&mut self) -> Result<()> {
         self.claimed = false;
-        if let Some(connection) = self.connection.as_mut() {
-            connection.close()?;
+        self.retiring = true;
+        // Endpoint Close releases only that reference, not an in-flight RPC.
+        // Keep its bounded native request/buffers through independent Close ACK;
+        // a late reply after this transition is discarded, never applied.
+        let connection_result = if let Some(connection) = self.connection.as_mut() {
+            connection.close().map_err(Error::from)
+        } else {
+            Ok(())
+        };
+        let modes_closed = self.mode_io.retire()?;
+        connection_result?;
+        if !modes_closed {
+            return Err(Error::Raw(a::io_error_busy));
         }
         self.connection = None;
         Ok(())
@@ -342,3 +392,7 @@ impl<'a> Host<'a> {
 fn same(a: a::ProgramProcessHandle, b: a::ProgramProcessHandle) -> bool {
     a.instance_id == b.instance_id && a.generation == b.generation && a.reserved == b.reserved
 }
+
+#[cfg(test)]
+#[path = "../../../Tests/RustNative/mode_service.rs"]
+mod tests;

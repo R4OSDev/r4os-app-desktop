@@ -440,6 +440,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.width,
             self.height,
             time.tick,
+            time.hz,
         );
         let bindings = core::array::from_fn(|i| {
             if !self.outputs.active()
@@ -1278,6 +1279,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         time: Time,
     ) -> bool {
         let mut active = false;
+        let mut power_sampled = false;
         for source in 0..4 {
             let limit = match source {
                 0 => 16,
@@ -1299,10 +1301,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 active = true;
                 self.diagnostics.input();
                 self.input.last_input_ns = time.nanoseconds;
-                if self
-                    .power
-                    .input(&mut Native(env.graphics), time.nanoseconds)
-                {
+                let waking = if power_sampled {
+                    self.power
+                        .input_cached(&mut Native(env.graphics), time.nanoseconds)
+                } else {
+                    power_sampled = true;
+                    self.power
+                        .input(&mut Native(env.graphics), time.nanoseconds)
+                };
+                if waking {
                     continue;
                 }
                 match sample {
@@ -1461,6 +1468,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.capture.screenshot_busy()
             || self.capture.recording_state() != 0
             || self.layout.busy()
+            || self.modes.busy()
             || self.hosted.pending.iter().any(|p| p.queued() != 0)
         {
             delay = 1;
@@ -1537,6 +1545,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             } else {
                 true
             };
+            let modes = host.drain_modes();
             let capture = self.capture.drain(now);
             let controls = self
                 .control
@@ -1590,6 +1599,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             self.hosted.poll_failed_spawns(programs);
             if capture
+                && modes
                 && diagnostic
                 && primary
                 && controls

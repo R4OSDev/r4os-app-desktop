@@ -39,7 +39,8 @@ explicit; no Studio project/version selection is stored here.
 
 `./Build.sh rust-native-test` compares the current Rust owners against the
 retained independent original pixel, input, geometry, resource and failure
-oracles. Native models are separate from real guest and physical evidence.
+oracles. A focused run can use `pwsh -NoProfile -File Tests/RustNative.ps1 -Filter <scope>`;
+comma-separated literal scopes must each select at least one case. Native models are separate from real guest and physical evidence.
 The useful original host sources are under `Tests/Original`; explicit targets
 such as `render-test` or `input-test` use the selected Zig tool directly
 from this repository with `-Dhost-tests=true`. They cannot build an old productive Desktop.

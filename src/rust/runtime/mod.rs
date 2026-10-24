@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod desktop;
 pub mod environment;
 pub mod library;
+mod mode_io;
 pub mod owned;
 pub mod service;
 mod shell_io;

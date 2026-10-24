@@ -19,12 +19,22 @@ use r4os_sdk::{
 /// commands; retired selectors must never silently start a normal host.
 pub fn arguments_supported(args: &[u8]) -> bool {
     let mut flags = 0u8;
-    for option in args.split(|byte| byte.is_ascii_whitespace()).filter(|part| !part.is_empty()) {
-        let flag = if option.eq_ignore_ascii_case(b"/CHECK-ISOLATED") { 1 }
-            else if option.eq_ignore_ascii_case(b"/INPUTTEST") { 2 }
-            else if option.eq_ignore_ascii_case(b"/HEADLESS-SUBSYSTEM") { 4 }
-            else { return false; };
-        if flags & flag != 0 { return false; }
+    for option in args
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|part| !part.is_empty())
+    {
+        let flag = if option.eq_ignore_ascii_case(b"/CHECK-ISOLATED") {
+            1
+        } else if option.eq_ignore_ascii_case(b"/INPUTTEST") {
+            2
+        } else if option.eq_ignore_ascii_case(b"/HEADLESS-SUBSYSTEM") {
+            4
+        } else {
+            return false;
+        };
+        if flags & flag != 0 {
+            return false;
+        }
         flags |= flag;
     }
     flags & 2 == 0 || (flags == 2 && args.eq_ignore_ascii_case(b"/INPUTTEST"))
@@ -74,7 +84,7 @@ pub fn admitted(app: &App<'_>, body: &mut impl Body) -> core::result::Result<i32
         return Err(Error::InvalidSelf);
     }
     let services = Services::new(app).map_err(Error::Resources)?;
-    let mut host = Host::new(&services, owner).map_err(Error::Host)?;
+    let mut host = Host::new(&services, &resources, owner).map_err(Error::Host)?;
     let clock = Clock::new(app);
     let deadline = clock
         .precise_instant()
