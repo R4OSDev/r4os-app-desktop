@@ -22,7 +22,7 @@ fn original_cpu_output_rotations_scales_partial_pixels_and_limited_channels() {
         Rotation::Clockwise180,
         Rotation::Clockwise270,
     ] {
-        for scale in [120, 180, 240] {
+        for scale in [60, 120, 150, 180, 240, 960] {
             let view = Viewport {
                 pixel_w: 12,
                 pixel_h: 8,

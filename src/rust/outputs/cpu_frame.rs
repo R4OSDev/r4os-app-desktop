@@ -349,7 +349,7 @@ pub(super) fn transform_region(
     output: &mut [u32],
     damage: Rect,
 ) -> Result<()> {
-    view.validate().map_err(|_| Error::State)?;
+    let projection = view.projection().map_err(|_| Error::State)?;
     if damage.is_empty() {
         return Ok(());
     }
@@ -363,16 +363,7 @@ pub(super) fn transform_region(
     }
     for y in damage.y as usize..damage.bottom() as usize {
         for x in damage.x as usize..damage.right() as usize {
-            let (ox, oy) = match view.rotation {
-                Rotation::Normal => (x, y),
-                Rotation::Clockwise90 => (view.pixel_h as usize - 1 - y, x),
-                Rotation::Clockwise180 => {
-                    (view.pixel_w as usize - 1 - x, view.pixel_h as usize - 1 - y)
-                }
-                Rotation::Clockwise270 => (y, view.pixel_w as usize - 1 - x),
-            };
-            let sx = ((2 * ox + 1) * 120) / (2 * view.scale as usize);
-            let sy = ((2 * oy + 1) * 120) / (2 * view.scale as usize);
+            let (sx, sy) = projection.logical_pixel(x, y);
             output[y * view.pixel_w as usize + x] =
                 *source.get(sy * stride + sx).ok_or(Error::State)?;
         }

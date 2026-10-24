@@ -6,7 +6,7 @@ use crate::render::{
     gpu::{Error, Result, device::Session},
     output_geometry::{
         self as geometry,
-        topology::{Rotation, Viewport},
+        topology::{Projection, Rotation, Viewport},
     },
     scene::intersect,
 };
@@ -399,14 +399,15 @@ impl Capture {
             self.ready = true;
             return Ok(());
         }
-        let bounds = geometry::logical(record.view).map_err(|_| Error::Limit)?;
+        let projection = record.view.projection().map_err(|_| Error::Limit)?;
+        let bounds = projection.logical();
         let count = self.damage.w as usize * self.damage.h as usize;
         let end = count.min(self.offset.saturating_add(CONVERSION_PIXELS));
         let pixels = reader.pixels()?;
         for i in self.offset..end {
             let x = self.damage.x as usize + i % self.damage.w as usize;
             let y = self.damage.y as usize + i / self.damage.w as usize;
-            let index = native_index(record.view, x, y);
+            let index = native_index(projection, x, y);
             self.logical[y * bounds.w as usize + x] = *pixels.get(index).ok_or(Error::State)?;
         }
         self.oriented_bytes = self
@@ -502,26 +503,71 @@ impl Capture {
         Ok(())
     }
 }
-pub fn native_index(view: Viewport, x: usize, y: usize) -> usize {
-    let swapped = matches!(
-        view.rotation,
-        Rotation::Clockwise90 | Rotation::Clockwise270
-    );
-    let (w, h) = if swapped {
-        (view.pixel_h, view.pixel_w)
-    } else {
-        (view.pixel_w, view.pixel_h)
+#[inline(always)]
+pub fn native_index(projection: Projection, x: usize, y: usize) -> usize {
+    let (px, py) = projection.native_pixel(x, y);
+    py * projection.pixel_width() + px
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        outputs::topology_wire,
+        render::output_geometry::topology::Point,
+        runtime::library::{required, scalar},
     };
-    let ox = (w as usize - 1).min(((2 * x + 1) * view.scale as usize) / 240);
-    let oy = (h as usize - 1).min(((2 * y + 1) * view.scale as usize) / 240);
-    let (px, py) = match view.rotation {
-        Rotation::Normal => (ox, oy),
-        Rotation::Clockwise90 => (oy, view.pixel_h as usize - 1 - ox),
-        Rotation::Clockwise180 => (
-            view.pixel_w as usize - 1 - ox,
-            view.pixel_h as usize - 1 - oy,
-        ),
-        Rotation::Clockwise270 => (view.pixel_w as usize - 1 - oy, ox),
-    };
-    py * view.pixel_w as usize + px
+    use core::mem::MaybeUninit;
+    use r4os_library_helpers::raw as c;
+
+    #[test]
+    fn local_capture_samples_match_independent_zig_global_point_owner() {
+        for rotation in [
+            Rotation::Normal,
+            Rotation::Clockwise90,
+            Rotation::Clockwise180,
+            Rotation::Clockwise270,
+        ] {
+            for scale in [60, 120, 150, 180, 240, 960] {
+                let view = Viewport {
+                    origin: Point { x: -19, y: 7 },
+                    pixel_w: 17,
+                    pixel_h: 11,
+                    scale,
+                    rotation,
+                };
+                let projection = view.projection().unwrap();
+                let bounds = projection.logical();
+                let wire = topology_wire::view(view).unwrap();
+                // The independent current Zig topology keeps its original
+                // arithmetic. Never derive expectations through this Rust core.
+                for y in 0..bounds.h as usize {
+                    for x in 0..bounds.w as usize {
+                        let point = topology_wire::point(Point {
+                            x: bounds.x + x as i32,
+                            y: bounds.y + y as i32,
+                        })
+                        .unwrap();
+                        let mut original = MaybeUninit::uninit();
+                        required(unsafe {
+                            c::R4GfxTopologyViewport_physical(
+                                0,
+                                &wire,
+                                &point,
+                                original.as_mut_ptr(),
+                            )
+                        })
+                        .unwrap();
+                        let ox = scalar(unsafe { c::R4GfxTopologyPoint_get_x(original.as_ptr()) })
+                            .unwrap();
+                        let oy = scalar(unsafe { c::R4GfxTopologyPoint_get_y(original.as_ptr()) })
+                            .unwrap();
+                        assert_eq!(
+                            native_index(projection, x, y),
+                            oy as usize * view.pixel_w as usize + ox as usize
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
