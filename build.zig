@@ -1,40 +1,28 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    // Eigenstaendiger Bau aus dem Manifest, seit 0.61.8. Die Hosttests
-    // darunter bleiben unveraendert - hier kommt etwas dazu, nichts weg.
+    // Rust product builds use the SDK's shared manifest/Cargo owner. The
+    // independent original Zig oracles remain available as explicit targets.
     const sdk_build = b.lazyImport(@This(), "r4os_sdk") orelse return;
     const sdk_dep = b.dependencyFromBuildZig(sdk_build, .{});
     const libraries_build = b.lazyImport(@This(), "r4os_libraries") orelse return;
     const libraries_dep = b.dependencyFromBuildZig(libraries_build, .{});
     const sdk = sdk_build.sdk(b, sdk_dep, .{});
-    _ = sdk.addR4MFWithOptions(b.path("module.R4MF"), .{
-        .zig_module_roots = &.{
-            libraries_dep.namedLazyPath("r4std_zig_binding"),
-            libraries_dep.namedLazyPath("r4img_zig_binding"),
-            libraries_dep.namedLazyPath("r4gfx_zig_binding"),
-            libraries_dep.namedLazyPath("r4gfx_desktop_outputs"),
-            libraries_dep.namedLazyPath("r4gfx_readback"),
-            libraries_dep.namedLazyPath("r4enc_zig_binding"),
-            libraries_dep.namedLazyPath("r4enc_recording_mux"),
-            libraries_dep.namedLazyPath("r4enc_recording_pixels"),
-            libraries_dep.namedLazyPath("r4std_console_text"),
-            b.path("Contract/desktop_check_v1.zig"),
-        },
-    });
+    if (!(b.option(bool, "host-tests", "Build only explicit original host oracles") orelse false))
+        @panic("Build the Rust product through Build.sh/Build.bat. Original Zig oracles require -Dhost-tests=true.");
 
-    const check_wire = b.createModule(.{ .root_source_file = b.path("Contract/desktop_check_v1.zig"), .target = b.graph.host });
+    const check_wire = b.createModule(.{ .root_source_file = b.path("Contract/desktop_check_v2.zig"), .target = b.graph.host });
     b.step("diagnostic-test", "Explicit bounded Desktop work byte contract and generation binding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check_wire })).step);
 
     const test_target = b.graph.host;
     const console_text = b.createModule(.{ .root_source_file = libraries_dep.namedLazyPath("r4std_console_text"), .target = test_target });
     const test_optimize: std.builtin.OptimizeMode = .Debug;
     const host_r4os = sdk.createR4osModule(test_target, test_optimize);
-    const capture_root = b.createModule(.{ .root_source_file = b.path("src/capture_file_test.zig"), .target = test_target, .optimize = test_optimize });
+    const capture_root = b.createModule(.{ .root_source_file = b.path("Tests/Original/capture_file_test.zig"), .target = test_target, .optimize = test_optimize });
     capture_root.addImport("r4os", host_r4os);
     const capture_tests = b.addRunArtifact(b.addTest(.{ .root_module = capture_root }));
     b.step("capture-test", "Exact capture stage publication and acknowledgement-only cleanup").dependOn(&capture_tests.step);
-    const input_root = b.createModule(.{ .root_source_file = b.path("src/console_input.zig"), .target = test_target, .optimize = test_optimize });
+    const input_root = b.createModule(.{ .root_source_file = b.path("Tests/Original/console_input.zig"), .target = test_target, .optimize = test_optimize });
     input_root.addImport("r4os", host_r4os);
     const input_tests = b.addRunArtifact(b.addTest(.{ .root_module = input_root }));
     const input_step = b.step("input-test", "Desktop typed input, exact Run UTF8/graphemes and current window generation");
@@ -120,36 +108,71 @@ pub fn build(b: *std.Build) void {
     r4std_test.addImport("r4os", host_r4os);
     r4std_test.addImport("r4std", r4std);
 
+    // This source-only Rust oracle shares the existing original R4STD
+    // provider above. It never installs or builds a replacement Desktop.
+    const rust_provider = b.createModule(.{ .root_source_file = b.path("Tests/RustNative/standard_provider.zig"), .target = test_target, .optimize = .ReleaseSafe, .pic = true });
+    rust_provider.addImport("provider", r4std_provider);
+    rust_provider.addImport("r4os", host_r4os);
+    rust_provider.addImport("color_provider", color_provider);
+    rust_provider.addImport("desktop_check",check_wire);
+    const rust_gpu_model = b.createModule(.{ .root_source_file = b.path("Tests/Original/composition_gpu_test.zig"), .target = test_target, .optimize = .ReleaseSafe, .pic = true });
+    rust_gpu_model.addImport("r4os",host_r4os);
+    rust_gpu_model.addImport("r4img",r4img);
+    // Native aggregate only: the canonical PS7 runner stages the original
+    // six source files and removes exactly the otherwise colliding R4L entry.
+    // Decoder/API exports and normal product/test modules stay untouched.
+    const rust_image_root=b.option([]const u8,"rust-image-oracle-root","Temporary native image sources staged by RustNative.ps1");
+    const rust_image_provider=if(rust_image_root) |path| blk:{
+        const module=b.createModule(.{.root_source_file=.{.cwd_relative=b.pathJoin(&.{path,"main.zig"})},.target=test_target});
+        module.addImport("r4os",host_r4os);module.addImport("r4l_contract",image_contract);
+        module.addIncludePath(libraries_dep.path("R4IMG/ThirdParty/stb"));
+        module.addCSourceFile(.{.file=libraries_dep.path("R4IMG/ThirdParty/stb/r4img_stb.c"),.flags=&.{"-std=c11","-fno-builtin"}});
+        break :blk module;
+    }else image_provider;
+    rust_gpu_model.addImport("image_provider",rust_image_provider);
+    rust_gpu_model.addImport("color_provider",color_provider);
+    rust_gpu_model.addImport("png_fixture",png_fixture);
+    rust_gpu_model.addImport("raster_fixture",raster_fixture);
+    rust_gpu_model.addImport("profile_fixtures",b.createModule(.{.root_source_file=libraries_dep.path("R4GFX/Tests/Color/fixtures.zig"),.target=test_target,.optimize=test_optimize}));
+    rust_gpu_model.addImport("r4gfx",r4gfx);
+    rust_gpu_model.addImport("r4gfx_device_provider",r4gfx_provider);
+    rust_gpu_model.addImport("r4gfx_desktop_outputs",topology);
+    rust_gpu_model.addImport("r4gfx_readback",readback);
+    rust_provider.addImport("gpu_owner_model",rust_gpu_model);
+    const rust_provider_object = b.addObject(.{ .name = "desktop-rust-standard", .root_module = rust_provider });
+    rust_provider_object.bundle_compiler_rt = true;
+    b.step("rust-provider-oracle", "Build the existing R4STD provider for Rust configuration cases").dependOn(&b.addInstallFile(rust_provider_object.getEmittedBin(), "lib/desktop-rust-standard.o").step);
+
     const model_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/model.zig"),
+            .root_source_file = b.path("Tests/Original/model.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const window_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/window.zig"),
+            .root_source_file = b.path("Tests/Original/window.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const surface_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/surface.zig"),
+            .root_source_file = b.path("Tests/Original/surface.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const paint_module = b.createModule(.{
-        .root_source_file = b.path("src/paint.zig"),
+        .root_source_file = b.path("Tests/Original/paint.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
     paint_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
     const paint_tests = b.addTest(.{ .root_module = paint_module });
     const draw_module = b.createModule(.{
-        .root_source_file = b.path("src/draw.zig"),
+        .root_source_file = b.path("Tests/Original/draw.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -159,7 +182,7 @@ pub fn build(b: *std.Build) void {
     draw_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const draw_tests = b.addTest(.{ .root_module = draw_module });
     const compositor_module = b.createModule(.{
-        .root_source_file = b.path("src/compositor.zig"),
+        .root_source_file = b.path("Tests/Original/compositor.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -177,7 +200,7 @@ pub fn build(b: *std.Build) void {
     compositor_module.addImport("r4gfx_device_provider", r4gfx_provider);
     const compositor_tests = b.addTest(.{ .root_module = compositor_module });
     const gui_shape_renderer_module = b.createModule(.{
-        .root_source_file = b.path("src/gui_shape_renderer.zig"),
+        .root_source_file = b.path("Tests/Original/gui_shape_renderer.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -185,20 +208,20 @@ pub fn build(b: *std.Build) void {
     const gui_shape_renderer_tests = b.addTest(.{ .root_module = gui_shape_renderer_module });
     const scene_buffer_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/scene_buffer.zig"),
+            .root_source_file = b.path("Tests/Original/scene_buffer.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const start_menu_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/start_menu.zig"),
+            .root_source_file = b.path("Tests/Original/start_menu.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const desktop_config_module = b.createModule(.{
-        .root_source_file = b.path("src/desktop_config.zig"),
+        .root_source_file = b.path("Tests/Original/desktop_config.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -209,7 +232,7 @@ pub fn build(b: *std.Build) void {
         .root_module = desktop_config_module,
     });
     const desktop_folder_module = b.createModule(.{
-        .root_source_file = b.path("src/desktop_folder.zig"),
+        .root_source_file = b.path("Tests/Original/desktop_folder.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -220,7 +243,7 @@ pub fn build(b: *std.Build) void {
         .root_module = desktop_folder_module,
     });
     const desktop_layout_module = b.createModule(.{
-        .root_source_file = b.path("src/desktop_layout.zig"),
+        .root_source_file = b.path("Tests/Original/desktop_layout.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -231,7 +254,7 @@ pub fn build(b: *std.Build) void {
         .root_module = desktop_layout_module,
     });
     const desktop_items_module = b.createModule(.{
-        .root_source_file = b.path("src/desktop_items.zig"),
+        .root_source_file = b.path("Tests/Original/desktop_items.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -243,55 +266,55 @@ pub fn build(b: *std.Build) void {
     });
     const icon_source_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/icon_source.zig"),
+            .root_source_file = b.path("Tests/Original/icon_source.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const quick_launch_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/quick_launch.zig"),
+            .root_source_file = b.path("Tests/Original/quick_launch.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const text_field_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/text_field.zig"),
+            .root_source_file = b.path("Tests/Original/text_field.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const run_command_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/run_command.zig"),
+            .root_source_file = b.path("Tests/Original/run_command.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const console_scroll_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/console_scroll.zig"),
+            .root_source_file = b.path("Tests/Original/console_scroll.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const appearance_signal_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/appearance_signal.zig"),
+            .root_source_file = b.path("Tests/Original/appearance_signal.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const appearance_colors_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/appearance_colors.zig"),
+            .root_source_file = b.path("Tests/Original/appearance_colors.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const wallpaper_module = b.createModule(.{
-        .root_source_file = b.path("src/wallpaper.zig"),
+        .root_source_file = b.path("Tests/Original/wallpaper.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -311,7 +334,7 @@ pub fn build(b: *std.Build) void {
         .root_module = wallpaper_module,
     });
     const gui_frame_snapshot_module = b.createModule(.{
-        .root_source_file = b.path("src/gui_frame_snapshot.zig"),
+        .root_source_file = b.path("Tests/Original/gui_frame_snapshot.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
@@ -321,20 +344,20 @@ pub fn build(b: *std.Build) void {
     });
     const window_service_gate_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/window_service_gate.zig"),
+            .root_source_file = b.path("Tests/Original/window_service_gate.zig"),
             .target = test_target,
             .optimize = test_optimize,
         }),
     });
     const tray_module = b.createModule(.{
-        .root_source_file = b.path("src/tray.zig"),
+        .root_source_file = b.path("Tests/Original/tray.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });
     tray_module.addImport("r4os", sdk.createR4osModule(test_target, test_optimize));
     const tray_tests = b.addTest(.{ .root_module = tray_module });
     const physical_input_module = b.createModule(.{
-        .root_source_file = b.path("src/physical_input.zig"),
+        .root_source_file = b.path("Tests/Original/physical_input.zig"),
         .target = test_target,
         .optimize = test_optimize,
     });

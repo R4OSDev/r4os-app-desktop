@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .r4os_sdk = .{
-            .url = "https://github.com/R4OSDev/r4os-sdk/archive/d578f88cd64e30fd44b524928a0760b6422637cd.tar.gz",
-            .hash = "r4os_sdk-0.64.54-NnPzAuuaFgHaPV6Krc-GrjXVwy8JZSuoGaAo8X7J7dUf",
+            .url = "https://github.com/R4OSDev/r4os-sdk/archive/698b4374abe43ab775aaa121cd4e26af83e12bd4.tar.gz",
+            .hash = "r4os_sdk-0.64.93-NnPzAsvZ0QG-2-gFfvPwIWO5z9YMYuRe_0XKJaB98brU",
         },
         .r4os_libraries = .{
-            .url = "https://github.com/R4OSDev/r4os-libraries/archive/86586b02ebe88b06a11ae71d4a41be19efca4330.tar.gz",
-            .hash = "r4os_libraries-0.64.19-dH4fNZA1hQEAExlxs_RtHGyRcrdxhxkuLviEa3v2U6lJ",
+            .url = "https://github.com/R4OSDev/r4os-libraries/archive/737b980481a2a2b6f9e3fd62f06e6e6a7ab2d87c.tar.gz",
+            .hash = "r4os_libraries-0.64.30-dH4fNXvq2QH86RvheGlcD9DLdkEU2iU7y4b0NvWoT5fF",
         },
     },
     .paths = .{
@@ -26,6 +26,9 @@
         "DOCUMENTATION.de.txt",
         "THIRD_PARTY_NOTICES.md",
         "src",
+        "Cargo.toml",
+        "Cargo.lock",
+        "Tests",
         "Contract",
         "PROVENANCE.txt",
     },

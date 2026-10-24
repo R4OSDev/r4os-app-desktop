@@ -1,302 +1,109 @@
-﻿# R4DESK.R4X
+# R4DESK.R4X
 
-`R4DESK.R4X` is an independent R4OS application implemented in Zig.
+R4DESK is R4OS's independent desktop host, implemented in modular Rust with
+`no_std` and `alloc`. `module.R4MF` owns the module version, imports, role and
+unchanged `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X` image target. Cargo owns the
+locked crate graph and features. There is one productive application entry.
 
-## Package
+The main runtime coordinates concrete owners through short operations and
+borrowed views:
 
-- Version: see `module.R4MF`
-- Image target: `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X`
-- Image scope: `slim`
-- Canonical project manifest: `module.R4MF`
+- `windows`, `input`: window/focus/drag/resize, current local/remote/physical
+  input and retained console event suffixes.
+- `shell`: menus, taskbar, tray/volume, dialogs, Run, desktop objects, settings,
+  clocks, assets and bounded caches.
+- `hosted`: exact process generations, GUI command/frame snapshots, terminal
+  text, shared images and the installed subsystem catalogue.
+- `render`: scene/damage/layers, text/shapes/images, software composition and
+  native jobs/resources/receipts.
+- `outputs`: connector generations, CPU/native outputs, modes/color, cursor,
+  power and stepwise retirement. Shared geometry belongs to R4GFX.
+- `capture`: demand-driven immutable publication, screenshot and recording
+  workers, exact file publication and retained failure cleanup.
+- `diagnostics`: the small current owner boundary; Spectra owns check work,
+  benchmark orchestration and results.
 
-The manifest is the single source of truth for the artifact, imports, image
-target, and package metadata.
+Platform and reusable library operations use the general SDK. The two small
+C companions provide portable BLAKE3 and compiler floating point intrinsics;
+they do not implement a second desktop. External R4OS libraries retain their
+own language, ownership and versioning.
 
-## Explicit functional checks
+## Build and focused checks
 
-`SPECTRA CHECK DESKTOP [/JSON]` runs the shared window/focus/drag/resize/idle,
-tray, volume-target and public capture checks. It requires the current Desktop,
-WINSVC and the Full-profile APPDEF/CLOCK fixtures. Run it through SSH with a
-quiet Desktop: foreign windows, active interactions and new user input refuse
-or abort the job. Spectra owns its two children and waits/reaps their exact
-handles; it never drains physical input or closes foreign windows.
+Run `./Build.sh` on Linux or `Build.bat` on Windows. The thin launchers share
+PowerShell 7 and the ordinary SDK manifest/Cargo builder. `Settings.R4S`
+resolves all component, compiler and output paths relative to their owners.
+The manifest explicitly selects speed optimization for the frame workload;
+Rust overflow checks remain enabled. The selected matched Rust tools and necessary technical qualification remain
+explicit; no Studio project/version selection is stored here.
 
-`/RESTART`, `/AUDIO` and `/CAPTURE` are explicit isolated variants. Boot this
-Desktop with `/CHECK-ISOLATED` before selecting them. The last variant checks
-immutable snapshots across resize/source reset, the three-snapshot limit,
-a real exit-owned Spectra child and the productive screenshot BMP worker.
-Own temporary screenshot files are CREATE-only and removed after worker join.
-`SPECTRA CHECK DESKTOP /CANCEL` starts this same check in an owned Spectra
-child, requests Close after two real windows and verifies Exit4, exact Reap
-and empty resources. Desktop releases the UI binding without consuming the
-controller's process completion.
-`Contract/desktop_check_v1.zig` is the language-neutral, fixed-byte owner
-boundary; the passive WINSVC operation4500 remains separate.
+`./Build.sh rust-native-test` compares the current Rust owners against the
+retained independent original pixel, input, geometry, resource and failure
+oracles. Native models are separate from real guest and physical evidence.
+The useful original host sources are under `Tests/Original`; explicit targets
+such as `render-test` or `input-test` use the selected Zig tool directly
+from this repository with `-Dhost-tests=true`. They cannot build an old productive Desktop.
 
-Since 0.86.77 the generic `/SMOKE-WINDOW-IDLE` and old Desktop PERF
-forwarders are retired. Use the CHECK/BENCH commands above and below; they
-return to their caller. `/SMOKE-WINDOW-IDLE` remains only with an explicit
-`/OUTPUTS`, `/CURSOR`, `/SWAPCHAIN` or `/SCREEN-POWER` hardware purpose;
-without one of those options, or with `/CAPTURE`, it fails with Exit2.
-Those private boot qualifications remain poweroff harnesses. They neither
-extend Spectra's hardware scope nor replace its current functional checks.
-Their RemoteFrame consumer invokes `SPECTRA CHECK REMOTEFRAME /JSON` and
-requires the exact child completion/reap, without RFDIAG or success markers.
-Other DISPLAYD hardware probes keep their distinct output assertions.
+`Tests/RunInput`, `Tests/CaptureFile` and `Tests/RustCore` contain reusable small
+source fixtures. Materialize only an active temporary project through the
+ordinary SDK, then remove its completed files and guest environment.
 
-The SDK APPZCON `/TRAYSMOKE` fixture remains a separate console-facade and
-owner-exit test: it intentionally leaves an item behind and checks the real
-WINSVC cleanup. The audio-output boot probe also retains its receiver-choice
-purpose. Neither requires keeping the removed generic forwarders.
+## Current diagnostics
 
-## Offscreen composition diagnostics
+`SPECTRA CHECK DESKTOP /JSON` checks actual owned windows, focus, geometry,
+idle behavior, tray, volume targets and public capture. Use a quiet Desktop;
+foreign windows and user input refuse or abort the isolated work.
+`/RESTART`, `/AUDIO` and `/CAPTURE` require `/CHECK-ISOLATED`; `/HOST` creates
+and retires its own isolated host only when no foreign host exists.
+`/CANCEL` retains the original actual Exit4/completion/reap check.
 
-`/COMPOSITIONVERIFY` runs bounded desktop scenes through the productive
-compositor, painter, layer cache and GPU engine. An explicit readback
-destination completes after CE/GR retirement without receiver queries,
-swapchain creation, presentation or Window service registration. Normal
-Desktop startup retains its display destination.
+`Contract/desktop_check_v2.zig` is the fixed-byte language-neutral boundary.
+The passive WINSVC operation4500 remains distinct. Requests, generations,
+tickets, deadlines and actual resource acknowledgements remain authoritative;
+copying/submitting a frame does not prove physical visibility.
 
-The diagnostic compares 640x400 software and native frames for cold/warm
-resources, one-pixel damage, menus, window moves/close, occlusion and full
-reconstruction after cancellation. Warm resources must not upload again;
-the GPU canvas must remain untouched by CPU composition. These timings
-include diagnostic capture/admission and do not measure displayed FPS.
+`SPECTRA BENCH DESKTOP` uses the original SDR RAM work and pixel oracles.
+`SPECTRA BENCH SNES /WINDOW /SMALL` or `/MAXIMIZED` runs the existing SNES-v2
+work with reserved exact geometry. `/OWN-DESKTOP` owns only its new private
+host. Commands return to their caller. Normal frames start no extra sampler.
 
-`/COMPOSITIONVERIFY /TRANSITIONS` adds changing generic GUI commands,
-window/fullscreen/menu/restore/resize/occlusion/reveal/close transitions,
-the observed CE/GR queue peak and idle allocation checks. It uses the real
-window geometry owner and private frame snapshots; Window service and
-physical presentation are separate qualifications.
+The direct Desktop entry accepts normal startup, `/CHECK-ISOLATED`, the
+retained terminal `/INPUTTEST`, and the explicit Test-profile
+`/HEADLESS-SUBSYSTEM` handoff. The latter starts `SPECTRA CHECK SUBSYSTEM`,
+waits for its exact completion/reap and hands AUTOEXEC to the terminal.
+Spectra owns the original BASIC/GB/SNES scenarios, including both60-second
+emulator pairs, rejection and persistence. The host reads original reports
+from the disposable disk after normal QEMU shutdown. Terminal repaint rows
+are not a lossless JSON transport.
 
-`/COMPOSITIONREFERENCES` reuses the original glyph/indexed/alpha/ARGB and
-curve/shadow/large-image fixtures from the existing render tests. It also
-checks fractional nearest sampling, transported image boundaries, the 16-draw
-batch limit, 1-MB staging, budget rejection, Busy and demand-driven capture.
-The capture test has no RemoteFrame publication or visibility claim.
+Former embedded smoke/composition CLI selectors are retired. Useful original
+native/offscreen/color/output/cursor/power/fault oracles remain in the current
+native comparison. Historical physical qualifications keep their original
+artifact and hardware scope; this Rust port does not renew them.
 
-`/COMPOSITIONVERIFY /CAPTURE` follows private native scenes through the
-productive capture owner, public immutable snapshots and Print Screen BMP
-worker. It checks file pixels, window changes, 125% capture scaling, rotation,
-separate and embedded cursors, held snapshots across source reset, the
-per-program lease limit and demand retirement. It requires no existing capture
-readers and temporarily owns the public capture source until process exit.
-These are diagnostic publications; no display visibility is asserted.
+## Capture and lifecycle
 
-Adding `/CLIENT` runs three frames with a bounded external-client handshake.
-The final frame resizes a window and resets the capture source while an
-external client may still be receiving the previous immutable image.
-`C:\TEMP\CAPVERIFY.TXT` names each completed phase and BMP; writing the next
-phase number (1, 2, then 3) to `C:\TEMP\CAPVERIFY.NEXT` advances it. Both files
-must be absent before starting. Each wait is limited to 60 seconds. The client
-must disconnect before acknowledging the final phase so retirement can be
-checked. No client or network transport is silently simulated.
-SFTP acknowledgments use new files; remove only the preceding acknowledged
-`CAPVERIFY.NEXT` before uploading its successor.
+Print Screen saves BMP to `C:\SCREENSHOTS`. Ctrl+Print Screen starts/stops
+video-only H.264 Matroska recording in `C:\RECORDINGS`; REC/Saving and the red
+taskbar edge indicate its state. Resolution/source changes or acknowledged
+backend fallback start another part. Busy encoding skips intermediate frames
+while preserving unchanged-picture durations. Optional AMD/NVIDIA/software
+encoders remain with R4ENC; recording does not change the RDP codec.
 
-The normal Desktop event loop observes its generation-bound Close request
-and returns through the existing resource destructors and process retirement.
-Normal startup first claims its exact Desktop generation in WindowService,
-before creating display owners or replacing capture state. A second Desktop
-cannot displace the active host. A normally spawned replacement requires
-Kernel 0.1.238 and WindowService 0.1.11; it owns the desktop without waiting
-to be attached as an application window.
+Screenshot/recording share `capture/file.rs`: exclusive CREATE, retained
+Finish, create-only atomic publication and exact Abort. Failed cleanup keeps
+the owner/stage and blocks replacement until actual acknowledgement. Worker
+Join and snapshot/encoder/GPU retirement precede resource release; Drop is not
+an acknowledgement. Normal startup claims WINSVC before display/capture
+creation, and a second host cannot displace the current one. Restart keeps
+existing GUI clients bound to their actual identities.
 
-These commands require native R4GFX render/copy operations and reject missing
-capabilities. Physical GA106 composition evidence belongs to 0.82.11/12;
-capture and process lifecycle evidence belongs to 0.82.14. Active output and
-visible operation remain 0.82.37/38.
-
-Settings > Display opens the existing Appearance application with `/DISPLAY`
-for common SDR mode selection and confirmation. Both the built-in menu and
-the distribution menu include this entry. The output revision path updates
-Desktop layout and mouse bounds after acknowledged mode changes and rollback.
-
-Roadmap 0.82.27 qualifies actual GA106 WSI pixel/depth readbacks, regular
-Desktop window/fullscreen/resize/occlusion, source FP16/PQ capture, retained
-producer fences beyond Deviceclose, full Desktop restart with surviving GUI,
-and real MMU/FLR followed by fresh same-GUI pixels and exact warm retirement.
-Headless windows explicitly use an all-zero output and portable system BOs;
-the native producer's DeviceExecution fence keeps its actual GPU identity.
-Old contract layouts and slots remain unchanged. Active TV/output integration
-and manual variants stay in0.82.37/38. Evidence: GrafikVulkan07937.txt/.json
-in Docs. Existing failed results and original software/model limits remain.
-
-## Build
-
-On Windows:
-
-    Build.bat
-
-On Linux or macOS:
-
-    ./Build.sh
-
-The build starters resolve the current local R4OS dependency checkouts through
-`Settings.R4S`. The URL and hash entries in `build.zig.zon` record the
-last verified standalone dependency identities; workspace builds use the
-mapped local checkouts.
-
-## Documentation
-
-**Ctrl+Print Screen** starts or stops screen recording. The taskbar has a red
-edge and its clock shows `REC`; `Saving` indicates finalization. Completed
-H.264 Matroska parts are saved in `C:\RECORDINGS`. Plain Print Screen saves a
-bitmap in `C:\SCREENSHOTS`. Recordings contain video only.
-
-The recorder uses optional R4ENC ENCODE_V1 on its own worker. It prefers a
-supported AMD or NVIDIA encoder and explicitly falls back to software after confirmed
-retirement. Resolution/source changes and backend fallback start a new file
-part. Input is the existing immutable sRGB CPU capture; conversion yields
-limited-range NV12 with sRGB transfer metadata. Native YUV producers can use
-R4ENC directly without this CPU capture/conversion step. Intermediate frames
-are skipped when busy; unchanged picture durations are preserved. File I/O
-holds neither a capture snapshot nor a display buffer. No capture or encoder
-work starts until requested. R4ENC's process runtime survives repeated
-recordings and finishes only at Desktop shutdown.
-
-The recording worker gives each encode job a finite five-second budget,
-including cold native storage and engine setup. The GA106 capture path takes
-just over two seconds for its first frame; the previous two-second budget
-caused an unnecessary software fallback. Packet waits allow one additional
-second for the exact input-retirement acknowledgement.
-
-Since 0.1.74, AMD AVC input uses a 256-byte pitch and neutral initialized
-16-row coded padding. Visible capture dimensions remain unchanged. The
-native encoder borrows this unmapped system buffer until its own completion;
-the capture snapshot is already released. RDP continues to use its existing
-bitmap/RLE/NSCodec transport; recording does not advertise an AVC RDP codec.
-See `Docs/Drivers/AMDCapture08032.txt` for integration evidence and limits.
-
-The taskbar owns the notification-area layout. Its built-in volume item sits
-immediately left of the clock and controls AUDSVC's persistent global master
-volume and mute state through the bounded app-audio service facade. The
-anchored popup remains part of the desktop instead of creating a second
-window or mixer process.
-
-Detailed German technical notes from the migration are preserved in
-`DOCUMENTATION.de.txt`. Source-transfer provenance is recorded in
-`PROVENANCE.txt`.
+See `Docs/Desktop/RustMigration08686.json` and `Docs/Diagnostics/Spectra.txt`
+in the workspace for exact qualified artifacts, comparisons and limits.
+No Windows, physical GPU/output, cursor-latency or direct Rust SIMD claim
+follows from the local software and native-model checks.
 
 ## License
 
-Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
-and `NOTICE`. Any repository-specific external material is documented in
-`THIRD_PARTY_NOTICES.md`.
-
-
-Desktop-Defaults ab 0.78.63
--------------------------
-Desktop- und Zeitkonfiguration werden beim Start zuerst wiederhergestellt.
-Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
-nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
-nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
-meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
-
-The existing desktop activity loop observes the optional R4DRAW ABI12
-output revision and invalidates the scene when it changes. Older API tables
-remain supported. No second hotplug timer or event queue is introduced.
-Native outputs use coordinated per-output surfaces, generations and recovery.
-The permanent bootfb fallback retains the actual boot geometry.
-
-0.79.44 fixes the COLOR_V1 manifest minimum (revision 4) and identifies early
-startup failures. Opaque internal SDR tiles copy their final RGB values without
-reading covered layers or round-tripping through FP16. Partial, translucent
-and externally supplied color images keep the full color pipeline. Existing
-render tests compare the paths pixel-for-pixel. The window-idle smoke exposes
-legacy damage/copy counters and separate managed-output completion/cost data.
-Measured software limits and examples: Docs/Desktop/GrafikIntegration07944.txt.
-These timings are not NVIDIA throughput or monitor-refresh guarantees.
-Build.bat/Build.sh share PS7 orchestration via the configured SDK checkout.
-
-Physical pointer polls now report only real motion, wheel or button changes.
-An unchanged local pointer cannot overwrite a remote click or renew the
-screen-idle timer. Physical and remote button histories remain independent.
-
-
-CPU output damage (0.81.21)
----------------------------
-Each of the three CPU swapchain images retains its own validity and bounded
-missing-region history. The acquired image repaints only accumulated damage.
-Unknown contents, configuration changes and partial failures force complete
-reconstruction. Color-profile/range encoding uses repaired native rows only;
-the canonical scratch image remains separate for composition and capture.
-Capture metadata describes current scene damage, not backbuffer age repair.
-The existing render-test covers all rotations and 100/150/200 percent scale
-against full output; output_damage.zig covers 100 alternating images, rejected
-writes, configuration reset and independent output ownership.
-
-
-Software composition candidates (0.81.22)
-----------------------------------------
-A bounded sweep index derives disjoint active tile blocks and ordered command
-bitsets from validated scissors. It avoids visiting empty screen tiles and
-scanning every layer for each active tile. Two fixed edge arrays use 16 KB
-inside the existing budgeted color scratch. The index is rebuilt per frame.
-The existing render-test checks sparse 1024x1024 composition: 16 of 256 tiles
-and 17 instead of 4352 candidate visits, with exact unchanged/alpha pixels.
-
-
-Bounded color work (0.81.23)
------------------------------
-Only the affected rectangle within an active tile enters COLOR_V1. A proven
-opaque first internal layer initializes that working rectangle directly;
-covered destination conversion and its first OVER read are omitted. Failure
-still discards the unpublished output and invalidates its contents.
-The sparse reference case reports 129 converted pixels and 780/776 COLOR_V1
-read/write bytes; index and alpha-proof reads are separate from these counts.
-
-
-Composition progress (0.81.24)
------------------------------
-Common GPU admission uses at most 64 attempts or 250 microseconds between
-bounded operations. Actual Busy waits for progress; a completion observed
-during collection can retry the exact operation within the same budget.
-Runnable budget exhaustion yields cooperatively after normal input handling.
-Pending work uses the existing desktop activity sequence and a one-tick
-deadline fallback. The common Kernel queue coalesces completion/retirement
-wakes outside graphics owners. No backend-specific wait or ABI was added.
-
-## Explicit output benchmarks
-
-`SPECTRA BENCH DESKTOP` invokes the original static SDR RAM fixture and its
-pixel hashes. `SPECTRA BENCH SNES /WINDOW` reserves the original Small or
-Maximized geometry and bounded copy trace before the exact pending GUI is
-attached. Spectra owns that child and waits for completion; Desktop uses the
-existing cooperative pump while its window is bound, then returns to normal
-request handling for final reporting and release. Render/emulator work and
-clocks are not duplicated in the frontend. The owner JSON is forwarded as an
-original value, with physical visibility remaining unknown. Only an explicit
-private `/OWN-DESKTOP` frontend option starts and closes its own isolated host.
-Lifecycle and contract details: `Docs/Diagnostics/Spectra.txt` in the workspace.
-
-## Console input
-
-Terminal key delivery uses typed Unicode scalars or explicit logical keys. Clipboard bytes80/81 remain text data. Each of the four window bindings retains up to4096 pending events and retires only the acknowledged prefix; pending input never follows a replacement process generation. `Build.sh input-test` checks retained suffixes and binding changes. `/INPUTTEST` exercises real terminal windows through typed keyboard delivery, clipboard paste and history/backspace; it returns normally.
-
-## Run input
-
-Since 0.86.84 the Run editor retains whole UTF8 scalar input and uses the
-original R4STD extended grapheme boundaries for Backspace. The 127-byte
-command limit rejects an invalid or oversized Set/Paste as a whole and keeps
-the prior input. Browse retains complete paths and quotes paths containing
-spaces; display-tail clipping does not change the launch identity.
-
-`input-test` includes the existing typed console, Run editor and command
-cases. `Tests/RunInput` contains small SDK-only comparison sources for an
-owned quiet QEMU guest: exact clipboard bytes and a real Unicode-path GUI
-launch, Close acknowledgement and Desktop-owned reap. Their manifests/builds
-are materialized only as temporary test projects. They are not a productive
-diagnostic or a replacement for Spectra's existing Desktop checks.
-
-## Capture files
-
-Screenshot and recording share `capture_file.zig`, which uses the existing
-SDK owned stage through flush and create-only atomic publication. Exact
-publication or abort acknowledgement retires the owner. A failed cleanup
-keeps the stable job and its stage identity, reports both failure stages and
-blocks replacement until process teardown. Frame polling performs no file
-cleanup. `capture-test` covers the changed SDK callback boundary;
-`Tests/CaptureFile` is a small source consumer for real guest receipts and
-BMP/software MKV output, materialized with the current original owners only
-in a temporary project.
+Original R4OS material uses Apache License 2.0. See `LICENSE`, `NOTICE`,
+`THIRD_PARTY_NOTICES.md` and the historical source transfer in `PROVENANCE.txt`.

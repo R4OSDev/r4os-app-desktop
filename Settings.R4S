@@ -8,3 +8,7 @@ LIBRARIES_ROOT=../../Libraries
 DEVKIT_ROOT=../../../DevKit
 ARTIFACTS_ROOT=../../../Artifacts/Modules/Desktop
 ZIG_ROOT=Toolchains/Zig
+# Matched general SDK tools; technical qualification remains explicit while
+# developing the next SDK. These paths are relative to this repository.
+RUST_TOOLS_ROOT=../../../Artifacts/SDK/HostTools
+RUST_TOOLS_TECHNICAL=true

@@ -1,0 +1,32 @@
+[package]
+name = "r4os-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+build = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+path = "src/rust/lib.rs"
+crate-type = ["staticlib"]
+
+[features]
+default = ["desktop-entry"]
+desktop-entry = []
+# Only the source fixture in Tests/RustCore calls these original shape cases.
+render-probe = []
+
+[dependencies]
+r4os-sdk = { version = "=0.1.0", features = ["alloc"] }
+r4os-contract = { version = "=0.1.0" }
+r4os-library-helpers = { path = "../../Libraries/Shared/Rust", version = "=0.1.0" }
+r4os-text-core = { path = "../../Libraries/R4STD/Rust", version = "=0.1.1" }
+r4os-display-geometry = { path = "../../Libraries/R4GFX/Display/Rust", version = "=0.1.0" }
+r4gfx = { package = "r4os-r4gfx", path = "../../Libraries/R4GFX/Bindings/Rust", version = "=0.1.0" }
+r4enc = { package = "r4os-r4enc", path = "../../Libraries/R4ENC/Bindings/Rust", version = "=0.1.0" }
+
+[workspace]

@@ -1,334 +1,87 @@
-﻿R4DESK.R4X
-===========
+R4DESK.R4X - modularer Rust-Desktop ab0.86.86 /0.1.147
+===================================================
 
-R4DESK ist die externe Desktop-Anwendung und der Desktop-Host von R4OS.
+Der produktive Einstieg liegt in src/rust/entry.rs. module.R4MF und der
+allgemeine SDK-Builder sind die einzige Modul-/Import-/Buildwahrheit;
+Cargo.toml/Cargo.lock besitzen den lokalen Crategraph. Es gibt keinen
+produktiven Zig-Desktop oder privaten Desktop-SDK-Pfad.
 
-0.1.97 ergaenzt /COMPOSITIONVERIFY /CAPTURE: private native Szenen durchlaufen
-den produktiven Capturebesitzer, oeffentliche unveraenderliche Snapshots und
-den Print-Screen-BMP-Worker. Geprueft werden Dateipixel, Fensterwechsel,
-125-Prozent-Aufnahmeskalierung, Drehung, separate/eingebrannte Cursor,
-gehaltene Bilder ueber Quellreset, Leihgrenze und Bedarfsabbau. Der Einstieg
-verlangt anfangs keine aktiven Captureleser und uebernimmt bis zum Prozessende
-den oeffentlichen Publisher. Die Publikation belegt keine physische Ausgabe.
-/CLIENT begrenzt dies auf drei Frames mit Dateihandshake: CAPVERIFY.TXT unter
-C:\TEMP nennt Phase und BMP; CAPVERIFY.NEXT erwartet die Nummer 1, 2 oder 3.
-Der letzte Frame kombiniert Fenstergroessenaenderung und Capture-Quellreset
-mit einem moeglicherweise noch langsamen externen Leser des vorherigen Bilds.
-Beide Dateien muessen anfangs fehlen. Jede Wartephase endet nach 60 Sekunden;
-vor Quittung der letzten Phase muss der externe Client geschlossen sein.
-Dieser Einstieg aktiviert weder einen TV noch eine simulierte Netzwerksitzung.
-SFTP-Quittungen legen neue Dateien an; nur die vorherige, bereits bestaetigte
-CAPVERIFY.NEXT vor dem Upload ihres Nachfolgers entfernen.
-Die normale Ereignisschleife beachtet jetzt den instanzgebundenen Close-Auftrag
-und kehrt ueber vorhandene Ressourcendestruktoren und den Prozessabbau zurueck.
-Vor Ausgabe- und Capturebesitzern quittiert WINSVC die genaue Desktopinstanz.
-Ein zweiter Desktop beendet sich, bevor er Zustand des laufenden Hosts
-veraendert. Normale Ersatzprozesse benoetigen Kernel 0.1.238 und WINSVC 0.1.11;
-sie warten nicht auf die Einbindung als eigenes Anwendungsfenster.
+Der Runtime-Koordinator ruft konkrete Besitzer fuer Fenster/Eingabe, Shell,
+gehostete GUI-/Terminal-/Subsysteminhalte, Rendering/Ausgaenge und Capture
+auf. Zustandsautomaten, Generationen, Ressourcen und Cleanup bleiben beim
+jeweiligen Besitzer. src/rust/runtime/desktop.rs koordiniert diese Grenzen;
+Dateiaufteilung fuegt keine IPC-, Datei- oder Threadarbeit pro Pixel hinzu.
 
-Ab 0.1.45 oeffnet Settings -> Display APPEARANCE.R4X /DISPLAY fuer die
-gemeinsame SDR-Moduswahl. Standardmenue und MENU.R4S verwenden denselben
-Starteintrag. Der bestehende Output-Revisionspfad uebernimmt nach quittiertem
-Wechsel und Rueckkehr die neue Geometrie. Modusauswahl/Bestaetigung gehoeren
-der Appearance-App, GPU-Ausfuehrung dem Treiber und der Timer dem Displaybesitzer.
+Unveraenderte Fachvertraege
+--------------------------
+- R4GFX besitzt allgemeine signierte Topologie-/DPI-/Rotationsgeometrie;
+  Desktopadapter behalten die eigenen Raster-/Clip-/Rundungsvertraege.
+- Exakte opake SDR-Teilkacheln, Alpha/Farbe, Nearest-Pixelwahl, partielle
+  Invalidierung, Backbufferreparatur und verdeckte Hintergrundbehandlung
+  behalten die qualifizierten Regeln aus45/46 und den folgenden Korrekturen.
+- GUI-Snapshots bleiben an aktuelle Prozess-/Fenster-/Inhaltsgenerationen
+  gebunden. Eingabe wird nur bis zum wirklich bestaetigten Praefix entfernt.
+- Run behaelt ganze UTF8-Skalare, originale Graphemgrenzen und quotierte
+  Browsepfade. Alte sichtbare Inventardaten sind keine Lifecycleautoritaet.
+- R4STD CONFIG_V1 besitzt sichere Dokumentveroeffentlichung/Recovery. Nur
+  wirklich fehlende Dateien erhalten Defaults; unlesbare, leere, zu grosse
+  oder defekte Daten werden nicht blind ueberschrieben.
+- CPU-, native und optionale AMD-/NVIDIA-/Encoderpfade bleiben unterschieden.
+  Queue-/BO-/Map-/Frame-/Output-/Deviceidentitaeten, Leihen und Fristen gelten
+  bis zur wirklichen Fence-/Reset-/Return-/Join-/Closequittung.
 
-Zustaendigkeit
---------------
+Bedienung, Aufnahme und Neustart
+--------------------------------
+Menue, Taskleiste/Tray/Lautstaerke, Dialoge, Desktopobjekte, Wallpaper,
+Programmstart, Terminals und installierte Subsysteme bleiben beim Desktop.
+Display oeffnet APPEARANCE.R4X /DISPLAY fuer den bestaetigten Moduswechsel.
+Bildschirmruhe, Cursor und rekonfigurierte Ausgaenge behalten ihre eigenen
+Generationen und bestaetigten Wake-/Retirementablaeufe.
 
-Ab 0.1.67 startet/stoppt Strg+Druck die Bildschirmaufnahme. Der rote Rand der
-Taskleiste und REC in der Uhr zeigen die Aktivitaet, Saving den Abschluss.
-Fertige H.264-Matroska-Dateien liegen unter C:\RECORDINGS; Druck ohne Strg
-speichert weiterhin BMP-Screenshots unter C:\SCREENSHOTS. Die Aufnahme hat
-keine Audiospur. Groessen-/Quellwechsel und Softwarefallback beginnen einen
-neuen Dateiteil. Fehler lassen bereits fertiggestellte Teile bestehen.
+Druck speichert BMP unter C:\SCREENSHOTS. Strg+Druck startet/stoppt eine
+Videoaufnahme unter C:\RECORDINGS. REC/Saving und der rote Taskleistenrand
+zeigen den Zustand. R4ENC besitzt den optionalen nativen oder Softwareencoder;
+Ausgabeteile wechseln bei Groessen-/Quellwechsel bzw. quittiertem Fallback.
+Die Aufnahme enthaelt keine Audiospur und aendert den RDP-Transport nicht.
 
-recording.zig besitzt einen eigenen Worker, maximal ein angenommenes NV12-
-Eingabebild und zwei begrenzte Bitstreamleihen. Er liest die bestehende
-unveraenderliche CPU-Aufnahme und gibt sie vor Encoder-/Dateiwarten frei.
-Langsame Ausgabe verwirft Zwischenrevisionen; unveraenderte Bilddauern bleiben
-erhalten. Nach AMD-/NVIDIA-Ausfall folgen bestaetigtes Close/Join und expliziter
-Softwareersatz. Ohne Start entstehen weder Capturebedarf noch Encodearbeit.
-Die optionale R4ENC-Bindung sperrt bei Fehlen nur die Aufnahme. Details:
-Docs/Drivers/Videoencoding07941.txt.
+capture/file.rs teilt die exklusive Stage mit Screenshot/Recording: CREATE,
+Finish mit weiterem Besitz, atomare Create-only-Publikation und genauer Abort.
+Ungewisse Abwicklung behaelt Besitzer und Stageidentitaet; der Defaultframe
+betreibt keine Dateibereinigung. Worker werden wirklich gejoint, bevor
+Rueckgaben freigegeben werden. Capture startet nur bei wirklichem Bedarf.
 
-Ab 0.1.74 wird ein zum Adapter passender AMD- oder NVIDIA-Encoder gewaehlt.
-AMD-AVC erhaelt NV12 mit 256-Byte-Pitch und neutral initialisierten 16-Zeilen-
-Blockgrenzen. Die sichtbare Bildgroesse bleibt erhalten. Der Encoder haelt
-den zuvor CPU-unmappten Systempuffer bis zur bestaetigten Freigabe; die
-Capture-Snapshot-Lease ist zu diesem Zeitpunkt bereits freigegeben.
-RDPSVC verwendet weiterhin Bitmap/RLE/NSCodec und bietet keinen H.264-
-Transport an. Nachweise und Grenzen: Docs/Drivers/AMDCapture08032.txt.
+Der normale Hostclaim erfolgt vor Ausgabe-/Capturebesitz. Eine zweite
+Desktopinstanz kann den laufenden Host nicht ersetzen. Normaler Close und
+Neustart drainieren die wirklichen Besitzer und erhalten weiterlebende
+GUI-Clients; Drop ist kein Hardwarestopp und keine Freigabequittung.
 
-- Desktopflaeche, Taskbar, Startmenue und Systemdialoge
-- gehostete GUI-Fenster
-- Terminalfenster und Terminalmodus als Console-Hosts
-- Tastatur-/Mausdispatch, Fokus und Fensterlebenszyklus
-- Clipboard-Integration
-- Desktop- und App-Present
-- Starten, Klassifizieren, Schliessen und Anzeigen von Programminstanzen
+Diagnose und Belege
+------------------
+Aktueller Einstieg ist Spectra: CHECK DESKTOP mit ausdruecklichen /HOST,
+/RESTART, /AUDIO, /CAPTURE bzw. /CANCEL; CHECK REMOTEFRAME; BENCH DESKTOP
+und BENCH SNES /WINDOW /SMALL oder /MAXIMIZED. Der feste Besitzervertrag
+liegt in Contract/desktop_check_v2.zig; passiver WINSVC-Status4500 bleibt
+getrennt. Gegenwartige Pflicht-API wird vorausgesetzt, alte OS-Fallbacks
+werden nicht als Runtime gepflegt.
 
-API-Nutzung
------------
+Direkte Desktopargumente sind normaler Start, /CHECK-ISOLATED, /INPUTTEST
+und der ausdrueckliche /HEADLESS-SUBSYSTEM-Testhandoff. Dieser startet nur
+den kanonischen Spectra-Subsystemcontroller, wartet auf echte Completion/
+Reap und uebergibt dann dem Terminal AUTOEXEC. Die vorhandenen BASIC-/GB-/
+SNES-Arbeiten mit zwei60s-Paaren, Rejection und Persistenz gehoeren Spectra.
+Nach QEMU-Join liest der Host deren Originaldateien von der wegwerfbaren
+Arbeitsplatte; lange Terminal-Repaintzeilen sind kein JSON-Bytevertrag.
 
-Desktop validiert R4XStart, erzeugt das Gruppen-Bundle und nutzt R4SYS,
-R4DESK, R4DRAW, R4NET, R4AUDIO und R4DEV gemaess module.R4MF. Zusaetzlich
-bindet er die R4STD-Tabellen SETTINGS_V1, TIME_V1 und CONFIG_V1 lokal ein.
-Optionale Kernel-Felder werden mit hasFn geprueft.
+Fruehere private /SMOKE- und /COMPOSITION*-Einstiege werden nicht erneut
+als parallele Rust-Sammelsuite gebaut. Nuetzliche unabhaengige Originalpixel-,
+Native-/Offscreen-/Farb-/Cursor-/Power-/Fehlerorakel liegen unter Tests/Original
+und Tests/RustNative. Build.sh rust-native-test prueft aktuelle Rustbesitzer;
+originale explizite Zigziele brauchen -Dhost-tests=true und erzeugen keinen
+alten Desktop. Tests/RunInput, Tests/CaptureFile und Tests/RustCore bleiben
+kleine wiederverwendbare Quellfixtures, keine archivierten Testumgebungen.
 
-Nach dem ersten vollstaendigen Redraw meldet der als Boot-Shell gestartete
-Desktop seine tatsaechliche Nutzbereitschaft einmalig ueber das optionale
-R4SYS-Feld `boot_ready`. Wiederholungen veraendern den eingefrorenen
-Bootmessstand nicht; normale, spaeter gestartete Desktop-Instanzen duerfen
-den Marker nicht setzen.
-
-Fenster-, Console-, Clipboard-, ProgramStatus- und Power-Funktionen laufen
-ueber ihre aktuellen Gruppenfelder. Der Desktop besitzt keine eigene
-Kernel- oder API-Parallelstruktur.
-
-Der Presentpfad komponiert bei kleinem Damage nur schneidende Layer, Desktop-
-Items und Fenster, ohne deren Z-Reihenfolge zu veraendern. Rechteckige
-Scene-Blits verwenden bei vorhandenem R4DRAW-Slot den vollen Scene-Pitch als
-Source-Stride und bleiben dadurch ein einzelner ABI-Aufruf. Der
-R4DESK-Remote-Frame-Shadow wird nur bei einem explizit registrierten
-Readback-Konsumenten gepflegt; der erste Konsument erzwingt einen Vollframe,
-der letzte Release verwirft Live- und Mapping-Snapshots.
-
-Gehostete GUI-Frames werden generationstreu gecacht. Folgt auf den aktiven
-Snapshot genau eine append-only Damagegeneration, liest R4DESK nur deren
-Befehle, Ressourcen und bis zu acht Regionen, rebasiert Ressourcenoffsets und
-haengt sie an den bestehenden Snapshot an. Bei Luecken, Altvertrag oder
-Speicherdruck bleibt der vollstaendige Snapshot der sichere Fallback. Nur die
-uebermittelten Clientregionen werden invalidiert. Indexed8-Kommandos werden
-direkt aus Palette und indiziertem Quelltile integer oder fraktional in den
-aktuellen Paintclip gerendert; nicht schneidende Tiles werden vor dem
-Pixelzugriff verworfen.
-
-Eine als vollstaendiger Ersatz markierte Rastergeneration wird dagegen als
-einzelner generationstreuer Snapshot eingelesen und atomar gegen den alten
-Stand getauscht. Ihre exakten Damage-Regionen begrenzen weiterhin Komposition
-und Present; eine historische Vollbildkette wird nicht erneut abgespielt.
-Native XRGB32-Kacheln gehen ohne Farblaufzerlegung direkt in den SceneBuffer:
-1:1 per Zeilenkopie, bei ganzzahliger Vergroesserung per expandierter und
-wiederholter Zeile und sonst mit global abgeleitetem Nearest-Neighbour-
-Mapping. Dadurch bleiben unabhaengige Kachelgrenzen auch bei gebrochener
-Skalierung nahtlos. OOM oder ein veralteter Read laesst den bisherigen
-vollstaendigen Snapshot unveraendert aktiv.
-
-Textbefehle gehosteter GUI-Frames rasterisieren jede den aktuellen Damage-
-und Clientclip schneidende Glyphenzelle. Nur die sichtbaren Teilpixel werden
-uebernommen; dadurch liefern Vollkomposition und regionale Komposition an
-allen Glyphenkanten dasselbe Bild, ohne Pixel ausserhalb des Clips zu
-veraendern. Diese Regel gilt fuer den eingebauten und installierten Fontpfad.
-Ein fester Cache haelt 16 Fontlayouts und 256 monochrome Glyphabdeckungen,
-jeweils nach Font-ID, Codepoint und R4DRAW-Fontrevision getrennt. Farben
-werden erst beim Blit angewandt und vervielfachen den Cache nicht. Ein
-erfolgreicher Font-Reload aendert die Revision und verwirft damit alle alten
-Eintraege; direkte Cachekollisionen kosten nur einen erneuten Abruf. Aktuelle
-Kernels liefern eine installierte Glyphabdeckung ueber den Bulk-Slot in einem
-Aufruf, waehrend aeltere Tabellen pixelidentisch ueber die Zeilen-API
-zurueckfallen.
-
-Sichtbare Terminals besitzen pro Fenster einen festen 16-KB-Rohsnapshot und
-kompakte Deskriptoren fuer hoechstens 256 sichtbare Zeilen. Bleiben Instanz,
-Geometrie, Font, Codepage, Scrollposition, Farben und Clear-Generation gleich
-und ist die neue Ausgabe eine exakte Erweiterung, wird nur das Suffix geparst.
-Der Desktop vergleicht die alten und neuen sichtbaren Zeilen, invalidiert nur
-geaenderte Zeilen sowie die alte und neue Cursorzelle und ueberspringt den
-unveraenderten Praefix. Ringverschiebung, Sprung im Scrollstand, Resize,
-Font-, Codepage-, Farb- oder Clear-Wechsel verwenden den begrenzten
-Vollaufbau. Der 500-ms-Cursorblink verwendet weiterhin den gecachten Status
-und invalidiert nur den Cursorbalken.
-
-Die Headless-Diagnose gibt Glyph-Hits und -Loads, den Pixelhash des gecachten
-Referenzglyphs sowie inkrementelle/vollstaendige Terminal-Refreshes,
-geparste/uebersprungene Bytes und geaenderte/uebersprungene Zeilen aus. Die
-Pixelpruefung vergleicht Cache- und Referenzbild exakt; sie ist kein
-manueller Sichttest.
-
-Der Desktop-Smoke startet zwei unabhaengige Terminalfenster und belegt seit
-0.69.67 ueber Task- und Konsolentelemetrie, dass beide nach dem Prompt ohne
-weitere CPU-Ticks, Reads, Revisionen oder Desktop-Signale blockiert bleiben.
-Danach prueft er gebuendelte Eingabe, den erneuten Wait in `PAUSE`, den
-generationengebundenen Wake und normalen Exit. Das zweite Fenster wird ueber
-die echte Hit-Test- und Maus-Command-Kette seiner sichtbaren Schliessen-
-Schaltflaeche geschlossen. Ein wiederholtes Close waehrend der Grace-Phase
-bleibt idempotent; Request-Close weckt das wartende Terminal, das normal mit
-Exitcode 0 endet und generationstreu gereapt wird.
-
-Der Benutzer-Close eines Terminalfensters ist vom `DESKTOP`-Rueckweg aus dem
-Terminal Mode und von ausdruecklicher erzwungener Testbereinigung getrennt.
-Nur diese Sonderpfade beziehungsweise der zeitlich begrenzte Grace-Timeout
-verwenden den Hard-Kill.
-
-Notification Area und Lautstaerke
----------------------------------
-
-Der Desktop besitzt die Notification-Area-Anordnung, Hit-Tests, Tooltips und
-Popups. Externe TrayItems werden generationstreu ueber WINSVC vermittelt und
-liegen links vom Tastaturlayout. Das eingebaute Lautstaerkeelement liegt
-unmittelbar links von der Uhr; das Tastaturlayout weicht entsprechend nach
-links aus. Fehlt AUDSVC im aktuellen Imageprofil, wird das Element nicht
-gezeigt. Ist das installierte Modul nur voruebergehend nicht erreichbar,
-bleibt ein deaktivierter Zustand sichtbar.
-
-Der Lautstaerkeklick oeffnet ein am Tray verankertes Desktop-Popup ohne
-eigenes Fenster und ohne Taskbar-Eintrag. Regler, Spur-Klick, Mausrad,
-Pfeiltasten, Pos1/Ende und Mute arbeiten auf einer Skala von 0 bis 100;
-Escape oder ein Klick ausserhalb schliessen das Popup. Die quadratische
-Kennlinie wird monoton in den unsigned-16.16-Mastergain von AUDSVC abgebildet.
-Waehrend Ziehen werden Aenderungen begrenzt und zusammengefasst; ausbleibende
-Serviceantworten blockieren den UI-Thread nicht.
-
-AUDSVC bleibt Besitzer von Masterzustand, explizitem Mute und Persistenz. Der
-Desktop speichert daher keine zweite Lautstaerkekonfiguration. Sein Headless-
-Smoke prueft Anordnung, Popup-Ziele, Mute, positives Entstummen und stellt den
-vorherigen Masterzustand auch bei einem Testfehler wieder her.
-
-Beim Wechsel des aktiven gehosteten GUI-Fensters stellt der Desktop dem alten
-Fenster `focus_lost` und dem neuen Fenster `focus_gained` in dessen bestehende
-GUI-Ereignisqueue. Erststart, Fensterklick, Taskbarwechsel, Wiederherstellung,
-Minimieren und Schliessen verwenden denselben Aktivierungspfad; normale
-Tastatur- und Mausereignisse bleiben weiterhin an genau das aktive Fenster
-gebunden.
-
-Das explizite Shellargument `/HEADLESS-SUBSYSTEM` gehoert zum Testprofil. Es
-wartet zunaechst auf den testweise aufgenommenen AUDSVC. Danach laedt R4DESK
-den installierten Subsystemkatalog, probt `SUBSYSTEM-A.BAS` und
-`SUBSYSTEM-B.BAS` und loest beide Dateien ueber dieselbe R4STD-
-Dateihandlerkette wie Explorer zu `test.basic` auf. Diese Auswahl wird durch
-die ausschliesslich im Testoverlay liegende BAS-Zuordnung erzwungen; normale
-Full- und GUI-Images behalten `r4os.basic`. Beide `R4SUBSYS1`-Starts laufen
-gleichzeitig in getrennten Fenster- und Prozesshandles. Der Test
-maximiert und restauriert ein Fenster, wechselt den Fokus und laesst das eine
-Fixture als Gast enden, waehrend das andere den Close-Lebenszyklus verwendet.
-
-Die produktive GORILLA-Abnahme waehlt `r4os.basic` ebenfalls nur aus Pfad und
-Dateimetadaten. `R4BASIC source-probe` belegt einen `fileInfo`-Aufruf sowie
-null Inhaltslesungen und null gelesene Bytes vor dem Prozessstart; der
-R4Basic-Host bleibt damit alleiniger Besitzer des vollstaendigen Quellloads.
-
-Anschliessend startet derselbe Headless-Ablauf zuerst den endlichen
-R4GB-`/HOSTTEST` und danach den produktiven Explorer-Pfad. Drei aus
-oeffentlichem Originalquelltext erzeugte Cartridges pruefen `.GB`, dual-mode
-`.GBC` mit MBC3-Batterie/RTC und eine CGB-only-Ablehnung. Katalog,
-`ASSOC.R4S`, begrenzter Probe und Open With muessen jeweils die stabilen IDs
-`r4os.gb` und `gameboy.dmg-cartridge` verwenden; der Desktop uebergibt nur den
-`R4SUBSYS1`-Datensatz an den installierten Host.
-
-Die beiden gueltigen Dateien laufen gleichzeitig in getrennten Fenstern und
-Prozessen. Der Desktop setzt den Fokus gezielt, sendet physische Pfeil- und
-Leertastenereignisse, prueft generationstreues 160x144-Video, App-Audio,
-Pause/Resume/Reset/Mute/Unmute, SRAM-/RTC-Persistenz und schliesst beide
-Instanzen getrennt kooperativ. Die CGB-only-Datei muss vor ihrem ebenfalls
-kooperativen Close ein gueltiges Fenster mit der konkreten Cartridge-Diagnose
-anzeigen. Erst nach den separaten Berichten in `C:\\TEMP` und fehlerfreiem
-Ressourcenabbau gilt dieser Teil als bestanden. Kommerzielle ROMs werden in
-diesem automatischen Lauf weder geoeffnet noch benoetigt.
-
-Danach erzeugt R4SNES im Testgast vier originale R4OS-Cartridges und der
-Desktop durchlaeuft denselben installierten Katalog-, ASSOC-, Open-With- und
-R4SUBSYS1-Pfad fuer `.SFC` und `.SMC`. Zwei produktive SNES-Fenster laufen
-gleichzeitig mindestens 60 Sekunden Gastzeit. Physische Pfeil-, Enter-,
-Rechts-Strg- und Numpad-Usages pruefen Port 1; Pause, Resume, Reset, Mute und
-Unmute bleiben Hostaktionen. Native XRGB32-Frames, SPC700/S-DSP-App-Audio,
-SRAM/Epson-RTC, Fokusisolation sowie getrennte Witness-/Close-Enden werden in
-maschinenlesbaren Berichten gebunden. Eine ungueltige Cartridge und eine
-DSP-1-Cartridge ohne Nutzerfirmware muessen jeweils ein sichtbares
-Diagnosefenster zeigen und kooperativ mit ihrem Produkt-Exitcode enden. Der
-automatische Ablauf kennt und startet keine private kommerzielle ROM.
-
-Nur wenn alle gestarteten Handles mit Exitcode 0 abgeschlossen sind, der
-Subsystemhost getrennte Damage-Regionen sowie den Indexed8-ABI-Pfad bestaetigt
-und der Stride-/Damage-/Cursorblink-/Remote-Demand-Presenttest erfolgreich
-war, schreibt der Desktop die Video-/Eingabe-, Runtime-/Audio- und Present-
-Erfolgsmarkerdatei fuer AUTOEXEC. Fehler schreiben stattdessen einen konkreten
-Bootstrap- oder Fixture-Marker und wechseln ebenfalls in den seriell
-gespiegelten Terminalmodus, damit die restliche Suite Diagnosekontext liefern
-kann. Nach erfolgreicher Abnahme wartet der test-only Desktop kooperativ ohne
-weiteres Rendering bis zum kontrollierten Poweroff. Ohne
-`/HEADLESS-SUBSYSTEM` wird weder das Fixture noch AUTOEXEC vom Desktop
-gestartet.
-
-Konfiguration
--------------
-
-Produktive Konfiguration liegt unter C:/R4OS/CONFIG. Desktop-Layouts,
-Settings und R4S-Dateien werden ueber die geladene R4STD-Runtime verarbeitet;
-CONFIG_V1 nutzt dabei den caller-eigenen R4SYS-Kontext.
-
-Start -> Settings -> Appearance startet APPEARANCE.R4X. Die Anwendung
-aktualisiert DESKTOP_BG atomar in DESKTOP.R4S und signalisiert dem Desktop
-die gespeicherte Farbe ueber den vorhandenen GUI-Revisionskanal. Der Desktop
-verifiziert den Wert gegen die Datei und uebernimmt ihn ohne Neustart oder
-periodisches Dateipolling.
-
-Build und Test
---------------
-
-    Build.bat test
-    ./Build.sh test
-    Tools/Build.bat -test
-    ./Tools/Build.sh -test
-
-Interaktive Sichttests erfolgen ueber das GUI-Profil des Workspace-Builds.
-Headless API-/Bootsmokes laufen ueber das Testprofil.
-
-
-Desktop-Defaults ab 0.78.63
--------------------------
-Desktop- und Zeitkonfiguration werden beim Start zuerst wiederhergestellt.
-Nur ausdruecklich fehlende Dateien erhalten neue Defaultdateien. Leere,
-nicht lesbare, zu grosse oder ungueltige vorhandene Dateien werden dabei
-nicht ueberschrieben; der Desktop behaelt seine Arbeitseinstellungen und
-meldet Fehler. Neue Defaultdateien verwenden R4STD CONFIG_V1 saveDocument.
-
-Die lokale Mausabfrage verarbeitet nur echte Bewegung, Rad- oder
-Tastenzustandsaenderung. Ein unveraenderter lokaler Mauszustand darf weder
-Remote-Klicks ueberschreiben noch den Bildschirmruhe-Timer erneuern.
-Kumulative Bewegung, latched Press/Release, Paketzaehlerwechsel und
-unveraenderte Hardwaremeldungen sind in der vorhandenen Eingabegruppe
-geprueft. Lokale und entfernte Tastenzustaende bleiben getrennt.
-
-
-Anzeigeunabhaengige GPU-Abnahme (0.82.11 / R4DESK 0.1.92)
---------------------------------------------------------
-/COMPOSITIONVERIFY verwendet compositor.zig, die normalen Painter,
-Quellcaches und composition_gpu.Engine fuer begrenzte private Bilder.
-Nur dieser ausdrueckliche Diagnoseverbraucher waehlt das Ziel readback.
-Er fragt keinen Empfaenger ab, meldet keinen Window-Desktop an und erzeugt
-weder Swapchain noch Present. copied bestaetigt hier nur den vollstaendigen
-CE-/GR-Abbau. Der normale Desktop behaelt unveraendert das Ziel display.
-
-Die Szenen umfassen Fenster, Hintergrund, Menue, Text, Alpha, Verdeckung,
-Verschieben/Schliessen, kalte/warme Ressourcen, Ein-Pixel-Damage und einen
-vollen Wiederaufbau nach Abbruch. Der GPU-Canvas bleibt CPU-seitig unveraendert;
-die getrennte Softwarekomposition dient ausschliesslich als Pixelreferenz.
-Idle darf keine Jobs erzeugen, warme Quellen keine erneuten Uploads.
-
-/COMPOSITIONREFERENCES teilt die urspruenglichen Glyph-/Masken-/Indexed8-/
-ARGB- und Kurven-/Schatten-/Grossbild-Fixtures mit dem bestehenden render-test.
-Die bisherigen Grenzen bleiben 1 LSB fuer den Grundfall und 3 LSB fuer die
-mehrfachen Maskenmischungen. Separate ganzzahlige Orakel pruefen gebrochene
-Nearest-Skalierung ganzer Bilder und die alte Kantenabbildung transportierter
-128-Pixel-Bloecke ohne Farbtoleranz. Weitere Faelle pruefen 16 Draws je Gruppe,
-1 MB Staging, Nullbudget, Busy und den Capture-Owner mit/ohne Leser.
-Die private Capture-Abnahme veroeffentlicht kein RemoteFrame und behauptet
-keine Sichtbarkeit. Ausgabe-/Flip-Integration bleibt 0.82.37, Sichttest 0.82.38.
-
-Aktuelle Grenzen: 64 Ebenen, 512 Kompositionsbereiche, 128 MB CPU-Ebenenbudget,
-8192 Primitive, 2048 Quelleintraege, acht 512x512-Atlanten, 24 Einzelbilder,
-64 MB CPU-Quellbudget und 256 MB GPU-Budget. Gegenueber 0.79.20 betraegt das
-Fortschrittsbudget inzwischen 64 Schritte oder 250 us; lineares FP16-Working,
-Ausgabepuffer und Metadaten gehoeren ebenfalls zur aktuellen Ressourcenbilanz.
-Gemessene Diagnosezeiten sind keine ausgegebenen FPS.
-
-Produzentenwechsel (0.82.12 / R4DESK 0.1.93)
-------------------------------------------
-/COMPOSITIONVERIFY /TRANSITIONS nutzt normale GUI-Framekommandos und den
-Window-Geometriebesitzer fuer wechselnde Inhalte, Vollbild, Menue, Restore,
-Resize, Verdeckung, Wiederaufdecken und Schliessen. Jeder private native
-Frame wird gegen denselben produktiven Softwarepainter gelesen. Die Probe
-erfasst die hoechste Zahl gehaltener CE-/GR-Jobs und verlangt bei Idle
-unveraenderte Ressourcen und keine neuen Jobs oder Uploads. Sie meldet keine
-Window-App an und fuehrt keinen Displayflip aus. Die echte Window-/Swapchain-
-Integration und modellierten Present-/Retirementregeln werden separat geprueft.
+Aktuelle Fachbelege/Grenzen stehen in Docs/Desktop/RustMigration08686.json
+und Docs/Diagnostics/Spectra.txt. Historische GA106-/AMD-/Mehrschirm-/Encoder-
+Belege in Docs/Drivers und Docs/Desktop behalten ihre urspruenglichen
+Artefakt-/Hardwaregrenzen. QEMU/Nativeorakel sind keine neue Windows-,
+physische Ausgabe-, Cursorlatenz- oder direkte Rust-SIMD-Abnahme.
