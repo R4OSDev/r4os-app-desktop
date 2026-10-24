@@ -737,6 +737,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     self.outputs.active() || self.primary_admission != outputs::primary::Admission::Cpu,
                     frame, client, generation,
                 );
+                if self.outputs.active() {
+                    for choice in self.outputs.composition_choices(client) {
+                        trace.observe_choice(choice, generation);
+                    }
+                } else {
+                    trace.observe_choice(outputs::selection::Choice::primary(self.primary_admission), generation);
+                }
             }
         }
         let software_cursor =

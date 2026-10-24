@@ -337,18 +337,19 @@ impl<'a> Output<'a> {
                 .as_ref()
                 .is_some_and(|s| s.engine.active() || s.engine.pending())
     }
-    pub fn capable(&mut self, app: &App<'_>, additional: u32) -> bool {
+    pub fn admission(&mut self, app: &App<'_>, additional: u32) -> super::selection::Decision {
+        use super::selection::{Decision, Reason};
         let Some(state) = self.state.as_deref_mut() else {
-            return false;
+            return Decision::new(Reason::NativeState);
         };
-        let Ok(session) = state.device.bind(app) else {
-            return false;
+        let session = match state.device.bind(app) {
+            Ok(value) => value, Err(error) => return Decision::device(Reason::NativeBinding, error),
         };
-        let Ok(info) = session.refresh() else {
-            return false;
+        let info = match session.refresh() {
+            Ok(value) => value, Err(error) => return Decision::device(Reason::NativeRefresh, error),
         };
         let required = state.engine.required_operations() | additional;
-        info.gpu_operations & required == required
+        Decision::operations(required, info.gpu_operations)
     }
     pub fn needs_polling(&self) -> bool {
         self.preparation.is_some()

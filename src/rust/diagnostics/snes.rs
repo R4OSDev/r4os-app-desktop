@@ -5,6 +5,12 @@ use crate::{hosted::process::Programs, render::geometry::Rect, runtime::environm
 use alloc::{string::String, vec::Vec};
 use core::fmt::Write;
 use r4os_sdk::{abi as a, path::FilePath, storage::Error};
+use crate::outputs::selection::Choice;
+struct Selection {
+    choice: Choice,
+    first_generation: u64,
+    last_generation: u64,
+}
 #[derive(Clone, Copy)]
 pub struct Sample {
     pub generation: u64,
@@ -35,11 +41,14 @@ pub struct Trace {
     managed_output: Option<bool>,
     observed_generation: u64,
     observed_generations: u64,
+    selections: Vec<Selection>,
 }
 impl Trace {
     pub fn new(window_index: usize) -> Result<Self, ()> {
         let mut samples = Vec::new();
         samples.try_reserve_exact(4096).map_err(|_| ())?;
+        let mut selections = Vec::new();
+        selections.try_reserve_exact(64).map_err(|_| ())?;
         Ok(Self {
             window_index,
             samples,
@@ -49,7 +58,21 @@ impl Trace {
             managed_output: None,
             observed_generation: 0,
             observed_generations: 0,
+            selections,
         })
+    }
+    /// Selected owner and its admission proof, never a render/visibility receipt.
+    pub fn observe_choice(&mut self, choice: Choice, generation: u64) {
+        if generation == 0 { return; }
+        if let Some(previous) = self.selections.iter_mut().rev().find(|s| s.choice.target == choice.target) {
+            if previous.choice == choice {
+                if generation < previous.last_generation { self.overflow = true; }
+                previous.last_generation = generation;
+                return;
+            }
+        }
+        if self.selections.len() == 64 { self.overflow = true; return; }
+        self.selections.push(Selection { choice, first_generation: generation, last_generation: generation });
     }
     /// A published window generation supplies geometry/context only. No GPU
     /// submission, completion, scanout timestamp or copy duration is inferred.
@@ -135,7 +158,22 @@ impl Trace {
         rectangle(&mut out, self.frame.unwrap());
         out.push_str(",\"client\":");
         rectangle(&mut out, self.client.unwrap());
-        write!(out,",\"session_start_ns\":{},\"session_end_ns\":{},\"global_desktop_presents\":{},\"cursor_moves\":{},\"cursor_tick_hz\":{},\"physical_visibility\":null,\"records\":[",context.started_ns,context.ended_ns,context.presents,context.cursor_moves,context.tick_hz).unwrap();
+        write!(out,",\"session_start_ns\":{},\"session_end_ns\":{},\"global_desktop_presents\":{},\"cursor_moves\":{},\"cursor_tick_hz\":{},\"physical_visibility\":null,\"composition_selection_scope\":\"Selected output owner and original admission decision at published window generations; not GPU execution or physical visibility. Primary target identity unavailable.\",\"composition_choices\":[",context.started_ns,context.ended_ns,context.presents,context.cursor_moves,context.tick_hz).unwrap();
+        for (i, s) in self.selections.iter().enumerate() {
+            if i != 0 { out.push(','); }
+            let c = s.choice;
+            write!(out,"{{\"first_published_generation\":{},\"last_published_generation\":{},\"owner\":\"{}\",\"active\":{},\"reason\":\"{}\",\"target\":",s.first_generation,s.last_generation,c.owner,c.active,c.decision.reason.name()).unwrap();
+            if let Some(t) = c.target {
+                write!(out,"{{\"adapter_id\":{},\"connector_id\":{},\"head_id\":{},\"device_generation\":{},\"connection_generation\":{},\"display_generation\":{}}}",t.adapter_id,t.connector_id,t.head_id,t.device_generation,t.connection_generation,t.display_generation).unwrap();
+            } else { out.push_str("null"); }
+            out.push_str(",\"error\":");
+            if let Some(error) = c.decision.error { write!(out,"\"{}\"",error).unwrap(); } else { out.push_str("null"); }
+            out.push_str(",\"provider_status\":"); optional(&mut out, c.decision.status);
+            out.push_str(",\"required_operations\":"); optional(&mut out, c.decision.required_operations);
+            out.push_str(",\"available_operations\":"); optional(&mut out, c.decision.available_operations);
+            out.push('}');
+        }
+        out.push_str("],\"records\":[");
         for (i, s) in self.samples.iter().enumerate() {
             if i != 0 {
                 out.push(',')
@@ -162,6 +200,9 @@ impl Trace {
         }
         Ok(out)
     }
+}
+fn optional<T: core::fmt::Display>(out: &mut String, value: Option<T>) {
+    if let Some(v) = value { write!(out,"{}",v).unwrap(); } else { out.push_str("null"); }
 }
 fn rectangle(out: &mut String, r: Rect) {
     write!(
@@ -262,6 +303,48 @@ mod tests {
         trace.observe_context(true, frame, client, 3);
         assert!(trace.report(context()).unwrap().contains("managed-output-context-only"));
         trace.record(frame, client, copy());
+        assert!(trace.report(context()).is_err());
+    }
+    #[test]
+    fn composition_choices_keep_exact_generations_and_original_admission_failure() {
+        use crate::outputs::selection::{Decision, Target};
+        let (frame, client) = geometry();
+        let mut trace = Trace::new(1).unwrap();
+        trace.observe_context(true, frame, client, 3);
+        let mut choice = Choice {
+            target: Some(Target { adapter_id: 8, connector_id: 2048, head_id: 0,
+                device_generation: 2, connection_generation: 9, display_generation: 4 }),
+            owner: "managed-cpu", active: true, decision: Decision::operations(7, 3),
+        };
+        trace.observe_choice(choice, 3);
+        trace.observe_choice(choice, 4);
+        assert_eq!(trace.selections.len(), 1);
+        assert_eq!(trace.selections[0].last_generation, 4);
+        choice.target.as_mut().unwrap().display_generation += 1;
+        trace.observe_choice(choice, 5);
+        assert_eq!(trace.selections.len(), 2);
+        let report = trace.report(context()).unwrap();
+        assert!(report.contains("\"reason\":\"native-operations-missing\""));
+        assert!(report.contains("\"required_operations\":7,\"available_operations\":3"));
+        assert!(report.contains("\"display_generation\":4") && report.contains("\"display_generation\":5"));
+        assert!(report.contains("\"records\":[]") && report.contains("\"presentation_receipts\":null"));
+    }
+    #[test]
+    fn composition_history_retains_transitions_and_rejects_regressing_observations() {
+        use crate::outputs::selection::{Decision, Reason};
+        let (frame, client) = geometry();
+        let mut trace = Trace::new(1).unwrap();
+        trace.observe_context(true, frame, client, 3);
+        let mut choice = Choice { target: None, owner: "primary-native-gr", active: true, decision: Decision::operations(7, 7) };
+        trace.observe_choice(choice, 3);
+        choice.owner = "primary-cpu";
+        choice.decision = Decision::new(Reason::PriorNativeFailure);
+        trace.observe_choice(choice, 4);
+        choice.decision = Decision::device(Reason::NativeBinding, crate::render::gpu::device::Error::Native(-17));
+        trace.observe_choice(choice, 5);
+        assert_eq!(trace.selections.len(), 3);
+        assert!(trace.report(context()).unwrap().contains("\"provider_status\":-17"));
+        trace.observe_choice(choice, 4);
         assert!(trace.report(context()).is_err());
     }
 }

@@ -85,6 +85,7 @@ pub struct Slot<'a> {
     pub paused: bool,
     pub sleeping: bool,
     pub resource: Resource<'a>,
+    pub selection: super::selection::Decision,
     retained: Option<Device>,
     pub damage: Dirty,
     pub failed: bool,
@@ -105,6 +106,7 @@ impl<'a> Slot<'a> {
             paused: false,
             sleeping: false,
             resource: Resource::Empty,
+            selection: super::selection::Decision::default(),
             retained: None,
             damage: Dirty::default(),
             failed: false,
@@ -234,6 +236,20 @@ impl<'a> Manager<'a> {
     pub fn active(&self) -> bool {
         !self.layout.outputs().is_empty()
     }
+    pub fn composition_choices(&self, region: Rect) -> impl Iterator<Item = super::selection::Choice> + '_ {
+        self.slots.iter().filter(move |s| s.logical_index.is_some() && s.bounds().is_some_and(|bounds| bounds.intersects(region))).map(|s| {
+            let active = !s.failed && !s.paused && !s.sleeping && !s.disabled && !s.reconfiguring
+                && !matches!(s.resource, Resource::Empty);
+            let owner = match &s.resource {
+                Resource::Native(_) if active => "native-gr",
+                Resource::Cpu(_) if active => "managed-cpu",
+                Resource::Native(_) => "retained-native",
+                Resource::Cpu(_) => "inactive-cpu",
+                Resource::Empty => "unavailable",
+            };
+            super::selection::Choice { target: Some(s.target.into()), owner, active, decision: s.selection }
+        })
+    }
     pub fn software_only(&self, target: a::GfxOutputTarget) -> bool {
         self.software_targets.iter().any(|old| {
             old.connector_id != 0
@@ -264,7 +280,7 @@ impl<'a> Manager<'a> {
             .iter_mut()
             .find(|s| !s.failed && !s.reconfiguring && same_target(s.target, entry.target))
             .and_then(|s| s.resource.gpu_mut())
-            .is_some_and(|o| o.capable(app, r4gfx::device_gpu_color))
+            .is_some_and(|o| o.admission(app, r4gfx::device_gpu_color).admitted())
     }
     pub fn reload_colors(&mut self, store: &Store<'_, '_>) -> Result<()> {
         let next = Preferences::read_colors(store)?;
@@ -480,6 +496,10 @@ impl<'a> Manager<'a> {
         slot.target = entry.target;
         slot.view = view;
         slot.color_revision = entry.color.map_or(0, |v| v.revision);
+        slot.selection = super::selection::Decision::new(if software_only {
+            super::selection::Reason::PriorNativeFailure
+        } else if profile_enabled { super::selection::Reason::ColorProfile }
+        else { super::selection::Reason::NotPrepared });
         if !software_only && !profile_enabled {
             match unsafe {
                 native::Output::open(
@@ -491,10 +511,16 @@ impl<'a> Manager<'a> {
                 )
             } {
                 Ok(owner) => slot.resource = Resource::Native(owner),
-                Err(e) => slot.retained = e.retained,
+                Err(e) => {
+                    slot.selection = super::selection::Decision::open(e.error);
+                    slot.retained = e.retained;
+                }
             }
         }
-        let accelerated = slot.resource.gpu_mut().is_some_and(|o| o.capable(app, 0));
+        let accelerated = slot.resource.gpu_mut().is_some_and(|o| {
+            slot.selection = o.admission(app, 0);
+            slot.selection.admitted()
+        });
         if !accelerated {
             slot.close(app, windows, graphics, now);
             let cpu_admitted = matches!(slot.resource, Resource::Empty)

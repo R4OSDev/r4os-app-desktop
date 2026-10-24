@@ -8,6 +8,7 @@ pub mod power;
 pub mod primary;
 pub mod preferences;
 pub mod profile;
+pub mod selection;
 pub mod topology_wire;
 use r4os_contract as abi;
 pub type NativeResult<T> = core::result::Result<T, i32>;
