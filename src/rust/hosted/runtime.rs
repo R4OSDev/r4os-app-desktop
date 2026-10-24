@@ -5,6 +5,7 @@ use super::{
     console_snapshot::{Key, Reader, Snapshot},
     frame_reader::SessionReader,
     gui::Host,
+    launch::{self, Failure},
     model::{self, GraphicsRetirement, Model},
     process::Programs,
     text_surface::Surface,
@@ -23,7 +24,6 @@ use core::ffi::CStr;
 use r4os_sdk::{
     App, abi as a,
     gui::Session,
-    path::FilePath,
     resources::Resources,
     storage::{Error, Result},
 };
@@ -486,13 +486,15 @@ impl<'input> State<'input> {
         policy: a::LaunchPolicy,
         tick: u64,
         dirty: &mut Dirty,
-    ) -> Result<usize> {
-        if self.failed_spawns.len() == 4 {
-            return Err(Error::Raw(a::program_handle_error_would_block));
-        }
-        let name = FilePath::parse(path).map_err(|_| Error::InvalidProvider)?;
-        let class = programs.class(&name, policy)?;
+    ) -> core::result::Result<usize, Failure> {
+        let name = launch::path(path).map_err(Failure::Path)?;
+        let class = programs
+            .class(&name, policy)
+            .map_err(Failure::Classification)?;
         let console = class == a::R4XStartAppClass::console;
+        if self.failed_spawns.len() == 4 {
+            return Err(Failure::WindowCapacity { console });
+        }
         if !console {
             if let Some(existing) = self.single_instance(path) {
                 self.focus(existing, session, app, tick, dirty);
@@ -509,7 +511,7 @@ impl<'input> State<'input> {
                 .find(|&i| self.model.free(i))
                 .or_else(|| (console && self.model.free(0)).then_some(0))
         }
-        .ok_or(Error::Raw(a::program_handle_error_would_block))?;
+        .ok_or(Failure::WindowCapacity { console })?;
         // The normal primary window suppresses AUTOEXEC. Explicit terminal
         // mode may intentionally pass empty arguments for the Test handoff.
         let args = if primary && args.is_empty() && !self.terminal_mode {
@@ -520,18 +522,22 @@ impl<'input> State<'input> {
         let mut arg_z = [0; 128];
         let mut title_z = [0; 41];
         if !copy(&mut arg_z, args) || !copy(&mut title_z, title) {
-            return Err(Error::Length);
+            return Err(Failure::Arguments);
         }
-        let handle = programs.spawn(
-            &name,
-            CStr::from_bytes_until_nul(&arg_z).map_err(|_| Error::InvalidProvider)?,
-            policy,
-            console.then_some(if index == 0 && self.terminal_mode {
-                a::ConsoleHostKind::terminal_mode
-            } else {
-                a::ConsoleHostKind::terminal_window
-            }),
-        )?;
+        let args = CStr::from_bytes_until_nul(&arg_z).map_err(|_| Failure::Arguments)?;
+        let title = CStr::from_bytes_until_nul(&title_z).map_err(|_| Failure::Arguments)?;
+        let handle = programs
+            .spawn(
+                &name,
+                args,
+                policy,
+                console.then_some(if index == 0 && self.terminal_mode {
+                    a::ConsoleHostKind::terminal_mode
+                } else {
+                    a::ConsoleHostKind::terminal_window
+                }),
+            )
+            .map_err(Failure::Loader)?;
         // Reap authority is retained even if old frame retirement refuses this
         // otherwise free slot. Never lose a successfully spawned generation.
         if !self.model.clients.slot_mut(index).unwrap().bind(
@@ -541,9 +547,8 @@ impl<'input> State<'input> {
             &mut SessionReader::new(session),
         ) {
             self.failed_spawns.push(handle);
-            return Err(Error::InvalidProvider);
+            return Err(Failure::Attachment);
         }
-        let title = CStr::from_bytes_until_nul(&title_z).map_err(|_| Error::InvalidProvider)?;
         let win = self.model.windows.window_mut(index).unwrap();
         if console {
             win.bind_console(handle.instance_id, title);
@@ -560,7 +565,7 @@ impl<'input> State<'input> {
             self.changes(&change, session, app, tick, dirty);
         }
         if console && index == 0 {
-            self.console.set(title.to_bytes(), path, args);
+            self.console.set(title.to_bytes(), path, args.to_bytes());
         }
         self.scroll[index] = Scroll {
             owner: handle,
@@ -623,7 +628,7 @@ impl<'input> State<'input> {
                 dirty,
             ) {
                 self.terminal_mode = false;
-                return Err(error);
+                return Err(error.into());
             }
         }
         self.console.set(b"Terminal Mode", TERMINAL, args);

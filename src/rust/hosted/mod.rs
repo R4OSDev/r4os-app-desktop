@@ -6,6 +6,7 @@ pub mod frame_reader;
 pub mod frame_snapshot;
 pub mod gui;
 pub mod input;
+pub mod launch;
 pub mod launch_request;
 pub mod lifecycle;
 pub mod model;

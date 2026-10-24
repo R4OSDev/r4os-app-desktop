@@ -916,25 +916,36 @@ impl<'a, 'input> Desktop<'a, 'input> {
             time.tick,
             &mut self.dirty,
         ) {
+            use crate::hosted::launch::Failure;
             let (kind, text) = match error {
-                r4os_sdk::storage::Error::Raw(a::program_handle_error_not_found) => {
-                    (MessageKind::Error, b"Program was not found.".as_slice())
-                }
-                r4os_sdk::storage::Error::Raw(a::program_handle_error_would_block) => {
-                    let console = FilePath::parse(request.path())
-                        .ok()
-                        .and_then(|path| programs.class(&path, request.policy).ok())
-                        .is_some_and(|c| c == a::R4XStartAppClass::console);
-                    (
-                        MessageKind::Warning,
-                        if console {
-                            b"No free console window slot is available.".as_slice()
-                        } else {
-                            b"No free GUI window slot is available.".as_slice()
-                        },
-                    )
-                }
-                _ => (
+                Failure::Path(_) => (MessageKind::Error, b"Invalid program path.".as_slice()),
+                Failure::Arguments => (
+                    MessageKind::Error,
+                    b"Program arguments or title are too long.".as_slice(),
+                ),
+                // program_class has its own -1/missing and -2/invalid-header
+                // contract; process-handle errors apply only after spawn.
+                Failure::Classification(r4os_sdk::storage::Error::Raw(-1))
+                | Failure::Loader(r4os_sdk::storage::Error::Raw(
+                    a::program_handle_error_not_found,
+                )) => (MessageKind::Error, b"Program was not found.".as_slice()),
+                Failure::Classification(_) => (
+                    MessageKind::Error,
+                    b"Program header could not be read or is invalid.".as_slice(),
+                ),
+                Failure::WindowCapacity { console } => (
+                    MessageKind::Warning,
+                    if console {
+                        b"No free console window slot is available.".as_slice()
+                    } else {
+                        b"No free GUI window slot is available.".as_slice()
+                    },
+                ),
+                Failure::Attachment => (
+                    MessageKind::Error,
+                    b"Program started but its window could not be attached.".as_slice(),
+                ),
+                Failure::Loader(_) => (
                     MessageKind::Error,
                     b"Program loader returned an error.".as_slice(),
                 ),

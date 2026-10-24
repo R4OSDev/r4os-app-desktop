@@ -28,6 +28,13 @@ C companions provide portable BLAKE3 and compiler floating point intrinsics;
 they do not implement a second desktop. External R4OS libraries retain their
 own language, ownership and versioning.
 
+`hosted/launch.rs` admits program targets at the Desktop boundary. Installed
+`/R4OS/...` image targets resolve on `C:` before passing through the original
+strict SDK file-path parser. DOS and relative program paths use that parser
+directly. Subsystem envelopes and guest filenames remain opaque, exact bytes.
+Path, header classification, window capacity, loader and host-attachment
+failures retain their own phase; reporting an error never reclassifies a file.
+
 ## Build and focused checks
 
 Run `./Build.sh` on Linux or `Build.bat` on Windows. The thin launchers share
