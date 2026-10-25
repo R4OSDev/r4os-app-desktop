@@ -123,7 +123,7 @@ pub fn activate(state: &mut State<'_>, target: Target) -> Action {
         Target::TaskbarVolume => {
             let open = !state.audio.ui.popup_open;
             state.close_top();
-            state.audio.ui.popup_open = open;
+            state.audio.set_popup(open);
         }
         Target::VolumePopupMute => return Action::VolumeMute,
         Target::VolumeOutputAuto => return Action::VolumeOutput(None),

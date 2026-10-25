@@ -83,6 +83,9 @@ record!(a::GfxHdrMetadata; primaries, white, max_mastering, min_mastering, max_c
 record!(a::GfxColorSignal; version, size, format, bpc, primaries, transfer, range, pipeline, reference_white, peak, black, metadata_valid, metadata, reserved0);
 record!(a::AudioOutputInfo; version, size, id, name, kind, availability, flags, preferred_rate, channels, format, reserved);
 record!(a::AudioServiceOutputState; magic, version, size, service_epoch, revision, count, total, index, reason, flags, reserved, desired_id, active_id, active_name, outputs);
+record!(a::AudioServiceOutputRequest; magic, version, size, service_epoch, revision, index, reserved, id);
+record!(a::AudioServiceMasterRequest; magic, version, size, flags, fixed_volume, expected_revision, reserved0);
+record!(a::AudioServiceMasterState; magic, version, size, flags, service_flags, master_revision, service_epoch, selected_volume_fixed, effective_volume_fixed, last_audible_volume_fixed, reserved0, persist_writes, persist_failures, master_changes, config_loads, reserved1);
 record!(a::DisplayColorSelection; version, size, output, signal);
 record!(a::DisplayColorExchange; base, color);
 record!(a::WindowServiceRecord; magic, version, kind, window_id, instance_id, flags, z_order, x, y, w, h, normal_x, normal_y, normal_w, normal_h, title, path, reserved0);

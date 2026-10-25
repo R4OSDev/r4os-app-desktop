@@ -245,7 +245,11 @@ pub fn volume_popup(
         font,
         r.x + 14,
         r.y + 129,
-        if page.failed {
+        if page.loading {
+            b"Updating audio outputs..."
+        } else if page.request_error {
+            b"Audio request failed; previous state retained"
+        } else if page.failed {
             b"Switch not confirmed; list refreshed"
         } else {
             page.reason

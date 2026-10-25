@@ -64,6 +64,7 @@ use r4os_sdk::{
     path::FilePath,
     platform::{Audio, Platform, PlatformStorage},
     resources::Resources,
+    services::Services,
 };
 type Result<T> = core::result::Result<T, &'static str>;
 #[path = "console_check.rs"]
@@ -80,6 +81,7 @@ type WindowImages<'a> = Set<NativeMemory<'a, 'a, 'a>, Consumer>;
 struct Desktop<'a, 'input> {
     expected: &'static StartupInfo<'static>,
     shell: Owned<Shell<'input>>,
+    audio_io: super::audio_io::AudioIo<'a>,
     hosted: Owned<hosted::State<'input>>,
     frames: Owned<Frames>,
     outputs: Owned<Manager<'a>>,
@@ -114,6 +116,7 @@ struct Desktop<'a, 'input> {
 impl<'a, 'input> Desktop<'a, 'input> {
     fn new(
         env: &Environment<'a>,
+        services: &'a Services<'a>,
         expected: &'static StartupInfo<'static>,
         owner: a::ProgramProcessHandle,
         events: &'input mut [a::ConsoleInputEvent],
@@ -148,6 +151,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         Ok(Self {
             expected,
             shell,
+            audio_io: super::audio_io::AudioIo::new(services, env.resources, owner).map_err(|_| "audio requests")?,
             hosted,
             frames,
             outputs,
@@ -364,7 +368,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         session: &mut Session<'_, '_>,
         host: &mut Host<'_>,
         programs: &Programs<'_>,
-        audio: Option<&Audio<'_>>,
         time: Time,
     ) {
         let observation = self
@@ -511,7 +514,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if self
             .shell
             .audio
-            .synchronize(audio, installed, time.tick, time.hz)
+            .synchronize(&mut self.audio_io, installed, time.tick, time.hz)
         {
             self.shell_damage();
             self.bar();
@@ -633,6 +636,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.frames.stats,
             self.input.stats.cursor_moves,
         );
+        if effects.audio_changed {
+            self.shell_damage();
+            self.bar();
+        }
         if effects.reset_window_service {
             self.windows.disconnect();
             self.tray.reset(time.tick, u64::from(time.hz) * 2);
@@ -997,7 +1004,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         session: &mut Session<'_, '_>,
         host: &mut Host<'_>,
         programs: &Programs<'_>,
-        audio: Option<&Audio<'_>>,
         time: Time,
     ) {
         match action {
@@ -1111,13 +1117,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 let percent = shell::volume::stepped(self.shell.audio.ui.percent, step);
                 self.shell
                     .audio
-                    .set_percent(audio, percent, true, time.tick, time.hz);
+                    .set_percent(percent, true, time.tick);
                 self.bar();
             }
             Action::VolumePercent(percent) => {
                 self.shell
                     .audio
-                    .set_percent(audio, percent, true, time.tick, time.hz);
+                    .set_percent(percent, true, time.tick);
                 self.bar();
             }
             Action::VolumePointer { x, commit } => {
@@ -1129,22 +1135,22 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 let percent = shell::volume::percent_at_x(shell::volume::track_rect(popup), x);
                 self.shell
                     .audio
-                    .set_percent(audio, percent, commit, time.tick, time.hz);
+                    .set_percent(percent, commit, time.tick);
                 self.bar();
             }
             Action::VolumeMute => {
-                self.shell.audio.toggle_mute(audio, time.tick, time.hz);
+                self.shell.audio.toggle_mute(time.tick);
                 self.bar();
             }
             Action::VolumeOutput(index) => {
                 let id = index
                     .and_then(|i| self.shell.audio.page.rows.get(i))
                     .map_or([0; 64], |r| r.id);
-                self.shell.audio.select(audio, id);
+                self.shell.audio.select(id);
                 self.bar();
             }
             Action::VolumePage(step) => {
-                self.shell.audio.change_page(audio, step > 0);
+                self.shell.audio.change_page(step > 0);
             }
             Action::LayoutChanged => {
                 let _ = self.layout.mark(time.tick);
@@ -1225,7 +1231,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         session: &mut Session<'_, '_>,
         host: &mut Host<'_>,
         programs: &Programs<'_>,
-        audio: Option<&Audio<'_>>,
         time: Time,
     ) {
         self.input.event.begin(
@@ -1270,7 +1275,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             value,
             self.hosted.model.inventory.visible().len(),
         ) {
-            self.action(action, env, session, host, programs, audio, time);
+            self.action(action, env, session, host, programs, time);
             self.shell_damage();
             self.input.event.consume();
             return;
@@ -1313,7 +1318,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             _ => None,
         };
         if let Some(action) = action {
-            self.action(action, env, session, host, programs, audio, time);
+            self.action(action, env, session, host, programs, time);
         }
         self.shell_damage();
         self.bar();
@@ -1324,7 +1329,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         session: &mut Session<'_, '_>,
         host: &mut Host<'_>,
         programs: &Programs<'_>,
-        audio: Option<&Audio<'_>>,
         time: Time,
     ) -> bool {
         let mut active = false;
@@ -1364,7 +1368,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 match sample {
                     Sample::Activity => {}
                     Sample::Key { key, modifiers } => {
-                        self.key(key, modifiers, env, session, host, programs, audio, time)
+                        self.key(key, modifiers, env, session, host, programs, time)
                     }
                     Sample::Physical(value) => {
                         if value.kind == a::physical_key_kind_down
@@ -1481,7 +1485,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         {
                             self.hosted.flush_geometry(index, host, time.tick, time.hz);
                         }
-                        self.action(action, env, session, host, programs, audio, time);
+                        self.action(action, env, session, host, programs, time);
                     }
                 }
             }
@@ -1515,6 +1519,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .shell
             .clock
             .wait_ticks(time.nanoseconds, time.hz, delay);
+        delay = self.shell.audio.wait_ticks(time.tick, delay);
         delay = self
             .outputs
             .capture_wait_ticks(time.nanoseconds, time.hz, delay);
@@ -1527,6 +1532,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.capture.recording_state() != 0
             || self.layout.busy()
             || self.modes.busy()
+            || self.audio_io.busy()
             || self.hosted.pending.iter().any(|p| p.queued() != 0)
         {
             delay = 1;
@@ -1553,6 +1559,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.publisher
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
         self.windows.disconnect();
+        self.shell.audio.stop();
         let mut reported = false;
         loop {
             let time = env.time().ok();
@@ -1603,6 +1610,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 true
             };
             let modes = host.drain_modes();
+            let audio = self.audio_io.drain();
             let capture = self.capture.drain(now);
             let controls = self
                 .control
@@ -1657,6 +1665,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.hosted.poll_failed_spawns(programs);
             if capture
                 && modes
+                && audio
                 && diagnostic
                 && primary
                 && controls
@@ -1722,10 +1731,15 @@ impl bootstrap::Body for Coordinator {
             a::ConsoleInputEvent::default(),
         );
         let mut run = [0; 128];
+        let services = match Services::new(app) {
+            Ok(v) => v,
+            Err(_) => return 2,
+        };
         let mut desktop_owner = match owned(
             || {
                 Desktop::new(
                     &env,
+                    &services,
                     self.expected,
                     host.owner(),
                     &mut events,
@@ -1757,7 +1771,7 @@ impl bootstrap::Body for Coordinator {
         // ordinary Desktop work continues through Spectra's byte contract.
         if app.args().eq_ignore_ascii_case(b"/INPUTTEST") {
             let result =
-                console_check::run(desktop, &env, session, host, &programs, audio.as_ref());
+                console_check::run(desktop, &env, session, host, &programs);
             desktop.drain(&env, session, host, &programs);
             return result;
         }
@@ -1790,6 +1804,8 @@ impl bootstrap::Body for Coordinator {
                 // The explicit kernel terminal-mode receiver now renders
                 // AUTOEXEC. Retire existing asynchronous owners without
                 // painting the hidden Desktop over its transcript.
+                desktop.shell.audio.stop();
+                let _ = desktop.audio_io.drain();
                 desktop.capture.poll();
                 unsafe {
                     desktop.layout.flush(
@@ -1806,7 +1822,7 @@ impl bootstrap::Body for Coordinator {
                 app.sleep(1);
                 continue;
             }
-            desktop.refresh(&env, session, host, &programs, audio.as_ref(), time);
+            desktop.refresh(&env, session, host, &programs, time);
             desktop.diagnostic_work(&env, session, host, &programs, audio.as_ref(), time);
             if test_owner.active() {
                 match test_owner.poll(&programs) {
@@ -1845,7 +1861,7 @@ impl bootstrap::Body for Coordinator {
                     }
                 }
             }
-            let active = desktop.poll_input(&env, session, host, &programs, audio.as_ref(), time);
+            let active = desktop.poll_input(&env, session, host, &programs, time);
             let full = desktop
                 .hosted
                 .model
@@ -1877,7 +1893,7 @@ impl bootstrap::Body for Coordinator {
         while test_owner.active() {
             test_owner.stop(&programs);
             if let Ok(time) = env.time() {
-                desktop.refresh(&env, session, host, &programs, audio.as_ref(), time);
+                desktop.refresh(&env, session, host, &programs, time);
                 desktop.diagnostic_work(&env, session, host, &programs, audio.as_ref(), time);
             }
             let _ = test_owner.poll(&programs);

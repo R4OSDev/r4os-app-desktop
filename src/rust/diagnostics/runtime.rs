@@ -38,7 +38,10 @@ pub struct View<'call, 'input> {
 pub struct Effects {
     pub reset_capture: bool,
     pub reset_window_service: bool,
+    pub audio_changed: bool,
 }
+#[derive(Clone, Copy)]
+struct AudioProbe { work: Work, response: Response, ticket: u64, input: u64 }
 #[derive(Default)]
 pub struct Owner {
     session: Session,
@@ -53,6 +56,7 @@ pub struct Owner {
     restart_old: u32,
     restart_result: i32,
     isolated: bool,
+    audio_probe: Option<AudioProbe>,
 }
 impl Owner {
     pub fn new(isolated: bool) -> Self {
@@ -71,7 +75,7 @@ impl Owner {
         self.screenshot_path.is_some()
     }
     pub fn pending(&self) -> bool {
-        self.session.caller.valid() || self.completion.is_some() || self.restart_at != 0
+        self.session.caller.valid() || self.completion.is_some() || self.restart_at != 0 || self.audio_probe.is_some()
     }
     pub fn poll(
         &mut self,
@@ -117,6 +121,7 @@ impl Owner {
             }
         }
         let Some(work) = host.diagnostic_work() else {
+            self.cancel_audio(view, &mut effects);
             if let Some((old, response)) = self.completion.take() {
                 if old.request.op == Op::Restart && response.result == 0 {
                     self.restart_state = 3;
@@ -125,6 +130,24 @@ impl Owner {
             }
             return effects;
         };
+        if let Some(probe) = self.audio_probe {
+            if probe.work != work {
+                self.cancel_audio(view, &mut effects);
+            } else {
+                let valid = self.session.caller.valid()
+                    && self.input_generation == probe.input && time.tick < work.deadline_tick
+                    && host.broker_instance() == Some(work.broker.instance)
+                    && snes::live(programs, work.broker);
+                let result = if valid { view.shell.audio.probe_result(probe.ticket) } else { Some(false) };
+                let Some(ok) = result else { return effects; };
+                let mut response = probe.response;
+                if !ok { response.result = a::service_api_result_invalid; }
+                response.redraws = stats.redraws;
+                response.input_generation = self.input_generation;
+                self.cancel_audio(view, &mut effects);
+                self.completion = Some((work, response));
+            }
+        }
         if self
             .completion
             .as_ref()
@@ -156,6 +179,12 @@ impl Owner {
                     &mut effects,
                 )
             };
+            if work.request.op == Op::Audio && response.result == 0 {
+                let ticket = view.shell.audio.begin_probe();
+                self.audio_probe = Some(AudioProbe { work, response, ticket, input: self.input_generation });
+                effects.audio_changed = true;
+                return effects;
+            }
             self.completion = Some((work, response));
         }
         let (_, response) = self.completion.unwrap();
@@ -168,6 +197,12 @@ impl Owner {
             }
         }
         effects
+    }
+    fn cancel_audio(&mut self, view: &mut View<'_, '_>, effects: &mut Effects) {
+        if let Some(probe) = self.audio_probe.take() {
+            view.shell.audio.end_probe(probe.ticket);
+            effects.audio_changed = true;
+        }
     }
     fn step(
         &mut self,
@@ -644,6 +679,7 @@ impl Owner {
         abandoned: bool,
         effects: &mut Effects,
     ) -> bool {
+        self.cancel_audio(v, effects);
         self.restart_at = 0;
         if self.capture_override {
             self.capture_override = false;
@@ -724,7 +760,7 @@ fn volume_targets(v: &mut View<'_, '_>) -> bool {
         return false;
     }
     let old = v.shell.audio.ui.popup_open;
-    v.shell.audio.ui.popup_open = true;
+    v.shell.audio.set_popup(true);
     let popup =
         shell::status_view::volume_popup_rect(v.width, v.height, v.shell.config.taskbar_clock);
     let track = shell::volume::track_rect(popup);
@@ -753,6 +789,6 @@ fn volume_targets(v: &mut View<'_, '_>) -> bool {
         && target(mute) == Target::VolumePopupMute
         && target(icon) == Target::TaskbarVolume
         && crate::input::hit::target(&scene, 0, 0) == Target::VolumePopupBackdrop;
-    v.shell.audio.ui.popup_open = old;
+    v.shell.audio.set_popup(old);
     valid
 }

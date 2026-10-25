@@ -196,7 +196,7 @@ impl<'input> State<'input> {
         self.menu_control.set_open(false);
         self.system_menu = None;
         self.time_menu = false;
-        self.audio.ui.popup_open = false;
+        self.audio.set_popup(false);
         self.audio.dragging = false;
         self.dialog = Dialog::None;
         self.dialog_focus = Target::None;

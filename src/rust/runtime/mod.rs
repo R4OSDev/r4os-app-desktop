@@ -1,6 +1,7 @@
 //! Main-task runtime integration. State-specific owners stay outside this
 //! module; platform/service adapters borrow the admitted SDK contexts.
 pub(crate) mod allocation;
+pub(crate) mod audio_io;
 pub mod bootstrap;
 pub mod desktop;
 pub mod environment;

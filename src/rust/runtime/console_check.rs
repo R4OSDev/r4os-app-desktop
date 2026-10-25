@@ -31,7 +31,6 @@ pub(super) fn run<'a>(
     session: &mut Session<'_, '_>,
     host: &mut Host<'_>,
     programs: &Programs<'_>,
-    audio: Option<&Audio<'_>>,
 ) -> i32 {
     for paste in [false, true] {
         let Ok(time) = env.time() else {
@@ -54,7 +53,7 @@ pub(super) fn run<'a>(
         let handle = desktop.hosted.model.clients.slots()[index].handle();
         let result = (|| {
             for _ in 0..4 {
-                if !pump(desktop, env, session, host, programs, audio) {
+                if !pump(desktop, env, session, host, programs) {
                     return Err(1);
                 }
             }
@@ -100,7 +99,7 @@ pub(super) fn run<'a>(
             }
             let mut ready = false;
             for _ in 0..100 {
-                if env.app.should_close() || !pump(desktop, env, session, host, programs, audio) {
+                if env.app.should_close() || !pump(desktop, env, session, host, programs) {
                     return Err(8);
                 }
                 let snapshot = &desktop.hosted.consoles[index];
@@ -126,7 +125,7 @@ pub(super) fn run<'a>(
                 }
             }
             for _ in 0..100 {
-                if !pump(desktop, env, session, host, programs, audio) {
+                if !pump(desktop, env, session, host, programs) {
                     return Err(10);
                 }
                 let client = &desktop.hosted.model.clients.slots()[index];
@@ -149,7 +148,7 @@ pub(super) fn run<'a>(
             if same(desktop.hosted.model.clients.slots()[index].handle(), handle) {
                 let _ = programs.kill(handle);
                 while same(desktop.hosted.model.clients.slots()[index].handle(), handle) {
-                    let _ = pump(desktop, env, session, host, programs, audio);
+                    let _ = pump(desktop, env, session, host, programs);
                 }
             }
             env.app.write("Desktop typed input check failed\n");
@@ -178,7 +177,6 @@ fn pump<'a>(
     session: &mut Session<'_, '_>,
     host: &mut Host<'_>,
     programs: &Programs<'_>,
-    audio: Option<&Audio<'_>>,
 ) -> bool {
     let Ok(time) = env.time() else {
         env.app.sleep(1);
@@ -190,7 +188,7 @@ fn pump<'a>(
     let Ok(time) = env.time() else {
         return false;
     };
-    desktop.refresh(env, session, host, programs, audio, time);
+    desktop.refresh(env, session, host, programs, time);
     let ok = desktop.render(env, session, time).is_ok();
     env.boot_ready();
     ok
