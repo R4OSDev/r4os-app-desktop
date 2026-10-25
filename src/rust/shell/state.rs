@@ -154,8 +154,8 @@ impl<'input> State<'input> {
         if let Ok(quick) = env.store.load_quick() {
             self.quick = quick;
         }
-        if let Ok(time) = env.time() {
-            if !self.clock.load(&env.store, &time.state) {
+        if let Ok(state) = r4os_sdk::time::Clock::new(env.app).state() {
+            if !self.clock.load(&env.store, &state) {
                 env.app.write("Time config unreadable; file retained\n");
             }
         }

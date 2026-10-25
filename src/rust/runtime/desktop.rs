@@ -495,7 +495,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if self
             .shell
             .clock
-            .update(&env.store, &time.state, time.tick, time.hz)
+            .update(&env.store, env.app, time.nanoseconds)
             .unwrap_or(false)
         {
             self.bar();
@@ -1505,6 +1505,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             delay,
             &[self.tray.next_tick, self.status.next_tick],
         );
+        delay = self
+            .shell
+            .clock
+            .wait_ticks(time.nanoseconds, time.hz, delay);
         delay = self
             .outputs
             .capture_wait_ticks(time.nanoseconds, time.hz, delay);

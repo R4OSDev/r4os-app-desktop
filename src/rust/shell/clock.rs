@@ -1,16 +1,141 @@
-//! Once-per-second taskbar clock using the live kernel time and cached R4STD
-//! timezone/format preferences. No per-frame TIMESVC task/RPC is created.
+//! Calendar/config reads are admitted once per monotonic second. The kernel
+//! owns the wallclock anchor; this owner retains only presentation and its due.
 use super::{configuration::bytes_z, persistence::Store};
 use crate::runtime::library::{required, scalar};
 use core::mem::MaybeUninit;
 use r4os_library_helpers::{Error, raw as c};
 use r4os_sdk::abi as a;
 const PATH: &[u8] = b"C:\\R4OS\\CONFIG\\TIME.R4S";
+const SECOND: u64 = 1_000_000_000;
 pub struct Clock {
     config: c::R4StdTimeHelpersConfig,
     label: [u8; 9],
-    pub next_tick: u64,
-    next_reload: u64,
+    next_ns: u64,
+    last_ns: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn state(day: u8, hour: u8, minute: u8) -> a::TimeState {
+        a::TimeState {
+            valid: 1,
+            year: 2026,
+            month: 3,
+            day,
+            hour,
+            minute,
+            seconds_since_midnight: u32::from(hour) * 3600 + u32::from(minute) * 60,
+            ..a::TimeState::default()
+        }
+    }
+    #[test]
+    fn hot_progress_never_calls_calendar_or_preferences_before_the_due() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            assert!(
+                clock
+                    .refresh(100, |_| Ok(false), || Some(state(28, 23, 59)))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"23:59");
+            for now in 101..1101 {
+                assert!(
+                    !clock
+                        .refresh(
+                            now,
+                            |_| panic!("hot preferences read"),
+                            || panic!("hot calendar read")
+                        )
+                        .unwrap()
+                );
+            }
+            assert_eq!(clock.wait_ticks(SECOND / 2 + 100, 1000, 1000), 500);
+            assert_eq!(clock.wait_ticks(SECOND / 2 + 100, 250, 1000), 125);
+            assert_eq!(clock.wait_ticks(SECOND + 99, 250, 1000), 1);
+            assert!(
+                clock
+                    .refresh(SECOND + 100, |_| Ok(false), || Some(state(29, 0, 0)))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"00:00");
+            // Explicit wallclock changes are observed at the next due, without
+            // deriving a second calendar anchor from the previous displayed time.
+            assert!(
+                clock
+                    .refresh(2 * SECOND + 100, |_| Ok(false), || Some(state(20, 12, 34)))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"12:34");
+        });
+    }
+    #[test]
+    fn invalid_calendar_and_clock_regression_do_not_freeze_a_valid_label() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            clock
+                .refresh(SECOND, |_| Ok(false), || Some(state(28, 12, 34)))
+                .unwrap();
+            assert!(
+                clock
+                    .refresh(2 * SECOND, |_| Ok(false), || Some(a::TimeState::default()))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"--:--");
+            assert!(!clock.refresh(3 * SECOND, |_| Ok(false), || None).unwrap());
+            assert!(
+                clock
+                    .refresh(1, |_| Ok(false), || Some(state(29, 8, 5)))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"08:05");
+        });
+    }
+    #[test]
+    fn current_date_still_controls_timezone_and_format_after_reload() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            let config = b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=Europe/Berlin\n";
+            let load = |clock: &mut Clock| {
+                assert_eq!(
+                    scalar(unsafe {
+                        c::R4StdTimeHelpersConfig_loadFromBytes(
+                            0,
+                            &mut clock.config,
+                            config.as_ptr(),
+                            config.len() as u64,
+                        )
+                    })
+                    .unwrap(),
+                    1
+                );
+                Ok(true)
+            };
+            clock.refresh(0, load, || Some(state(28, 12, 34))).unwrap();
+            assert_eq!(clock.label(), b"13:34");
+            clock
+                .refresh(SECOND, |_| Ok(false), || Some(state(29, 12, 34)))
+                .unwrap();
+            assert_eq!(clock.label(), b"14:34");
+            clock
+                .refresh(
+                    2 * SECOND,
+                    |clock| {
+                        crate::runtime::library::result(unsafe {
+                            c::R4StdTimeHelpersConfig_setClockFormat(
+                                0,
+                                &mut clock.config,
+                                a::clock_format_12h,
+                            )
+                        })?;
+                        Ok(true)
+                    },
+                    || Some(state(29, 12, 34)),
+                )
+                .unwrap();
+            assert_eq!(clock.label(), b"02:34 PM");
+        });
+    }
 }
 fn view<'a>(slot: c::R4LibrariesSlot, bytes: &'a [u8]) -> Result<&'a [u8], Error> {
     let slot = required(slot)?;
@@ -32,9 +157,9 @@ impl Clock {
         required(unsafe { c::R4StdTimeHelpersConfig_create(config.as_mut_ptr()) })?;
         Ok(Self {
             config: unsafe { config.assume_init() },
-            label: [b'0', b'0', b':', b'0', b'0', 0, 0, 0, 0],
-            next_tick: 0,
-            next_reload: 0,
+            label: [b'-', b'-', b':', b'-', b'-', 0, 0, 0, 0],
+            next_ns: 0,
+            last_ns: 0,
         })
     }
     pub fn label(&self) -> &[u8] {
@@ -75,11 +200,7 @@ impl Clock {
             _ => false,
         }
     }
-    fn reload(&mut self, store: &Store<'_, '_>, now: u64, hz: u32) -> Result<bool, Error> {
-        if now < self.next_reload {
-            return Ok(false);
-        }
-        self.next_reload = now.saturating_add(u64::from(hz.max(1)));
+    fn reload(&mut self, store: &Store<'_, '_>) -> Result<bool, Error> {
         let mut next = self.config;
         let mut bytes = [0; 768];
         let Ok(Some(n)) = store.read(PATH, &mut bytes) else {
@@ -104,26 +225,53 @@ impl Clock {
             return Ok(false);
         }
         self.config = next;
-        self.next_tick = 0;
         Ok(true)
     }
     pub fn update(
         &mut self,
         store: &Store<'_, '_>,
-        state: &a::TimeState,
-        now: u64,
-        hz: u32,
+        app: &r4os_sdk::App<'_>,
+        now_ns: u64,
     ) -> Result<bool, Error> {
-        let reloaded = self.reload(store, now, hz)?;
-        if now < self.next_tick {
-            return Ok(reloaded);
+        self.refresh(
+            now_ns,
+            |clock| clock.reload(store),
+            || r4os_sdk::time::Clock::new(app).state().ok(),
+        )
+    }
+    /// Include the calendar due in the ordinary activity wait. Read the live
+    /// tick scale at the caller; a timer-frequency change cannot delay refresh.
+    pub fn wait_ticks(&self, now_ns: u64, hz: u32, maximum: u64) -> u64 {
+        let delta = self.next_ns.saturating_sub(now_ns);
+        let ticks = (u128::from(delta) * u128::from(hz)).div_ceil(u128::from(SECOND));
+        ticks.max(1).min(u128::from(maximum)) as u64
+    }
+    fn refresh(
+        &mut self,
+        now_ns: u64,
+        reload: impl FnOnce(&mut Self) -> Result<bool, Error>,
+        calendar: impl FnOnce() -> Option<a::TimeState>,
+    ) -> Result<bool, Error> {
+        if now_ns < self.last_ns {
+            self.next_ns = 0;
         }
-        self.next_tick = now.saturating_add(u64::from(hz.max(1)));
+        self.last_ns = now_ns;
+        if now_ns < self.next_ns {
+            return Ok(false);
+        }
+        self.next_ns = now_ns.saturating_add(SECOND);
+        let reloaded = reload(self)?;
+        let Some(state) = calendar().filter(|state| state.valid != 0) else {
+            let unknown = [b'-', b'-', b':', b'-', b'-', 0, 0, 0, 0];
+            let changed = self.label != unknown;
+            self.label = unknown;
+            return Ok(changed || reloaded);
+        };
         let offset = scalar(unsafe {
             c::R4StdTimeHelpersConfig_offsetMinutesForState(
                 0,
                 &self.config,
-                (state as *const a::TimeState).cast(),
+                (&state as *const a::TimeState).cast(),
             )
         })? as i16;
         let seconds =

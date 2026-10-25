@@ -28,7 +28,6 @@ pub enum Error {
 }
 #[derive(Clone, Copy)]
 pub struct Time {
-    pub state: a::TimeState,
     pub tick: u64,
     pub nanoseconds: u64,
     pub hz: u32,
@@ -60,17 +59,15 @@ impl<'a> Environment<'a> {
     }
     pub fn time(&self) -> Result<Time, SdkError> {
         let clock = Clock::new(self.app);
-        let state = clock.state()?;
-        let nanoseconds = clock.precise_instant()?.nanoseconds;
-        let tick = state.monotonic_ticks;
-        let hz = state.monotonic_hz;
+        let current = clock.monotonic()?;
+        let tick = clock.ticks()?;
+        let hz = current.event_requested_hz;
         if hz == 0 {
             return Err(SdkError::InvalidProvider);
         }
         Ok(Time {
-            state,
             tick,
-            nanoseconds,
+            nanoseconds: current.instant_ns,
             hz,
         })
     }
