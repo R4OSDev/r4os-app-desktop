@@ -34,6 +34,21 @@ pub struct Change {
     pub published: bool,
     pub service_lost: bool,
 }
+#[derive(Clone, Copy)]
+struct Visibility {
+    registry_revision: u64,
+    identity: Identity,
+    item_revision: u64,
+    visible: bool,
+}
+impl Visibility {
+    fn matches(self, entry: &tray::Entry, registry_revision: u64) -> bool {
+        self.registry_revision == registry_revision
+            && self.identity.same(entry.identity())
+            && self.item_revision == entry.revision
+            && self.visible == entry.layout_visible
+    }
+}
 pub struct Mirror {
     owner: a::ProgramProcessHandle,
     active: Registry,
@@ -43,6 +58,8 @@ pub struct Mirror {
     cursor: u16,
     pub next_tick: u64,
     pub visibility_dirty: bool,
+    acknowledged: [Option<Visibility>; tray::MAX_ITEMS],
+    visibility_retry_tick: u64,
 }
 impl Mirror {
     pub fn new(owner: a::ProgramProcessHandle) -> core::result::Result<Self, TryReserveError> {
@@ -55,6 +72,8 @@ impl Mirror {
             cursor: a::tray_desktop_cursor_poll,
             next_tick: 0,
             visibility_dirty: false,
+            acknowledged: [None; tray::MAX_ITEMS],
+            visibility_retry_tick: 0,
         })
     }
     pub fn registry(&self) -> &Registry {
@@ -71,6 +90,8 @@ impl Mirror {
         self.sync_revision = 0;
         self.cursor = a::tray_desktop_cursor_poll;
         self.visibility_dirty = false;
+        self.acknowledged.fill(None);
+        self.visibility_retry_tick = 0;
         self.next_tick = now.saturating_add(retry);
         Change {
             changed,
@@ -131,6 +152,7 @@ impl Mirror {
                     core::mem::swap(&mut self.active, &mut self.staging);
                     self.revision = response.registry_revision;
                     self.visibility_dirty = true;
+                    self.acknowledged.fill(None);
                     // Caller clears hover/pressed identities and reapplies its
                     // current taskbar layout before publishing visibility.
                     return Change {
@@ -139,9 +161,8 @@ impl Mirror {
                         service_lost: false,
                     };
                 }
-                if self.visibility_dirty {
-                    self.publish_visibility(protocol);
-                }
+                // Publication belongs after the caller's current layout,
+                // including when an earlier publication needs a retry.
                 return Change::default();
             }
             if response.next_cursor == a::tray_desktop_cursor_poll {
@@ -151,11 +172,31 @@ impl Mirror {
         }
         Change::default()
     }
-    pub fn publish_visibility(&mut self, protocol: &mut impl Protocol) -> bool {
-        if self.revision == 0 {
+    pub fn publish_visibility(
+        &mut self,
+        protocol: &mut impl Protocol,
+        now: u64,
+        retry: u64,
+    ) -> bool {
+        if !self.visibility_dirty || self.revision == 0 || now < self.visibility_retry_tick {
             return false;
         }
-        for entry in self.active.entries().iter().filter(|e| e.used) {
+        for (index, entry) in self
+            .active
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.used)
+        {
+            if self.acknowledged[index].is_some_and(|ack| ack.matches(entry, self.revision)) {
+                continue;
+            }
+            let publication = Visibility {
+                registry_revision: self.revision,
+                identity: entry.identity(),
+                item_revision: entry.revision,
+                visible: entry.layout_visible,
+            };
             let mut request = a::TrayDesktopExchange {
                 desktop_owner: self.owner,
                 known_revision: self.revision,
@@ -170,19 +211,30 @@ impl Mirror {
             request.event.item_id = entry.item_id;
             request.event.item_revision = entry.revision;
             let mut response = a::TrayDesktopExchange::default();
+            // A lost response may follow an applied change. An older receipt
+            // cannot prove even a later return to that older visibility.
+            self.acknowledged[index] = None;
             if !protocol.exchange(
                 a::tray_service_op_desktop_visibility,
                 &request,
                 &mut response,
             ) || !self.valid(&response)
                 || response.result != a::tray_result_ok
-                || response.registry_revision != self.revision
+                || response.registry_revision != publication.registry_revision
+                || response.flags & a::tray_desktop_flag_layout_visible != request.flags
             {
                 self.visibility_dirty = true;
+                self.visibility_retry_tick = now.saturating_add(retry.max(1));
                 return false;
             }
+            // The single Desktop owner cannot replace this entry during the
+            // synchronous call. The response must confirm its exact registry
+            // revision, desktop generation and requested visibility. Keep the
+            // confirmed prefix if a later entry fails.
+            self.acknowledged[index] = Some(publication);
         }
         self.visibility_dirty = false;
+        self.visibility_retry_tick = 0;
         true
     }
     pub fn activate(
@@ -240,6 +292,7 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{vec, vec::Vec};
     struct Peer {
         owner: a::ProgramProcessHandle,
         calls: u32,
@@ -266,6 +319,7 @@ mod tests {
                 assert_eq!(request.flags, a::tray_desktop_flag_layout_visible);
                 assert!([1, 2].contains(&request.event.item_id));
                 self.visibility += 1;
+                out.flags = request.flags;
                 return true;
             }
             if operation == a::tray_service_op_desktop_activate {
@@ -364,9 +418,13 @@ mod tests {
             window_start: 180,
             visible_windows: 1
         }));
-        assert!(mirror.publish_visibility(&mut peer));
+        assert!(mirror.publish_visibility(&mut peer, 10, 50));
         assert_eq!(peer.visibility, 2);
         assert!(!mirror.visibility_dirty);
+        for tick in 11..60 {
+            assert!(!mirror.publish_visibility(&mut peer, tick, 50));
+        }
+        assert_eq!(peer.visibility, 2);
         let identity = mirror.registry().entry(0).unwrap().identity();
         assert!(mirror.activate(
             &mut peer,
@@ -387,5 +445,229 @@ mod tests {
         assert_eq!(mirror.revision, 0);
         assert!(mirror.registry().find(identity).is_none());
         assert!(!mirror.pending());
+    }
+
+    // A mutable service-side registry, independent of the Desktop's caches.
+    struct VisibilityPeer {
+        revision: u64,
+        items: Vec<a::TrayServiceRequest>,
+        calls: Vec<(u64, u64, u64, u64, bool)>,
+        fault: Option<(u64, u8)>,
+    }
+    impl VisibilityPeer {
+        fn new() -> Self {
+            Self {
+                revision: 5,
+                items: vec![1, 2]
+                    .into_iter()
+                    .map(|id| a::TrayServiceRequest {
+                        owner: a::ProgramProcessHandle {
+                            instance_id: 9,
+                            generation: 22,
+                            reserved: 0,
+                        },
+                        item_id: id,
+                        item_revision: 1,
+                        item_flags: a::tray_item_flag_visible | a::tray_item_flag_enabled,
+                        icon_width: 16,
+                        icon_height: 16,
+                        icon_format: a::tray_icon_format_argb32,
+                        ..a::TrayServiceRequest::default()
+                    })
+                    .collect(),
+                calls: Vec::new(),
+                fault: None,
+            }
+        }
+    }
+    impl Protocol for VisibilityPeer {
+        fn exchange(
+            &mut self,
+            operation: u16,
+            request: &a::TrayDesktopExchange,
+            out: &mut a::TrayDesktopExchange,
+        ) -> bool {
+            *out = a::TrayDesktopExchange {
+                desktop_owner: request.desktop_owner,
+                desktop_epoch: request.desktop_owner.generation,
+                registry_revision: self.revision,
+                registered_count: self.items.len() as u16,
+                ..a::TrayDesktopExchange::default()
+            };
+            if operation == a::tray_service_op_desktop_sync {
+                let poll = request.cursor == a::tray_desktop_cursor_poll;
+                if poll && request.known_revision == self.revision {
+                    out.flags = a::tray_desktop_flag_complete;
+                    return true;
+                }
+                let index = if poll {
+                    out.flags = a::tray_desktop_flag_restart;
+                    0
+                } else {
+                    request.cursor as usize
+                };
+                if let Some(item) = self.items.get(index) {
+                    out.item = *item;
+                    out.flags |= a::tray_desktop_flag_item;
+                }
+                if index + 1 >= self.items.len() {
+                    out.flags |= a::tray_desktop_flag_complete;
+                } else {
+                    out.next_cursor = (index + 1) as u16;
+                }
+                return true;
+            }
+            assert_eq!(operation, a::tray_service_op_desktop_visibility);
+            let item = self
+                .items
+                .iter()
+                .find(|item| item.item_id == request.event.item_id)
+                .unwrap();
+            assert!(tray::same_owner(item.owner, request.event.owner));
+            assert_eq!(item.item_revision, request.event.item_revision);
+            assert_eq!(request.known_revision, self.revision);
+            self.calls.push((
+                item.item_id,
+                item.owner.generation,
+                item.item_revision,
+                self.revision,
+                request.flags & a::tray_desktop_flag_layout_visible != 0,
+            ));
+            out.flags = request.flags;
+            if let Some((id, kind)) = self.fault.filter(|(id, _)| *id == item.item_id) {
+                assert_eq!(id, item.item_id);
+                self.fault = None;
+                match kind {
+                    0 => return false,
+                    1 => out.registry_revision -= 1,
+                    2 => out.desktop_epoch += 1,
+                    3 => out.flags ^= a::tray_desktop_flag_layout_visible,
+                    _ => unreachable!(),
+                }
+            }
+            true
+        }
+    }
+    fn mirror() -> Mirror {
+        Mirror::new(a::ProgramProcessHandle {
+            instance_id: 86,
+            generation: 4,
+            reserved: 0,
+        })
+        .unwrap()
+    }
+    fn layout(system_left: i32) -> Layout {
+        Layout {
+            screen_w: 640,
+            screen_h: 480,
+            taskbar_h: 32,
+            item_y: 4,
+            system_left,
+            window_start: 180,
+            visible_windows: 1,
+        }
+    }
+    #[test]
+    fn visibility_retries_only_unconfirmed_items_after_current_layout() {
+        let mut mirror = mirror();
+        let mut peer = VisibilityPeer::new();
+        assert!(mirror.synchronize(&mut peer, 10, 50).published);
+        mirror.layout(layout(500));
+        peer.fault = Some((2, 0));
+        assert!(!mirror.publish_visibility(&mut peer, 10, 50));
+        assert!(mirror.visibility_dirty);
+        // A geometry-only change needs no repeated visibility for item1.
+        assert!(mirror.layout(layout(450)));
+        for tick in 11..60 {
+            assert!(!mirror.publish_visibility(&mut peer, tick, 50));
+        }
+        assert_eq!(peer.calls.len(), 2);
+        mirror.synchronize(&mut peer, 60, 50);
+        assert_eq!(peer.calls.len(), 2); // synchronize never publishes pre-layout
+        assert!(mirror.publish_visibility(&mut peer, 60, 50));
+        assert_eq!(
+            peer.calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2, 2]
+        );
+        assert!(!mirror.visibility_dirty);
+        mirror.layout(layout(235)); // window reservation hides both items
+        peer.fault = Some((2, 0)); // change may apply before its response is lost
+        assert!(!mirror.publish_visibility(&mut peer, 61, 50));
+        assert_eq!(peer.calls.len(), 5);
+        assert!(peer.calls[3..].iter().all(|c| !c.4));
+        mirror.layout(layout(500)); // return to the earlier acknowledged state
+        assert!(!mirror.publish_visibility(&mut peer, 110, 50));
+        assert!(mirror.publish_visibility(&mut peer, 111, 50));
+        assert_eq!(peer.calls.len(), 7);
+        assert!(peer.calls[5..].iter().all(|c| c.4));
+        for tick in 112..1000 {
+            mirror.publish_visibility(&mut peer, tick, 50);
+        }
+        assert_eq!(peer.calls.len(), 7);
+    }
+    #[test]
+    fn visibility_rejects_unconfirmed_generation_and_visibility_receipts() {
+        for kind in 0..4 {
+            let mut mirror = mirror();
+            let mut peer = VisibilityPeer::new();
+            mirror.synchronize(&mut peer, 10, 50);
+            mirror.layout(layout(500));
+            peer.fault = Some((1, kind));
+            assert!(!mirror.publish_visibility(&mut peer, 10, 50));
+            assert!(mirror.visibility_dirty);
+            assert!(!mirror.publish_visibility(&mut peer, 59, 50));
+            // Newer provider state while a rejected response is awaiting retry.
+            peer.revision += 1;
+            peer.items[0].item_revision += 1;
+            assert!(mirror.synchronize(&mut peer, 60, 50).published);
+            mirror.layout(layout(500));
+            assert!(mirror.publish_visibility(&mut peer, 60, 50));
+            assert_eq!(peer.calls.len(), 3);
+            assert_eq!(peer.calls[1], (1, 22, 2, 6, true));
+            assert!(!mirror.visibility_dirty);
+            assert!(!mirror.publish_visibility(&mut peer, 61, 50));
+            assert_eq!(peer.calls.len(), 3);
+        }
+    }
+    #[test]
+    fn visibility_removal_registration_and_service_reset_invalidate_old_receipts() {
+        let mut mirror = mirror();
+        let mut peer = VisibilityPeer::new();
+        mirror.synchronize(&mut peer, 10, 50);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 10, 50));
+        peer.items.remove(0);
+        peer.revision += 1;
+        assert!(mirror.synchronize(&mut peer, 60, 50).published);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 60, 50));
+        assert_eq!(peer.calls[2], (2, 22, 1, 6, true));
+        peer.items[0].owner.generation += 1;
+        peer.revision += 1;
+        assert!(mirror.synchronize(&mut peer, 110, 50).published);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 110, 50));
+        assert_eq!(peer.calls[3], (2, 23, 1, 7, true));
+        let item = peer.items.pop().unwrap();
+        peer.revision += 1;
+        assert!(mirror.synchronize(&mut peer, 160, 50).published);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 160, 50));
+        assert_eq!(peer.calls.len(), 4);
+        assert!(!mirror.visibility_dirty);
+        peer.items.push(item);
+        peer.revision += 1;
+        assert!(mirror.synchronize(&mut peer, 210, 50).published);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 210, 50));
+        assert_eq!(peer.calls.len(), 5);
+        // A replacement service may repeat registry numbers. Reset must forget
+        // acknowledgements even for the same desktop and provider identities.
+        mirror.reset(220, 50);
+        assert!(!mirror.publish_visibility(&mut peer, 220, 50));
+        assert!(mirror.synchronize(&mut peer, 270, 50).published);
+        mirror.layout(layout(500));
+        assert!(mirror.publish_visibility(&mut peer, 270, 50));
+        assert_eq!(peer.calls.len(), 6);
     }
 }

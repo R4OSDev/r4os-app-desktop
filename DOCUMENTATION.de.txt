@@ -99,3 +99,16 @@ neue periodische IPC-Abfragen. Bestehende Single-Instance-Policy gilt weiter.
 Der Loader bleibt in dieser Unterversion synchron. Wireprojektion beim
 Desktop verweist auf den produktiven Vertrag des WINSVC; Kernel/SDK-ABI
 bleiben unveraendert. Bedienung/Belege: Docs/Desktop/DeskRun.txt.
+
+0.87.15 / Desktop0.1.166: Tray-Sichtbarkeit nur bei Aenderungen
+-----------------------------------------------------------
+shell/tray_sync.rs publiziert nach dem aktuellen Layout nur Dirty-Eintraege
+ohne passende Quittung fuer Registry, Itemrevision, Prozessgeneration und
+Sichtbarkeit. Geometrie ohne Sichtbarkeitsaenderung nutzt bestaetigte Werte.
+Vor einer Aenderungsmeldung wird die alte Quittung ungueltig: ein Timeout
+kann auf eine bereits ausgefuehrte Aenderung folgen. Bestaetigte Praefixe
+bleiben bei spaeterem Fehler erhalten; Wiederholung hoechstens im20Hz-Takt.
+Registrywechsel und Dienstverlust verwerfen alte Quittungen. Der vorhandene
+WINSVC-Snapshot-/DESKRUN-Poll, Aktivierung und Cleanup bleiben beim Besitzer.
+Gezielte native Faelle: RustNative.ps1 -Filter shell::tray. Fachbelege und
+Grenzen: Docs/Desktop/README.txt, Abschnitt0.87.15.

@@ -540,7 +540,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }) {
             self.bar();
         }
-        self.tray.publish_visibility(transport.host);
+        self.tray.publish_visibility(
+            transport.host,
+            time.tick,
+            u64::from(time.hz).div_ceil(20),
+        );
         if self.directory_active
             && env
                 .system
