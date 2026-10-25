@@ -5,6 +5,7 @@ use super::{
     process::{Programs, gone},
     window_image::{Frame, Identity, Memory, NoReceipt, Receipt},
 };
+use crate::runtime::graphics_wire::{Marker, NATIVE, REMOVED};
 use crate::runtime::{service::Host, wire::Wire};
 use r4os_contract as a;
 #[cfg(test)]
@@ -20,6 +21,7 @@ pub struct Spec {
 /// Replies acknowledge the exact synchronous request. service_dead must
 /// prove death of this exact generation; RPC failure/invalidate is no ACK.
 pub unsafe trait Transport {
+    fn marker(&self, surface: a::WindowGraphicsSurface) -> Option<Marker>;
     fn publish(&mut self, request: &a::WindowGraphicsPublication)
     -> Option<a::WindowGraphicsReply>;
     fn consumer(&mut self, request: &a::WindowGraphicsConsumer) -> Option<a::WindowGraphicsReply>;
@@ -31,6 +33,9 @@ pub struct NativeTransport<'loan, 'host, 'app> {
     pub programs: &'loan Programs<'app>,
 }
 unsafe impl Transport for NativeTransport<'_, '_, '_> {
+    fn marker(&self, surface: a::WindowGraphicsSurface) -> Option<Marker> {
+        self.host.image_marker(surface)
+    }
     fn publish(&mut self, r: &a::WindowGraphicsPublication) -> Option<a::WindowGraphicsReply> {
         self.host.graphics_publish(r).ok()
     }
@@ -63,6 +68,7 @@ struct Slot<M: Memory, R: Receipt> {
     lease: a::WindowGraphicsFrame,
     state: State,
     inspected_revision: u64,
+    inspected_image_revision: u64,
 }
 pub struct Window<M: Memory, R: Receipt = NoReceipt> {
     owner: a::ProgramProcessHandle,
@@ -76,6 +82,8 @@ pub struct Window<M: Memory, R: Receipt = NoReceipt> {
     publication: Option<a::WindowGraphicsPublication>,
     request: Option<a::WindowGraphicsConsumer>,
     request_slot: usize,
+    request_image_revision: Option<u64>,
+    empty_image_revision: Option<u64>,
     slots: [Slot<M, R>; 3],
     current: Option<usize>,
     inspect_slot: Option<usize>,
@@ -97,11 +105,14 @@ impl<M: Memory, R: Receipt> Window<M, R> {
             publication: None,
             request: None,
             request_slot: 0,
+            request_image_revision: None,
+            empty_image_revision: None,
             slots: core::array::from_fn(|_| Slot {
                 frame: Frame::new(memory.clone()),
                 lease: a::WindowGraphicsFrame::default(),
                 state: State::Empty,
                 inspected_revision: 0,
+                inspected_image_revision: 0,
             }),
             current: None,
             inspect_slot: None,
@@ -109,6 +120,9 @@ impl<M: Memory, R: Receipt> Window<M, R> {
     }
     pub fn surface(&self) -> a::WindowGraphicsSurface {
         self.surface
+    }
+    pub fn observes_images(&self) -> bool {
+        self.surface.serial != 0 && !self.closing && !self.ended
     }
     pub fn owner(&self) -> a::ProgramProcessHandle {
         self.owner
@@ -188,6 +202,8 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         self.publication = None;
         self.request = None;
         self.request_slot = 0;
+        self.request_image_revision = None;
+        self.empty_image_revision = None;
         self.current = None;
         self.inspect_slot = None;
     }
@@ -196,6 +212,7 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         s.lease = a::WindowGraphicsFrame::default();
         s.state = State::Empty;
         s.inspected_revision = 0;
+        s.inspected_image_revision = 0;
     }
     fn acknowledge(&mut self, index: usize) {
         self.slots[index].frame.retire();
@@ -216,6 +233,7 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         };
         self.serial = serial;
         self.request_slot = index;
+        self.request_image_revision = None;
         let mut r = a::WindowGraphicsConsumer {
             desktop,
             surface: self.surface,
@@ -320,6 +338,14 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         .contains(&reply.result)
         {
             if request.action == a::window_graphics_take {
+                if reply.result == a::window_graphics_not_ready {
+                    // This is the marker at request creation, never a newer
+                    // snapshot observed while retrying an immutable request.
+                    self.empty_image_revision = self.request_image_revision;
+                } else {
+                    // Busy/capacity are resource waits, not an empty queue.
+                    self.retry_take = true;
+                }
                 self.clear_slot(i);
                 self.request = None;
                 if let Some(current) = self.current {
@@ -368,6 +394,7 @@ impl<M: Memory, R: Receipt> Window<M, R> {
             return;
         }
         let m = slot.lease;
+        let image_revision = t.marker(self.surface).map_or(0, |m| m.revision);
         let request = a::WindowGraphicsConsumer {
             desktop,
             surface: self.surface,
@@ -391,6 +418,7 @@ impl<M: Memory, R: Receipt> Window<M, R> {
             return;
         }
         self.slots[i].inspected_revision = reply.revision;
+        self.slots[i].inspected_image_revision = image_revision;
         if reply.result == a::window_graphics_ok {
             return;
         }
@@ -637,12 +665,39 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         if self.config.flags & a::window_graphics_visible == 0 {
             return;
         }
+        let marker = t.marker(self.surface);
+        if marker.is_some_and(|m| m.flags & REMOVED != 0) {
+            // Metadata removal is no release ACK. Existing leases still
+            // follow Return, release_fence and actual local close receipts.
+            self.disconnect();
+            return;
+        }
         if let Some(i) = self.current {
             if !self.slots[i].frame.has_receipt() && !self.slots[i].frame.cpu_consumed() {
                 self.inspect_slot = Some(i);
                 self.inspect(desktop, t);
                 return;
             }
+            if marker.is_some_and(|m| {
+                m.revision == u64::MAX || m.revision != self.slots[i].inspected_image_revision
+            }) {
+                self.retry_take |= marker.is_some_and(|m| m.flags & NATIVE != 0);
+                self.inspect_slot = Some(i);
+                self.inspect(desktop, t);
+                if self.inspect_slot.is_some() || self.current.is_none() || self.closing {
+                    return;
+                }
+            }
+        }
+        let Some(marker) = marker else {
+            self.retry_take = false;
+            return;
+        };
+        if marker.flags & NATIVE == 0
+            || (marker.revision != u64::MAX && self.empty_image_revision == Some(marker.revision))
+        {
+            self.retry_take = false;
+            return;
         }
         self.retry_take = !spec.consumer_ready;
         if self.retry_take {
@@ -654,6 +709,7 @@ impl<M: Memory, R: Receipt> Window<M, R> {
         }
         if let Some(i) = self.slots.iter().position(|s| s.state == State::Empty) {
             if self.next_request(a::window_graphics_take, i, desktop) {
+                self.request_image_revision = Some(marker.revision);
                 self.consume(t);
             }
         }

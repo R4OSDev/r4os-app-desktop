@@ -1,6 +1,7 @@
 //! Desktop's current WINSVC policy over the general SDK service connection.
 //! One exact host generation is claimed before any output owner is created.
 use super::launch_wire as launch;
+use super::graphics_wire as images;
 use super::wire::{self, Wire};
 use crate::diagnostics::wire as diagnostic;
 use alloc::vec::Vec;
@@ -35,6 +36,8 @@ pub struct Host<'a> {
     response: Vec<u8>,
     work: Option<diagnostic::Work>,
     launch: Option<launch::Message>,
+    images: Option<images::Snapshot>,
+    images_activity: u64,
 }
 impl<'a> Host<'a> {
     pub fn new(
@@ -67,6 +70,8 @@ impl<'a> Host<'a> {
             response,
             work: None,
             launch: None,
+            images: None,
+            images_activity: 0,
         })
     }
     pub fn owner(&self) -> a::ProgramProcessHandle {
@@ -301,6 +306,28 @@ impl<'a> Host<'a> {
     ) -> Result<a::WindowGraphicsReply> {
         self.graphics_call(a::window_graphics_op_publish, request)
     }
+    pub fn image_marker(&self, surface: a::WindowGraphicsSurface) -> Option<images::Marker> {
+        self.images.as_ref()?.marker(surface)
+    }
+    /// One bounded table for all windows, outside the 50ms tray schedule.
+    /// Capture the observed activity before the call: a notification during
+    /// the RPC remains unconsumed and triggers the next current snapshot.
+    pub fn refresh_images(&mut self, activity: u64, missing: bool) -> Result<()> {
+        if !self.claimed || self.retiring { return Err(Error::InvalidProvider); }
+        if self.images.is_some() && self.images_activity == activity && !missing { return Ok(()); }
+        self.images = None;
+        let service = self.connection.as_ref().ok_or(Error::InvalidProvider)?.info.instance_id;
+        self.request.resize(a::ProgramProcessHandle::SIZE, 0);
+        wire::encode(&self.owner, &mut self.request);
+        self.call(images::OPERATION, images::SIZE)?;
+        let Some(snapshot) = images::Snapshot::decode(&self.response, self.owner, service) else {
+            self.fail();
+            return Err(Error::InvalidProvider);
+        };
+        self.images = Some(snapshot);
+        self.images_activity = activity;
+        Ok(())
+    }
     pub fn mode_busy(&self) -> bool {
         self.mode_io.busy()
     }
@@ -408,6 +435,7 @@ impl<'a> Host<'a> {
     }
     pub fn close(&mut self) -> Result<()> {
         self.claimed = false;
+        self.images = None;
         self.launch = None;
         self.retiring = true;
         // Endpoint Close releases only that reference, not an in-flight RPC.

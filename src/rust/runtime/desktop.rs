@@ -474,6 +474,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             bindings,
         );
         let mut transport = NativeTransport { host, programs };
+        self.windows.refresh_markers(transport.host, self.activity_sequence);
         self.windows.poll(
             transport.host.owner(),
             specs,
@@ -1495,6 +1496,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
         active: bool,
     ) {
         if active || self.outputs.immediate_work() || self.primary.immediate_work() {
+            // Even during continuous rendering, consume the published
+            // notification sequence. Zero timeout never parks this task.
+            let _ = Input::new(session).wait_activity(
+                self.activity_sequence, 0, &mut self.activity_sequence,
+            );
             env.app.sleep(0);
             return;
         }

@@ -225,6 +225,12 @@ impl<M: Memory, R: Receipt> Set<M, R> {
             owner.disconnect();
         }
     }
+    pub fn refresh_markers(&self, host: &mut Host<'_>, activity: u64) {
+        if !host.claimed() || !self.windows.iter().any(Window::observes_images) { return; }
+        let missing = self.windows.iter().any(|w| w.observes_images()
+            && host.image_marker(w.surface()).is_none());
+        let _ = host.refresh_images(activity, missing);
+    }
     pub fn detached(&self) -> bool {
         self.windows.iter().all(Window::detached)
     }

@@ -18,3 +18,4 @@ pub mod worker;
 mod tests;
 
 pub(crate) mod launch_wire;
+pub(crate) mod graphics_wire;

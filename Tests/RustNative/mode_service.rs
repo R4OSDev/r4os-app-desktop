@@ -27,7 +27,9 @@ struct Peer {
     reuse: u32,
     refuse: bool,
     malformed: bool,
+    image_calls: u32,
 }
+static CASE: Mutex<()> = Mutex::new(());
 static STATE: Mutex<Peer> = Mutex::new(Peer {
     open: 0,
     submitted: 0,
@@ -38,6 +40,7 @@ static STATE: Mutex<Peer> = Mutex::new(Peer {
     reuse: 0,
     refuse: false,
     malformed: false,
+    image_calls: 0,
 });
 unsafe extern "C" fn open(_: *const u8, out: *mut a::ServiceInfo) -> i32 {
     let mut peer = STATE.lock().unwrap();
@@ -57,13 +60,17 @@ unsafe extern "C" fn close(_: u32) -> i32 {
     0
 }
 
-unsafe extern "C" fn time(out: *mut a::TimeState) {
+unsafe extern "C" fn precise(out: *mut a::MonotonicClockInfo) -> i32 {
     unsafe {
-        out.write(a::TimeState {
-            monotonic_hz: 1000,
+        out.write(a::MonotonicClockInfo {
+            flags: a::monotonic_clock_flag_valid,
+            instant_ns: 1,
+            event_requested_hz: 1000,
+            event_effective_hz: 1000,
             ..Default::default()
         })
     }
+    1
 }
 unsafe extern "C" fn call(
     _: u32,
@@ -82,6 +89,20 @@ unsafe extern "C" fn call(
     let source = unsafe { core::slice::from_raw_parts(request, count as usize) };
     let out = unsafe { core::slice::from_raw_parts_mut(response, capacity as usize) };
     match op {
+        images::OPERATION => {
+            let mut peer = STATE.lock().unwrap();
+            peer.image_calls += 1;
+            let owner: a::ProgramProcessHandle = wire::decode(source).unwrap();
+            assert_eq!(out.len(), images::SIZE);
+            out.fill(0);
+            0x31474952u32.write(out); 1u16.write(&mut out[4..]); (images::SIZE as u16).write(&mut out[6..]);
+            31u32.write(&mut out[8..]); 1u32.write(&mut out[12..]); 9u64.write(&mut out[16..]);
+            owner.instance_id.write(&mut out[24..]); owner.generation.write(&mut out[32..]);
+            u64::from(peer.image_calls).write(&mut out[40..]);
+            42u32.write(&mut out[48..]); images::NATIVE.write(&mut out[52..]); 56u64.write(&mut out[56..]);
+            19u64.write(&mut out[64..]); 1u32.write(&mut out[72..]); u64::from(peer.image_calls).write(&mut out[80..]);
+            if peer.malformed { out[28] = 1; }
+        }
         a::tray_service_op_desktop_sync => {
             let mut value: a::TrayDesktopExchange = wire::decode(source).unwrap();
             value.desktop_epoch = value.desktop_owner.generation;
@@ -236,11 +257,12 @@ unsafe extern "C" fn io_close(id: u32) -> i32 {
     0
 }
 fn with(case: impl FnOnce(&Services<'_>, &Resources<'_>, a::ProgramProcessHandle)) {
+    let _case = CASE.lock().unwrap();
     let table = a::R4XStartR4Sys {
         service_open: open as *const () as usize,
         service_close: close as *const () as usize,
         service_call: call as *const () as usize,
-        time_state: time as *const () as usize,
+        monotonic_clock: precise as *const () as usize,
         io_service_call: submit as *const () as usize,
         io_status: status as *const () as usize,
         io_close: io_close as *const () as usize,
@@ -291,6 +313,37 @@ fn with(case: impl FnOnce(&Services<'_>, &Resources<'_>, a::ProgramProcessHandle
             ..Default::default()
         },
     );
+}
+#[test]
+fn image_markers_follow_activity_without_tray_delay_and_close_revokes_snapshot() {
+    with(|services, resources, owner| {
+        *STATE.lock().unwrap() = Peer::default();
+        let mut host = Host::new(services, resources, owner).unwrap();
+        host.initialize().unwrap();
+        let surface = a::WindowGraphicsSurface {
+            service: a::ProgramProcessHandle { instance_id:31, generation:9, reserved:0 }, desktop:owner,
+            owner:a::ProgramProcessHandle { instance_id:42, generation:56, reserved:0 },
+            serial:19, window_id:1, ..a::WindowGraphicsSurface::default()
+        };
+        assert!(host.image_marker(surface).is_none());
+        host.refresh_images(7, false).unwrap();
+        for _ in 0..1000 { host.refresh_images(7, false).unwrap(); }
+        assert_eq!(STATE.lock().unwrap().image_calls, 1);
+        assert_eq!(host.image_marker(surface).unwrap().revision, 1);
+        // No timer/tray RPC participates. A notification after the previous
+        // request's captured sequence causes a new read on the next round.
+        host.refresh_images(8, false).unwrap();
+        assert_eq!(host.image_marker(surface).unwrap().revision, 2);
+        host.refresh_images(8, true).unwrap();
+        assert_eq!(host.image_marker(surface).unwrap().revision, 3);
+        host.close().unwrap();
+        assert!(host.image_marker(surface).is_none());
+        host.initialize().unwrap();
+        STATE.lock().unwrap().malformed = true;
+        assert!(host.refresh_images(8, false).is_err());
+        assert!(!host.claimed());
+        assert!(host.image_marker(surface).is_none());
+    });
 }
 #[test]
 fn d088_owned_mode_delay_late_ack_retirement_reconnect_and_queue_bound() {

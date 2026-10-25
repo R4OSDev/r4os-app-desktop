@@ -1,0 +1,16 @@
+R4OS_MODULE_MANIFEST=2
+KIND=R4X
+NAME=WINIMAGE
+VERSION=1.0.0
+LANGUAGE=Zig
+SOURCE=main.zig
+ENTRY_MODE=app
+APP_CLASS=console
+TARGET=/TEMP/WINIMAGE.R4X
+IMAGE_SCOPE=none
+IMPORT=R4SYS:Query:1
+IMPORT=R4DESK:Query:1
+IMPORT=R4DRAW:Query:1
+ZIG_MODULE=desktop_check:../../Contract/desktop_check_v2.zig
+META=app.role=fixture
+META=diagnostic.fixture=desktop-window-images-v1
