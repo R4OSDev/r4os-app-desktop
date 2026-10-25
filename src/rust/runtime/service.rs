@@ -1,5 +1,6 @@
 //! Desktop's current WINSVC policy over the general SDK service connection.
 //! One exact host generation is claimed before any output owner is created.
+use super::launch_wire as launch;
 use super::wire::{self, Wire};
 use crate::diagnostics::wire as diagnostic;
 use alloc::vec::Vec;
@@ -33,6 +34,7 @@ pub struct Host<'a> {
     request: Vec<u8>,
     response: Vec<u8>,
     work: Option<diagnostic::Work>,
+    launch: Option<launch::Message>,
 }
 impl<'a> Host<'a> {
     pub fn new(
@@ -43,7 +45,8 @@ impl<'a> Host<'a> {
         if owner.instance_id == 0 || owner.generation == 0 || owner.reserved != 0 {
             return Err(Error::InvalidProvider);
         }
-        let capacity = a::TrayDesktopExchange::SIZE.max(a::DisplayColorExchange::SIZE);
+        let capacity = (a::TrayDesktopExchange::SIZE + diagnostic::WORK_SIZE + launch::SIZE)
+            .max(a::DisplayColorExchange::SIZE);
         let mut request = Vec::new();
         let mut response = Vec::new();
         request
@@ -63,6 +66,7 @@ impl<'a> Host<'a> {
             request,
             response,
             work: None,
+            launch: None,
         })
     }
     pub fn owner(&self) -> a::ProgramProcessHandle {
@@ -163,8 +167,13 @@ impl<'a> Host<'a> {
             let size = a::TrayDesktopExchange::SIZE;
             self.request.resize(size, 0);
             wire::encode(request, &mut self.request);
-            self.call(diagnostic::TRAY_OPERATION, size + diagnostic::WORK_SIZE)?;
-            let Some(received) = diagnostic::decode_work(&self.response[size..]) else {
+            self.call(
+                launch::EXCHANGE,
+                size + diagnostic::WORK_SIZE + launch::SIZE,
+            )?;
+            let Some(received) =
+                diagnostic::decode_work(&self.response[size..size + diagnostic::WORK_SIZE])
+            else {
                 self.fail();
                 return Err(Error::InvalidProvider);
             };
@@ -175,6 +184,20 @@ impl<'a> Host<'a> {
                 }
                 self.work = Some(work);
             }
+            let Some(launch) = launch::decode(&self.response[size + diagnostic::WORK_SIZE..])
+            else {
+                self.fail();
+                return Err(Error::InvalidProvider);
+            };
+            if !launch.broker.valid()
+                || (launch.request.valid()
+                    && (launch.desktop.instance != self.owner.instance_id
+                        || launch.desktop.generation != self.owner.generation))
+            {
+                self.fail();
+                return Err(Error::InvalidProvider);
+            }
+            self.launch = Some(launch);
             wire::decode(&self.response[..size]).ok_or(Error::InvalidProvider)?
         } else {
             self.exchange(operation, request)?
@@ -189,6 +212,19 @@ impl<'a> Host<'a> {
             return Err(Error::InvalidProvider);
         }
         Ok(response)
+    }
+    pub fn launch_mailbox(&self) -> Option<launch::Message> {
+        self.launch
+    }
+    pub fn launch_complete(&mut self, value: launch::Message) -> Result<()> {
+        if !self.claimed || !self.launch.is_some_and(|work| work.same_key(value)) {
+            return Err(Error::InvalidProvider);
+        }
+        let mut bytes = [0; launch::SIZE];
+        launch::encode(value, &mut bytes);
+        self.request.clear();
+        self.request.extend_from_slice(&bytes);
+        self.call(launch::COMPLETE, 0)
     }
     pub fn diagnostic_work(&self) -> Option<diagnostic::Work> {
         self.work
@@ -367,10 +403,12 @@ impl<'a> Host<'a> {
     fn fail(&mut self) {
         self.claimed = false;
         self.work = None;
+        self.launch = None;
         let _ = self.close();
     }
     pub fn close(&mut self) -> Result<()> {
         self.claimed = false;
+        self.launch = None;
         self.retiring = true;
         // Endpoint Close releases only that reference, not an in-flight RPC.
         // Keep its bounded native request/buffers through independent Close ACK;

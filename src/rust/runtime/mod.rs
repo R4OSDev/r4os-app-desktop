@@ -16,3 +16,5 @@ pub mod worker;
 #[cfg(test)]
 #[path = "../../../Tests/RustNative/runtime_foundation.rs"]
 mod tests;
+
+pub(crate) mod launch_wire;

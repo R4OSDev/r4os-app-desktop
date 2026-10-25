@@ -85,3 +85,17 @@ und Docs/Diagnostics/Spectra.txt. Historische GA106-/AMD-/Mehrschirm-/Encoder-
 Belege in Docs/Drivers und Docs/Desktop behalten ihre urspruenglichen
 Artefakt-/Hardwaregrenzen. QEMU/Nativeorakel sind keine neue Windows-,
 physische Ausgabe-, Cursorlatenz- oder direkte Rust-SIMD-Abnahme.
+
+
+0.87.13 / Desktop0.1.165: DESKRUN-Verbraucher
+------------------------------------------
+runtime/desktop_launch.rs nimmt kopierte WINSVC-Startauftraege an und
+benutzt hosted/runtime.rs::launch_observed. Der normale Startpfad behaelt
+Fenster-/Child-/Reapbesitz; eine verweigerte SetWindowHandle-Quittung gilt
+als Anbindungsfehler und behaelt den genauen Child bis zu echtem Abbau.
+Wiederholte Uebermittlung derselben Kennung wiederholt keinen Spawn.
+WAITFRAME beobachtet bereits uebernommene Frame-/Konsolensnapshots, ohne
+neue periodische IPC-Abfragen. Bestehende Single-Instance-Policy gilt weiter.
+Der Loader bleibt in dieser Unterversion synchron. Wireprojektion beim
+Desktop verweist auf den produktiven Vertrag des WINSVC; Kernel/SDK-ABI
+bleiben unveraendert. Bedienung/Belege: Docs/Desktop/DeskRun.txt.

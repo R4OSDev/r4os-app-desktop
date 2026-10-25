@@ -487,6 +487,23 @@ impl<'input> State<'input> {
         tick: u64,
         dirty: &mut Dirty,
     ) -> core::result::Result<usize, Failure> {
+        self.launch_observed(
+            programs, app, session, path, args, title, policy, tick, dirty, &mut None,
+        )
+    }
+    pub fn launch_observed(
+        &mut self,
+        programs: &Programs<'_>,
+        app: &App<'_>,
+        session: &mut Session<'_, '_>,
+        path: &[u8],
+        args: &[u8],
+        title: &[u8],
+        policy: a::LaunchPolicy,
+        tick: u64,
+        dirty: &mut Dirty,
+        spawned: &mut Option<a::ProgramProcessHandle>,
+    ) -> core::result::Result<usize, Failure> {
         let name = launch::path(path).map_err(Failure::Path)?;
         let class = programs
             .class(&name, policy)
@@ -497,6 +514,7 @@ impl<'input> State<'input> {
         }
         if !console {
             if let Some(existing) = self.single_instance(path) {
+                *spawned = Some(self.model.clients.slots()[existing].handle());
                 self.focus(existing, session, app, tick, dirty);
                 return Ok(existing);
             }
@@ -538,6 +556,7 @@ impl<'input> State<'input> {
                 }),
             )
             .map_err(Failure::Loader)?;
+        *spawned = Some(handle);
         // Reap authority is retained even if old frame retirement refuses this
         // otherwise free slot. Never lose a successfully spawned generation.
         if !self.model.clients.slot_mut(index).unwrap().bind(
@@ -555,7 +574,12 @@ impl<'input> State<'input> {
         } else {
             win.bind_app(handle.instance_id, title);
         }
-        let _ = Host::new(session).associate(&handle, index);
+        if Host::new(session).associate(&handle, index) < 0 {
+            // The bound client retains exact reap/frame retirement authority.
+            // A refused association must never be reported as an attached window.
+            let _ = programs.kill(handle);
+            return Err(Failure::Attachment);
+        }
         if !console {
             let change = Changes {
                 geometry: 1 << index,

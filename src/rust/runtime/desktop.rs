@@ -68,6 +68,8 @@ use r4os_sdk::{
 type Result<T> = core::result::Result<T, &'static str>;
 #[path = "console_check.rs"]
 mod console_check;
+#[path = "desktop_launch.rs"]
+mod external;
 fn owned<T>(initialize: impl FnOnce() -> Result<T>, name: &'static str) -> Result<Owned<T>> {
     Owned::new_with(initialize).map_err(|error| match error {
         super::owned::InitError::Memory => name,
@@ -106,6 +108,7 @@ struct Desktop<'a, 'input> {
     blink: bool,
     activity_sequence: u64,
     diagnostics: diagnostics::runtime::Owner,
+    launches: external::Owner,
     cursor_queued_tick: u64,
 }
 impl<'a, 'input> Desktop<'a, 'input> {
@@ -173,6 +176,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             revision: 0,
             blink: true,
             activity_sequence: 0,
+            launches: external::Owner::default(),
             diagnostics: diagnostics::runtime::Owner::new(
                 super::test_start::requested(env.app)
                     || env
@@ -484,6 +488,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         {
             self.bar();
         }
+        self.external_launch(env, session, transport.host, programs, time);
         if self.status.refresh(env, session, time.tick, time.hz) {
             self.bar();
         }
