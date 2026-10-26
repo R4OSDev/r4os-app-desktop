@@ -304,7 +304,10 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
             owner.frames_completed == 2
         });
         assert_eq!(fixture::visible(), [0x445566; 64]);
-        assert!(owner.busy(), "the visible front remains a real lifetime/close barrier");
+        assert!(
+            owner.busy(),
+            "the visible front remains a real lifetime/close barrier"
+        );
         let observation = owner.execution_observation();
         assert_eq!(observation.completed_frames, 2);
         assert_eq!(observation.visible_frames, 2);
@@ -340,12 +343,27 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         assert!(route.admit(&app, &graphics, 1, 1, 0) == crate::outputs::primary::Admission::Cpu);
         let mut manager = crate::outputs::manager::Manager::new().unwrap();
         assert!(!manager.owns_output_route());
-        manager.slots[0].target = a::GfxOutputTarget { adapter_id: 1, connector_id: 2048,
-            device_generation: 2, connection_generation: 9, display_generation: 2, ..Default::default() };
+        manager.slots[0].target = a::GfxOutputTarget {
+            adapter_id: 1,
+            connector_id: 2048,
+            device_generation: 2,
+            connection_generation: 9,
+            display_generation: 2,
+            ..Default::default()
+        };
         assert!(!manager.active());
-        assert!(manager.owns_output_route(), "temporarily empty layout still owns its bound output");
+        assert!(
+            manager.owns_output_route(),
+            "temporarily empty layout still owns its bound output"
+        );
         unsafe {
-            route.poll(&app, &graphics, &mut windows, manager.owns_output_route(), 1);
+            route.poll(
+                &app,
+                &graphics,
+                &mut windows,
+                manager.owns_output_route(),
+                1,
+            );
         }
         assert!(route.output().is_none());
         unsafe {

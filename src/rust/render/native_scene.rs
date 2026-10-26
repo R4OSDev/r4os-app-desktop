@@ -85,7 +85,9 @@ pub unsafe fn capture<M: Memory>(
     cache.start(mode, Some(frame))?;
     let changed = damage.iter().copied().reduce(Rect::merged);
     if matches!(mode, Mode::NativeOutput(_)) {
-        engine.reuse_capture(cache, frame, changed).map_err(|_| Error::Graphics)?;
+        engine
+            .reuse_capture(cache, frame, changed)
+            .map_err(|_| Error::Graphics)?;
     }
     let desktop = match mode {
         Mode::Desktop(bounds) | Mode::CpuOutput(bounds) => bounds,
@@ -106,7 +108,11 @@ pub unsafe fn capture<M: Memory>(
             desktop,
             external,
             scene,
-            if matches!(mode, Mode::NativeOutput(_)) { core::slice::from_ref(&desktop) } else { damage },
+            if matches!(mode, Mode::NativeOutput(_)) {
+                core::slice::from_ref(&desktop)
+            } else {
+                damage
+            },
             fonts_cache,
             fonts,
             icons,
@@ -114,10 +120,13 @@ pub unsafe fn capture<M: Memory>(
         )
     }?;
     capture.cache.finish(Some(capture.frame))?;
-    capture.cache.complete_scene = matches!(mode, Mode::NativeOutput(_))
-        || (damage.len() == 1 && damage[0] == desktop);
+    capture.cache.complete_scene =
+        matches!(mode, Mode::NativeOutput(_)) || (damage.len() == 1 && damage[0] == desktop);
     if let Mode::NativeOutput(view) = mode {
-        capture.engine.composition_damage(view, changed).map_err(|_| Error::Graphics)?;
+        capture
+            .engine
+            .composition_damage(view, changed)
+            .map_err(|_| Error::Graphics)?;
         capture.engine.present_intent = 0;
     }
     capture.finished = true;

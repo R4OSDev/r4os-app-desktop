@@ -46,10 +46,14 @@ unsafe impl Memory for OriginalMemory {
 }
 struct OriginalTransport;
 unsafe impl Transport for OriginalTransport {
-    fn marker(&self, surface: a::WindowGraphicsSurface) -> Option<crate::runtime::graphics_wire::Marker> {
+    fn marker(
+        &self,
+        surface: a::WindowGraphicsSurface,
+    ) -> Option<crate::runtime::graphics_wire::Marker> {
         // This original transport fixture publishes exactly one image.
         (surface.serial != 0).then_some(crate::runtime::graphics_wire::Marker {
-            revision: 1, flags: crate::runtime::graphics_wire::NATIVE,
+            revision: 1,
+            flags: crate::runtime::graphics_wire::NATIVE,
         })
     }
     fn publish(

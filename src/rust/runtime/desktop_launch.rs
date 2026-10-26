@@ -29,6 +29,52 @@ impl Owner {
         true
     }
 }
+pub(super) fn failure_code(error: &crate::hosted::launch::Failure) -> (u32, i32) {
+    use crate::hosted::launch::Failure;
+    match error {
+        Failure::WindowCapacity { .. } => (6, 0),
+        Failure::Attachment => (8, 0),
+        Failure::Classification(error) | Failure::Loader(error) => (
+            7,
+            if let r4os_sdk::storage::Error::Raw(raw) = error {
+                *raw
+            } else {
+                0
+            },
+        ),
+        _ => (12, 0),
+    }
+}
+impl Owner {
+    pub(super) fn complete(
+        &mut self,
+        work: w::Message,
+        process: Option<a::ProgramProcessHandle>,
+        window: Option<usize>,
+        code: u32,
+        raw: i32,
+    ) {
+        if !self.receipt.is_some_and(|old| old.same_key(work)) {
+            return;
+        }
+        let mut result = work;
+        result.code = code;
+        result.raw = raw;
+        if let Some(process) = process {
+            result.process = identity(process);
+            result.phase = w::PROCESS;
+        }
+        if let Some(index) = window {
+            result.phase = w::WINDOW;
+            result.window = index as u32 + 1;
+        }
+        if code != 0 || result.flags & w::WAIT_FRAME == 0 {
+            result.flags |= w::TERMINAL;
+        }
+        self.receipt = Some(result);
+        self.acknowledged = false;
+    }
+}
 impl<'a, 'input> Desktop<'a, 'input> {
     pub(super) fn external_launch(
         &mut self,
@@ -76,55 +122,39 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     Ok(request) => {
                         self.shell_damage();
                         self.shell.close_top();
-                        let mut spawned = None;
-                        let launched = self.hosted.launch_observed(
-                            programs,
-                            env.app,
-                            session,
-                            request.path(),
-                            request.args(),
-                            request.title(),
-                            request.policy,
-                            time.tick,
-                            &mut self.dirty,
-                            &mut spawned,
-                        );
-                        if let Some(process) = spawned {
-                            result.process = identity(process);
-                            result.phase = w::PROCESS;
-                        }
-                        match launched {
-                            Ok(index) => {
-                                result.phase = w::WINDOW;
-                                result.window = index as u32 + 1;
+                        match self.begin_load(request, Some(work), env, session, programs, time) {
+                            Ok(loading::Accepted::Pending) => {}
+                            Ok(loading::Accepted::Window(index)) => {
+                                self.launches.complete(
+                                    work,
+                                    Some(self.hosted.model.clients.slots()[index].handle()),
+                                    Some(index),
+                                    0,
+                                    0,
+                                );
                             }
                             Err(error) => {
-                                use crate::hosted::launch::Failure;
-                                result.code = match error {
-                                    Failure::WindowCapacity { .. } => 6,
-                                    Failure::Attachment => 8,
-                                    Failure::Classification(error) | Failure::Loader(error) => {
-                                        if let r4os_sdk::storage::Error::Raw(raw) = error {
-                                            result.raw = raw;
-                                        }
-                                        7
-                                    }
-                                    _ => 12,
-                                };
+                                let (code, raw) = failure_code(&error);
+                                self.launches.complete(work, None, None, code, raw);
                             }
                         }
                     }
                 }
             }
-            if result.code != 0 || result.flags & w::WAIT_FRAME == 0 {
+            if result.code != 0 {
                 result.flags |= w::TERMINAL;
+                self.launches.receipt = Some(result);
             }
-            self.launches.receipt = Some(result);
         }
         let Some(mut result) = self.launches.receipt else {
             return;
         };
         if !result.same_key(work) {
+            return;
+        }
+        if result.phase == w::STARTING && result.code == 0 {
+            // The broker's original deadline may expire here. Keep the exact
+            // queued/possibly-started job; never turn a lost ACK into a retry.
             return;
         }
         if !result.done() && result.phase == w::WINDOW {

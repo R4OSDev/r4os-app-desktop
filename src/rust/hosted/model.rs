@@ -52,8 +52,41 @@ pub struct Model {
     pub windows: Controller,
     pub clients: Clients,
     pub inventory: Inventory,
+    // Main-task launch generations; no provider receives this reservation map.
+    launches: [u64; SLOT_COUNT],
+    cancelled_launches: u8,
 }
 impl Model {
+    pub(crate) fn reserve_launch(&mut self, index: usize, ticket: u64) -> bool {
+        if ticket == 0 || !self.free(index) {
+            return false;
+        }
+        self.launches[index] = ticket;
+        self.cancelled_launches &= !(1 << index);
+        true
+    }
+    pub(crate) fn cancel_launch(&mut self, index: usize) -> bool {
+        if !self.launches.get(index).is_some_and(|ticket| *ticket != 0) {
+            return false;
+        }
+        self.cancelled_launches |= 1 << index;
+        true
+    }
+    pub(crate) fn launch_cancelled(&self, index: usize) -> bool {
+        self.launches.get(index).is_some_and(|ticket| *ticket != 0)
+            && self.cancelled_launches & (1 << index) != 0
+    }
+    pub(crate) fn release_launch(&mut self, index: usize, ticket: u64) -> bool {
+        if ticket == 0 || self.launches.get(index) != Some(&ticket) {
+            return false;
+        }
+        self.launches[index] = 0;
+        self.cancelled_launches &= !(1 << index);
+        true
+    }
+    pub(crate) fn pending_launches(&self) -> usize {
+        self.launches.iter().filter(|ticket| **ticket != 0).count()
+    }
     /// # Safety
     /// The current explicit diagnostic reservation owns this exact running
     /// GUI. Its caller keeps process/reap authority; this host owns only the
@@ -272,10 +305,12 @@ impl Model {
         report
     }
     pub fn free(&self, index: usize) -> bool {
-        self.clients
-            .slots()
-            .get(index)
-            .is_some_and(|c| !c.bound() && !c.retiring())
+        self.launches.get(index).is_some_and(|ticket| *ticket == 0)
+            && self
+                .clients
+                .slots()
+                .get(index)
+                .is_some_and(|c| !c.bound() && !c.retiring())
             && self
                 .windows
                 .windows()
@@ -444,3 +479,7 @@ pub fn announce(
         Host::new(session).push(window.instance_id(), &event, true, || app.sleep(1));
     }
 }
+
+#[cfg(test)]
+#[path = "../../../Tests/RustNative/launch_slots.rs"]
+mod launch_tests;

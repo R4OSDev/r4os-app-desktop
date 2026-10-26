@@ -63,9 +63,12 @@ impl Default for Server {
 }
 unsafe impl Transport for Server {
     fn marker(&self, surface: a::WindowGraphicsSurface) -> Option<Marker> {
-        (self.marker_known && surface.serial != 0 && surface.same(&self.surface)).then_some(Marker {
-            revision: self.image_revision, flags: if self.native { NATIVE } else { 0 },
-        })
+        (self.marker_known && surface.serial != 0 && surface.same(&self.surface)).then_some(
+            Marker {
+                revision: self.image_revision,
+                flags: if self.native { NATIVE } else { 0 },
+            },
+        )
     }
     fn invalidate(&mut self) {
         self.invalidated = true;
@@ -437,18 +440,34 @@ fn cpu_prepare_is_nonblocking_and_malformed_take_retains_return_identity() {
 fn static_commands_and_foreign_activity_do_not_take_until_image_marker_changes() {
     let state = MemoryState::default();
     let pixels = [0u32; 80];
-    let m = Model { state: &state, descriptor: descriptor(), pixels: &pixels };
+    let m = Model {
+        state: &state,
+        descriptor: descriptor(),
+        pixels: &pixels,
+    };
     let mut w = Window::<_, NoReceipt>::new(m);
-    let mut s = Server { native: false, available: false, lose_publish: false, lose_take: false,
-        lose_return: false, ..Server::default() };
-    for _ in 0..1000 { s.revision += 1; w.poll(desktop(), 1, Some(spec()), &mut s); }
+    let mut s = Server {
+        native: false,
+        available: false,
+        lose_publish: false,
+        lose_take: false,
+        lose_return: false,
+        ..Server::default()
+    };
+    for _ in 0..1000 {
+        s.revision += 1;
+        w.poll(desktop(), 1, Some(spec()), &mut s);
+    }
     assert_eq!(s.take_calls, 0);
     assert!(!w.needs_polling());
     s.native = true;
     s.image_revision += 1;
     w.poll(desktop(), 1, Some(spec()), &mut s);
     assert_eq!(s.take_calls, 1);
-    for _ in 0..1000 { s.revision += 1; w.poll(desktop(), 1, Some(spec()), &mut s); }
+    for _ in 0..1000 {
+        s.revision += 1;
+        w.poll(desktop(), 1, Some(spec()), &mut s);
+    }
     assert_eq!(s.take_calls, 1);
     s.image_revision += 1;
     s.available = true;
@@ -465,10 +484,19 @@ fn static_commands_and_foreign_activity_do_not_take_until_image_marker_changes()
 fn delayed_empty_reply_cannot_cache_a_newer_image_generation() {
     let state = MemoryState::default();
     let pixels = [0u32; 80];
-    let m = Model { state: &state, descriptor: descriptor(), pixels: &pixels };
+    let m = Model {
+        state: &state,
+        descriptor: descriptor(),
+        pixels: &pixels,
+    };
     let mut w = Window::<_, NoReceipt>::new(m);
-    let mut s = Server { available: false, lose_empty: true, lose_publish: false, lose_take: false,
-        ..Server::default() };
+    let mut s = Server {
+        available: false,
+        lose_empty: true,
+        lose_publish: false,
+        lose_take: false,
+        ..Server::default()
+    };
     w.poll(desktop(), 1, Some(spec()), &mut s);
     w.poll(desktop(), 1, Some(spec()), &mut s);
     let request = w.request.unwrap();
@@ -490,11 +518,22 @@ fn delayed_empty_reply_cannot_cache_a_newer_image_generation() {
 fn unknown_marker_busy_and_exhausted_generation_never_authorize_empty_reuse() {
     let state = MemoryState::default();
     let pixels = [0u32; 80];
-    let m = Model { state: &state, descriptor: descriptor(), pixels: &pixels };
+    let m = Model {
+        state: &state,
+        descriptor: descriptor(),
+        pixels: &pixels,
+    };
     let mut w = Window::<_, NoReceipt>::new(m);
-    let mut s = Server { marker_known: false, busy_take: true, available: false,
-        lose_publish: false, ..Server::default() };
-    for _ in 0..3 { w.poll(desktop(), 1, Some(spec()), &mut s); }
+    let mut s = Server {
+        marker_known: false,
+        busy_take: true,
+        available: false,
+        lose_publish: false,
+        ..Server::default()
+    };
+    for _ in 0..3 {
+        w.poll(desktop(), 1, Some(spec()), &mut s);
+    }
     assert_eq!(s.take_calls, 0);
     s.marker_known = true;
     w.poll(desktop(), 1, Some(spec()), &mut s);
@@ -505,7 +544,9 @@ fn unknown_marker_busy_and_exhausted_generation_never_authorize_empty_reuse() {
     assert_eq!(s.take_calls, 2);
     assert_eq!(w.empty_image_revision, Some(1));
     s.image_revision = u64::MAX;
-    for _ in 0..3 { w.poll(desktop(), 1, Some(spec()), &mut s); }
+    for _ in 0..3 {
+        w.poll(desktop(), 1, Some(spec()), &mut s);
+    }
     assert_eq!(s.take_calls, 5);
     assert_eq!(w.empty_image_revision, Some(u64::MAX));
 }
@@ -515,18 +556,34 @@ fn cached_empty_queue_does_not_hide_revocation_or_fence_release() {
     let state = MemoryState::default();
     state.ready.set(true);
     let pixels = [0u32; 80];
-    let m = Model { state: &state, descriptor: descriptor(), pixels: &pixels };
+    let m = Model {
+        state: &state,
+        descriptor: descriptor(),
+        pixels: &pixels,
+    };
     let mut w = Window::<_, NoReceipt>::new(m);
-    let mut wanted = spec(); wanted.config.backend.binding.adapter_id = 0;
-    let mut s = Server { cpu: true, lose_publish: false, lose_take: false, lose_return: false,
-        ..Server::default() };
-    for _ in 0..3 { w.poll(desktop(), 1, Some(wanted), &mut s); }
+    let mut wanted = spec();
+    wanted.config.backend.binding.adapter_id = 0;
+    let mut s = Server {
+        cpu: true,
+        lose_publish: false,
+        lose_take: false,
+        lose_return: false,
+        ..Server::default()
+    };
+    for _ in 0..3 {
+        w.poll(desktop(), 1, Some(wanted), &mut s);
+    }
     w.front().unwrap().mark_cpu_consumed();
     w.poll(desktop(), 1, Some(wanted), &mut s);
     assert_eq!(w.empty_image_revision, Some(1));
     let calls = s.take_calls;
-    s.closed = true; s.native = false; s.image_revision += 1;
-    for _ in 0..4 { w.poll(desktop(), 1, Some(wanted), &mut s); }
+    s.closed = true;
+    s.native = false;
+    s.image_revision += 1;
+    for _ in 0..4 {
+        w.poll(desktop(), 1, Some(wanted), &mut s);
+    }
     assert_eq!(s.take_calls, calls);
     assert!(w.front().is_none());
     assert_eq!(s.returns, 1);
@@ -536,31 +593,69 @@ fn cached_empty_queue_does_not_hide_revocation_or_fence_release() {
 
 #[test]
 fn image_snapshot_binds_all_generations_and_rejects_partial_or_mixed_wire() {
-    use crate::runtime::graphics_wire::{Snapshot, SIZE};
+    use crate::runtime::graphics_wire::{SIZE, Snapshot};
     let mut bytes = [0u8; SIZE];
-    0x31474952u32.write(&mut bytes); 1u16.write(&mut bytes[4..]); (SIZE as u16).write(&mut bytes[6..]);
-    31u32.write(&mut bytes[8..]); 1u32.write(&mut bytes[12..]); 9u64.write(&mut bytes[16..]);
-    5u32.write(&mut bytes[24..]); desktop().generation.write(&mut bytes[32..]); 7u64.write(&mut bytes[40..]);
+    0x31474952u32.write(&mut bytes);
+    1u16.write(&mut bytes[4..]);
+    (SIZE as u16).write(&mut bytes[6..]);
+    31u32.write(&mut bytes[8..]);
+    1u32.write(&mut bytes[12..]);
+    9u64.write(&mut bytes[16..]);
+    5u32.write(&mut bytes[24..]);
+    desktop().generation.write(&mut bytes[32..]);
+    7u64.write(&mut bytes[40..]);
     let owner = spec().owner;
-    owner.instance_id.write(&mut bytes[48..]); NATIVE.write(&mut bytes[52..]);
-    owner.generation.write(&mut bytes[56..]); 42u64.write(&mut bytes[64..]); 1u32.write(&mut bytes[72..]); 7u64.write(&mut bytes[80..]);
-    let surface = a::WindowGraphicsSurface { service: a::ProgramProcessHandle { instance_id:31, generation:9, reserved:0 },
-        desktop:desktop(), owner, window_id:1, serial:42, ..a::WindowGraphicsSurface::default() };
+    owner.instance_id.write(&mut bytes[48..]);
+    NATIVE.write(&mut bytes[52..]);
+    owner.generation.write(&mut bytes[56..]);
+    42u64.write(&mut bytes[64..]);
+    1u32.write(&mut bytes[72..]);
+    7u64.write(&mut bytes[80..]);
+    let surface = a::WindowGraphicsSurface {
+        service: a::ProgramProcessHandle {
+            instance_id: 31,
+            generation: 9,
+            reserved: 0,
+        },
+        desktop: desktop(),
+        owner,
+        window_id: 1,
+        serial: 42,
+        ..a::WindowGraphicsSurface::default()
+    };
     let table = Snapshot::decode(&bytes, desktop(), 31).unwrap();
-    assert_eq!(table.marker(surface), Some(Marker { revision:7, flags:NATIVE }));
+    assert_eq!(
+        table.marker(surface),
+        Some(Marker {
+            revision: 7,
+            flags: NATIVE
+        })
+    );
     for field in 0..5 {
         let mut stale = surface;
-        match field { 0=>stale.service.generation+=1, 1=>stale.desktop.generation+=1,
-            2=>stale.owner.generation+=1, 3=>stale.window_id+=1, _=>stale.serial+=1 }
+        match field {
+            0 => stale.service.generation += 1,
+            1 => stale.desktop.generation += 1,
+            2 => stale.owner.generation += 1,
+            3 => stale.window_id += 1,
+            _ => stale.serial += 1,
+        }
         assert!(table.marker(stale).is_none());
     }
-    assert!(Snapshot::decode(&bytes[..SIZE-1], desktop(), 31).is_none());
-    for offset in [4, 6, 28, 52, 76, SIZE-1] {
-        let mut bad = bytes; bad[offset] = 0xff;
-        assert!(Snapshot::decode(&bad, desktop(), 31).is_none(), "offset {offset}");
+    assert!(Snapshot::decode(&bytes[..SIZE - 1], desktop(), 31).is_none());
+    for offset in [4, 6, 28, 52, 76, SIZE - 1] {
+        let mut bad = bytes;
+        bad[offset] = 0xff;
+        assert!(
+            Snapshot::decode(&bad, desktop(), 31).is_none(),
+            "offset {offset}"
+        );
     }
-    let mut bad = bytes; bad[12] = 17;
+    let mut bad = bytes;
+    bad[12] = 17;
     assert!(Snapshot::decode(&bad, desktop(), 31).is_none());
-    bad = bytes; bad[12] = 2; bad.copy_within(48..88,88);
+    bad = bytes;
+    bad[12] = 2;
+    bad.copy_within(48..88, 88);
     assert!(Snapshot::decode(&bad, desktop(), 31).is_none());
 }

@@ -2,10 +2,10 @@
 //! Modular no_std/alloc R4OS Desktop. The normal module manifest and general
 //! SDK own startup, imports, build inputs and the R4M0 artifact.
 extern crate alloc;
-#[cfg(feature = "desktop-entry")]
-mod entry;
 pub mod capture;
 pub mod diagnostics;
+#[cfg(feature = "desktop-entry")]
+mod entry;
 pub mod hosted;
 pub mod input;
 pub mod outputs;

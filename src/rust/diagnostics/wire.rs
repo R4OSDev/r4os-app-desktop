@@ -32,6 +32,7 @@ pub enum Op {
     SnesPrepare,
     SnesFinish,
     Maximize,
+    LaunchStatus,
 }
 impl Op {
     fn decode(value: u32) -> Option<Self> {
@@ -57,6 +58,7 @@ impl Op {
             19 => Self::SnesPrepare,
             20 => Self::SnesFinish,
             21 => Self::Maximize,
+            22 => Self::LaunchStatus,
             _ => return None,
         })
     }

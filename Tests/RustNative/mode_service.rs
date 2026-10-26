@@ -95,13 +95,24 @@ unsafe extern "C" fn call(
             let owner: a::ProgramProcessHandle = wire::decode(source).unwrap();
             assert_eq!(out.len(), images::SIZE);
             out.fill(0);
-            0x31474952u32.write(out); 1u16.write(&mut out[4..]); (images::SIZE as u16).write(&mut out[6..]);
-            31u32.write(&mut out[8..]); 1u32.write(&mut out[12..]); 9u64.write(&mut out[16..]);
-            owner.instance_id.write(&mut out[24..]); owner.generation.write(&mut out[32..]);
+            0x31474952u32.write(out);
+            1u16.write(&mut out[4..]);
+            (images::SIZE as u16).write(&mut out[6..]);
+            31u32.write(&mut out[8..]);
+            1u32.write(&mut out[12..]);
+            9u64.write(&mut out[16..]);
+            owner.instance_id.write(&mut out[24..]);
+            owner.generation.write(&mut out[32..]);
             u64::from(peer.image_calls).write(&mut out[40..]);
-            42u32.write(&mut out[48..]); images::NATIVE.write(&mut out[52..]); 56u64.write(&mut out[56..]);
-            19u64.write(&mut out[64..]); 1u32.write(&mut out[72..]); u64::from(peer.image_calls).write(&mut out[80..]);
-            if peer.malformed { out[28] = 1; }
+            42u32.write(&mut out[48..]);
+            images::NATIVE.write(&mut out[52..]);
+            56u64.write(&mut out[56..]);
+            19u64.write(&mut out[64..]);
+            1u32.write(&mut out[72..]);
+            u64::from(peer.image_calls).write(&mut out[80..]);
+            if peer.malformed {
+                out[28] = 1;
+            }
         }
         a::tray_service_op_desktop_sync => {
             let mut value: a::TrayDesktopExchange = wire::decode(source).unwrap();
@@ -321,13 +332,26 @@ fn image_markers_follow_activity_without_tray_delay_and_close_revokes_snapshot()
         let mut host = Host::new(services, resources, owner).unwrap();
         host.initialize().unwrap();
         let surface = a::WindowGraphicsSurface {
-            service: a::ProgramProcessHandle { instance_id:31, generation:9, reserved:0 }, desktop:owner,
-            owner:a::ProgramProcessHandle { instance_id:42, generation:56, reserved:0 },
-            serial:19, window_id:1, ..a::WindowGraphicsSurface::default()
+            service: a::ProgramProcessHandle {
+                instance_id: 31,
+                generation: 9,
+                reserved: 0,
+            },
+            desktop: owner,
+            owner: a::ProgramProcessHandle {
+                instance_id: 42,
+                generation: 56,
+                reserved: 0,
+            },
+            serial: 19,
+            window_id: 1,
+            ..a::WindowGraphicsSurface::default()
         };
         assert!(host.image_marker(surface).is_none());
         host.refresh_images(7, false).unwrap();
-        for _ in 0..1000 { host.refresh_images(7, false).unwrap(); }
+        for _ in 0..1000 {
+            host.refresh_images(7, false).unwrap();
+        }
         assert_eq!(STATE.lock().unwrap().image_calls, 1);
         assert_eq!(host.image_marker(surface).unwrap().revision, 1);
         // No timer/tray RPC participates. A notification after the previous

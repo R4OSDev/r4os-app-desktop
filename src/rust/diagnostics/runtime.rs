@@ -41,13 +41,19 @@ pub struct Effects {
     pub audio_changed: bool,
 }
 #[derive(Clone, Copy)]
-struct AudioProbe { work: Work, response: Response, ticket: u64, input: u64 }
+struct AudioProbe {
+    work: Work,
+    response: Response,
+    ticket: u64,
+    input: u64,
+}
 #[derive(Default)]
 pub struct Owner {
     session: Session,
     pub benchmark: Ledger,
     pub input_generation: u64,
     pub idle_timeouts: u64,
+    pub launch_status: (usize, usize),
     capture_override: bool,
     screenshot_path: Option<String>,
     completion: Option<(Work, Response)>,
@@ -75,7 +81,10 @@ impl Owner {
         self.screenshot_path.is_some()
     }
     pub fn pending(&self) -> bool {
-        self.session.caller.valid() || self.completion.is_some() || self.restart_at != 0 || self.audio_probe.is_some()
+        self.session.caller.valid()
+            || self.completion.is_some()
+            || self.restart_at != 0
+            || self.audio_probe.is_some()
     }
     pub fn poll(
         &mut self,
@@ -135,13 +144,22 @@ impl Owner {
                 self.cancel_audio(view, &mut effects);
             } else {
                 let valid = self.session.caller.valid()
-                    && self.input_generation == probe.input && time.tick < work.deadline_tick
+                    && self.input_generation == probe.input
+                    && time.tick < work.deadline_tick
                     && host.broker_instance() == Some(work.broker.instance)
                     && snes::live(programs, work.broker);
-                let result = if valid { view.shell.audio.probe_result(probe.ticket) } else { Some(false) };
-                let Some(ok) = result else { return effects; };
+                let result = if valid {
+                    view.shell.audio.probe_result(probe.ticket)
+                } else {
+                    Some(false)
+                };
+                let Some(ok) = result else {
+                    return effects;
+                };
                 let mut response = probe.response;
-                if !ok { response.result = a::service_api_result_invalid; }
+                if !ok {
+                    response.result = a::service_api_result_invalid;
+                }
                 response.redraws = stats.redraws;
                 response.input_generation = self.input_generation;
                 self.cancel_audio(view, &mut effects);
@@ -181,7 +199,12 @@ impl Owner {
             };
             if work.request.op == Op::Audio && response.result == 0 {
                 let ticket = view.shell.audio.begin_probe();
-                self.audio_probe = Some(AudioProbe { work, response, ticket, input: self.input_generation });
+                self.audio_probe = Some(AudioProbe {
+                    work,
+                    response,
+                    ticket,
+                    input: self.input_generation,
+                });
                 effects.audio_changed = true;
                 return effects;
             }
@@ -235,6 +258,11 @@ impl Owner {
         if v.hosted.mirror.gate.available() {
             out.flags |= w::SERVICE_AVAILABLE
         }
+        if r.op == Op::LaunchStatus {
+            out.x = self.launch_status.0 as i32;
+            out.y = self.launch_status.1 as i32;
+            return out;
+        }
         let foreign = self.session.foreign(
             v.hosted
                 .model
@@ -265,6 +293,7 @@ impl Owner {
             return out;
         }
         match r.op {
+            Op::LaunchStatus => unreachable!("status has no scene mutation"),
             Op::Begin | Op::BeginBenchmark => {
                 self.restart_state = 0;
                 self.restart_at = 0;
@@ -387,7 +416,11 @@ impl Owner {
                     }
                     Op::Focus => v.hosted.focus(index, gui, env.app, time.tick, v.dirty),
                     Op::Maximize => {
-                        let change = v.hosted.model.windows.toggle_maximize(index, v.work_areas[index]);
+                        let change = v
+                            .hosted
+                            .model
+                            .windows
+                            .toggle_maximize(index, v.work_areas[index]);
                         apply(v, change, env, gui, time);
                         v.hosted.flush_geometry(index, host, time.tick, time.hz);
                     }
@@ -547,9 +580,7 @@ impl Owner {
                     out.result = a::service_api_result_invalid;
                     return out;
                 }
-                if self.benchmark.trace.is_some()
-                    || self.benchmark.child.valid()
-                {
+                if self.benchmark.trace.is_some() || self.benchmark.child.valid() {
                     out.result = -1;
                     return out;
                 }
@@ -642,9 +673,9 @@ impl Owner {
             // Keep the real client/graphics owners until detach acknowledges it.
             return Ok(false);
         }
-        if !client.completion().is_some_and(|c| {
-                Identity::of(c.handle).same(self.benchmark.child) && c.exit_code == 0
-            })
+        if !client
+            .completion()
+            .is_some_and(|c| Identity::of(c.handle).same(self.benchmark.child) && c.exit_code == 0)
         {
             return Err(FinishFailure::ClientCompletion);
         }
@@ -659,7 +690,9 @@ impl Owner {
             cursor_moves: cursor_moves.wrapping_sub(self.benchmark.cursor_before),
             tick_hz: u64::from(time.hz),
         });
-        let Ok(report) = report else { return Err(FinishFailure::TraceInvalid) };
+        let Ok(report) = report else {
+            return Err(FinishFailure::TraceInvalid);
+        };
         let Ok(path) = FilePath::parse(w::SNES_PATHS[2]) else {
             return Err(FinishFailure::ReportPath);
         };

@@ -1,11 +1,11 @@
 //! Explicit bounded observations for one benchmark window. CPU copy receipts
 //! and managed output context stay separate; neither proves physical visibility.
 use super::wire::{Identity, SNES_PATHS, SnesOptions};
+use crate::outputs::selection::Choice;
 use crate::{hosted::process::Programs, render::geometry::Rect, runtime::environment::Environment};
 use alloc::{string::String, vec::Vec};
 use core::fmt::Write;
 use r4os_sdk::{abi as a, path::FilePath, storage::Error};
-use crate::outputs::selection::Choice;
 struct Selection {
     choice: Choice,
     first_generation: u64,
@@ -64,17 +64,33 @@ impl Trace {
     /// Admission plus optional actual provider receipts for the exact output
     /// owner. Those lifetime observations never bind a window generation.
     pub fn observe_choice(&mut self, choice: Choice, generation: u64) {
-        if generation == 0 { return; }
-        if let Some(previous) = self.selections.iter_mut().rev().find(|s| s.choice.target == choice.target) {
+        if generation == 0 {
+            return;
+        }
+        if let Some(previous) = self
+            .selections
+            .iter_mut()
+            .rev()
+            .find(|s| s.choice.target == choice.target)
+        {
             if previous.choice.same_selection(choice) {
-                if generation < previous.last_generation { self.overflow = true; }
+                if generation < previous.last_generation {
+                    self.overflow = true;
+                }
                 previous.last_generation = generation;
                 previous.choice.execution = choice.execution;
                 return;
             }
         }
-        if self.selections.len() == 64 { self.overflow = true; return; }
-        self.selections.push(Selection { choice, first_generation: generation, last_generation: generation });
+        if self.selections.len() == 64 {
+            self.overflow = true;
+            return;
+        }
+        self.selections.push(Selection {
+            choice,
+            first_generation: generation,
+            last_generation: generation,
+        });
     }
     /// A published window generation supplies geometry/context only. No GPU
     /// submission, completion, scanout timestamp or copy duration is inferred.
@@ -90,7 +106,9 @@ impl Trace {
             return;
         }
         self.managed_output = Some(true);
-        if self.frame.is_some_and(|old| old != frame || self.client != Some(client))
+        if self
+            .frame
+            .is_some_and(|old| old != frame || self.client != Some(client))
             || generation < self.observed_generation
         {
             self.overflow = true;
@@ -143,8 +161,13 @@ impl Trace {
         if self.overflow
             || self.frame.is_none()
             || self.client.is_none()
-            || (if self.managed_output == Some(true) { self.observed_generations == 0 } else { self.samples.is_empty() })
-            || context.ended_ns <= context.started_ns {
+            || (if self.managed_output == Some(true) {
+                self.observed_generations == 0
+            } else {
+                self.samples.is_empty()
+            })
+            || context.ended_ns <= context.started_ns
+        {
             return Err(());
         }
         let mut out = String::new();
@@ -155,38 +178,63 @@ impl Trace {
         } else {
             "small"
         };
-        let receipt = if self.managed_output == Some(true) { "managed-output-context-only" } else { "software-display-copy-present-success" };
+        let receipt = if self.managed_output == Some(true) {
+            "managed-output-context-only"
+        } else {
+            "software-display-copy-present-success"
+        };
         write!(out,"{{\"contract\":\"desktop-window-output-v1\",\"receipt\":\"{}\",\"window_case\":\"{}\",\"process\":{{\"instance_id\":{},\"reserved\":0,\"generation\":{}}},\"screen\":{{\"w\":{},\"h\":{}}},\"frame\":",receipt,case,context.process.instance,context.process.generation,context.screen_w,context.screen_h).unwrap();
         rectangle(&mut out, self.frame.unwrap());
         out.push_str(",\"client\":");
         rectangle(&mut out, self.client.unwrap());
         write!(out,",\"session_start_ns\":{},\"session_end_ns\":{},\"global_desktop_presents\":{},\"cursor_moves\":{},\"cursor_tick_hz\":{},\"physical_visibility\":null,\"composition_selection_scope\":\"Selected output owner and original admission decision at published window generations; not GPU execution or physical visibility. Primary target identity unavailable.\",\"composition_choices\":[",context.started_ns,context.ended_ns,context.presents,context.cursor_moves,context.tick_hz).unwrap();
         for (i, s) in self.selections.iter().enumerate() {
-            if i != 0 { out.push(','); }
+            if i != 0 {
+                out.push(',');
+            }
             let c = s.choice;
             write!(out,"{{\"first_published_generation\":{},\"last_published_generation\":{},\"owner\":\"{}\",\"active\":{},\"reason\":\"{}\",\"target\":",s.first_generation,s.last_generation,c.owner,c.active,c.decision.reason.name()).unwrap();
             if let Some(t) = c.target {
                 write!(out,"{{\"adapter_id\":{},\"connector_id\":{},\"head_id\":{},\"device_generation\":{},\"connection_generation\":{},\"display_generation\":{}}}",t.adapter_id,t.connector_id,t.head_id,t.device_generation,t.connection_generation,t.display_generation).unwrap();
-            } else { out.push_str("null"); }
+            } else {
+                out.push_str("null");
+            }
             out.push_str(",\"error\":");
-            if let Some(error) = c.decision.error { write!(out,"\"{}\"",error).unwrap(); } else { out.push_str("null"); }
-            out.push_str(",\"provider_status\":"); optional(&mut out, c.decision.status);
-            out.push_str(",\"required_operations\":"); optional(&mut out, c.decision.required_operations);
-            out.push_str(",\"available_operations\":"); optional(&mut out, c.decision.available_operations);
+            if let Some(error) = c.decision.error {
+                write!(out, "\"{}\"", error).unwrap();
+            } else {
+                out.push_str("null");
+            }
+            out.push_str(",\"provider_status\":");
+            optional(&mut out, c.decision.status);
+            out.push_str(",\"required_operations\":");
+            optional(&mut out, c.decision.required_operations);
+            out.push_str(",\"available_operations\":");
+            optional(&mut out, c.decision.available_operations);
             out.push_str(",\"owner_execution\":");
             if let Some(e) = c.execution {
                 write!(out,"{{\"scope\":\"Exact native owner lifetime counters; admitted render jobs and actual provider frame receipts, including background/warmup work. Not per-window generations or optical visibility.\",\"device_address\":{},\"device_handle_generation\":{},\"backend_device_generation\":{},\"reset_generation\":{},\"completed_frames\":{},\"visible_frames\":{},\"completed_frame\":{},\"render_submit_jobs\":",e.device_address,e.device_handle_generation,e.backend_device_generation,e.reset_generation,e.completed_frames,e.visible_frames,e.completed_frame).unwrap();
-                optional(&mut out,e.render_submit_jobs);
-                out.push_str(",\"primitive_submit_jobs\":"); optional(&mut out,e.primitive_submit_jobs);
-                out.push_str(",\"result\":"); optional(&mut out,e.result);
-                out.push_str(",\"phase\":"); optional(&mut out,e.phase);
-                out.push_str(",\"frame_generation\":"); optional(&mut out,e.frame_generation);
-                out.push_str(",\"frame_serial\":"); optional(&mut out,e.frame_serial);
-                out.push_str(",\"render_end_ns\":"); optional(&mut out,e.render_end_ns);
-                out.push_str(",\"copied_ns\":"); optional(&mut out,e.copied_ns);
-                out.push_str(",\"visible_ns\":"); optional(&mut out,e.visible_ns);
+                optional(&mut out, e.render_submit_jobs);
+                out.push_str(",\"primitive_submit_jobs\":");
+                optional(&mut out, e.primitive_submit_jobs);
+                out.push_str(",\"result\":");
+                optional(&mut out, e.result);
+                out.push_str(",\"phase\":");
+                optional(&mut out, e.phase);
+                out.push_str(",\"frame_generation\":");
+                optional(&mut out, e.frame_generation);
+                out.push_str(",\"frame_serial\":");
+                optional(&mut out, e.frame_serial);
+                out.push_str(",\"render_end_ns\":");
+                optional(&mut out, e.render_end_ns);
+                out.push_str(",\"copied_ns\":");
+                optional(&mut out, e.copied_ns);
+                out.push_str(",\"visible_ns\":");
+                optional(&mut out, e.visible_ns);
                 out.push('}');
-            } else { out.push_str("null"); }
+            } else {
+                out.push_str("null");
+            }
             out.push('}');
         }
         out.push_str("],\"records\":[");
@@ -218,7 +266,11 @@ impl Trace {
     }
 }
 fn optional<T: core::fmt::Display>(out: &mut String, value: Option<T>) {
-    if let Some(v) = value { write!(out,"{}",v).unwrap(); } else { out.push_str("null"); }
+    if let Some(v) = value {
+        write!(out, "{}", v).unwrap();
+    } else {
+        out.push_str("null");
+    }
 }
 fn rectangle(out: &mut String, r: Rect) {
     write!(
@@ -244,9 +296,18 @@ mod tests {
     use super::*;
     fn context() -> Report {
         Report {
-            maximized: false, process: Identity { instance: 17, generation: 17 },
-            screen_w: 1920, screen_h: 1080, started_ns: 1, ended_ns: 10,
-            presents: 0, cursor_moves: 0, tick_hz: 1000,
+            maximized: false,
+            process: Identity {
+                instance: 17,
+                generation: 17,
+            },
+            screen_w: 1920,
+            screen_h: 1080,
+            started_ns: 1,
+            ended_ns: 10,
+            presents: 0,
+            cursor_moves: 0,
+            tick_hz: 1000,
         }
     }
     fn geometry() -> (Rect, Rect) {
@@ -254,9 +315,14 @@ mod tests {
     }
     fn copy() -> Sample {
         Sample {
-            generation: 3, completed_ns: 5, frame_wall_ns: 3,
-            compose_wall_ns: 1, present_wall_ns: 2, damage_bounds: geometry().1,
-            full_client_copy: true, cursor_queued_to_copy_ticks: None,
+            generation: 3,
+            completed_ns: 5,
+            frame_wall_ns: 3,
+            compose_wall_ns: 1,
+            present_wall_ns: 2,
+            damage_bounds: geometry().1,
+            full_client_copy: true,
+            cursor_queued_to_copy_ticks: None,
         }
     }
     #[test]
@@ -281,7 +347,9 @@ mod tests {
         trace.observe_context(true, frame, client, 5);
         let report = trace.report(context()).unwrap();
         assert!(report.contains("\"receipt\":\"managed-output-context-only\""));
-        assert!(report.contains("\"records\":[],\"published_generations_observed\":2,\"presentation_receipts\":null"));
+        assert!(report.contains(
+            "\"records\":[],\"published_generations_observed\":2,\"presentation_receipts\":null"
+        ));
         assert!(!report.contains("completed_ns"));
         assert!(!report.contains("software-display-copy-present-success"));
         assert!(report.contains("\"physical_visibility\":null"));
@@ -317,7 +385,12 @@ mod tests {
         trace.observe_context(true, frame, client, 0);
         assert!(trace.report(context()).is_err());
         trace.observe_context(true, frame, client, 3);
-        assert!(trace.report(context()).unwrap().contains("managed-output-context-only"));
+        assert!(
+            trace
+                .report(context())
+                .unwrap()
+                .contains("managed-output-context-only")
+        );
         trace.record(frame, client, copy());
         assert!(trace.report(context()).is_err());
     }
@@ -328,9 +401,18 @@ mod tests {
         let mut trace = Trace::new(1).unwrap();
         trace.observe_context(true, frame, client, 3);
         let mut choice = Choice {
-            target: Some(Target { adapter_id: 8, connector_id: 2048, head_id: 0,
-                device_generation: 2, connection_generation: 9, display_generation: 4 }),
-            owner: "managed-cpu", active: true, decision: Decision::operations(7, 3), execution: None,
+            target: Some(Target {
+                adapter_id: 8,
+                connector_id: 2048,
+                head_id: 0,
+                device_generation: 2,
+                connection_generation: 9,
+                display_generation: 4,
+            }),
+            owner: "managed-cpu",
+            active: true,
+            decision: Decision::operations(7, 3),
+            execution: None,
         };
         trace.observe_choice(choice, 3);
         trace.observe_choice(choice, 4);
@@ -342,8 +424,13 @@ mod tests {
         let report = trace.report(context()).unwrap();
         assert!(report.contains("\"reason\":\"native-operations-missing\""));
         assert!(report.contains("\"required_operations\":7,\"available_operations\":3"));
-        assert!(report.contains("\"display_generation\":4") && report.contains("\"display_generation\":5"));
-        assert!(report.contains("\"records\":[]") && report.contains("\"presentation_receipts\":null"));
+        assert!(
+            report.contains("\"display_generation\":4")
+                && report.contains("\"display_generation\":5")
+        );
+        assert!(
+            report.contains("\"records\":[]") && report.contains("\"presentation_receipts\":null")
+        );
     }
     #[test]
     fn composition_history_retains_transitions_and_rejects_regressing_observations() {
@@ -351,28 +438,68 @@ mod tests {
         let (frame, client) = geometry();
         let mut trace = Trace::new(1).unwrap();
         trace.observe_context(true, frame, client, 3);
-        let mut choice = Choice { target: None, owner: "primary-native-gr", active: true, decision: Decision::operations(7, 7), execution: None };
-        choice.execution = Some(Execution { device_address: 4096, device_handle_generation: 2,
-            backend_device_generation: 3, reset_generation: 1, completed_frames: 2, visible_frames: 2,
-            render_submit_jobs: Some(4), primitive_submit_jobs: Some(2), completed_frame: 2,
-            result: Some(1), phase: Some(4), frame_generation: Some(2), frame_serial: Some(2),
-            render_end_ns: Some(5), copied_ns: Some(6), visible_ns: Some(7) });
+        let mut choice = Choice {
+            target: None,
+            owner: "primary-native-gr",
+            active: true,
+            decision: Decision::operations(7, 7),
+            execution: None,
+        };
+        choice.execution = Some(Execution {
+            device_address: 4096,
+            device_handle_generation: 2,
+            backend_device_generation: 3,
+            reset_generation: 1,
+            completed_frames: 2,
+            visible_frames: 2,
+            render_submit_jobs: Some(4),
+            primitive_submit_jobs: Some(2),
+            completed_frame: 2,
+            result: Some(1),
+            phase: Some(4),
+            frame_generation: Some(2),
+            frame_serial: Some(2),
+            render_end_ns: Some(5),
+            copied_ns: Some(6),
+            visible_ns: Some(7),
+        });
         trace.observe_choice(choice, 3);
         choice.execution.as_mut().unwrap().visible_frames = 3;
         trace.observe_choice(choice, 4);
-        assert_eq!(trace.selections.len(), 1, "changing owner counters is not another selection");
-        assert!(trace.report(context()).unwrap().contains("\"visible_frames\":3"));
+        assert_eq!(
+            trace.selections.len(),
+            1,
+            "changing owner counters is not another selection"
+        );
+        assert!(
+            trace
+                .report(context())
+                .unwrap()
+                .contains("\"visible_frames\":3")
+        );
         choice.execution.as_mut().unwrap().device_handle_generation += 1;
         trace.observe_choice(choice, 5);
-        assert_eq!(trace.selections.len(), 2, "a reused device address has a distinct owner generation");
+        assert_eq!(
+            trace.selections.len(),
+            2,
+            "a reused device address has a distinct owner generation"
+        );
         choice.owner = "primary-cpu";
         choice.execution = None;
         choice.decision = Decision::new(Reason::PriorNativeFailure);
         trace.observe_choice(choice, 6);
-        choice.decision = Decision::device(Reason::NativeBinding, crate::render::gpu::device::Error::Native(-17));
+        choice.decision = Decision::device(
+            Reason::NativeBinding,
+            crate::render::gpu::device::Error::Native(-17),
+        );
         trace.observe_choice(choice, 7);
         assert_eq!(trace.selections.len(), 4);
-        assert!(trace.report(context()).unwrap().contains("\"provider_status\":-17"));
+        assert!(
+            trace
+                .report(context())
+                .unwrap()
+                .contains("\"provider_status\":-17")
+        );
         trace.observe_choice(choice, 6);
         assert!(trace.report(context()).is_err());
     }

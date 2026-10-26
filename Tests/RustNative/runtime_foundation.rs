@@ -8,10 +8,20 @@ use crate::shell::{
 use r4os_sdk::abi as a;
 #[test]
 fn actual_association_copied_launch_editor_and_writeback_policy_admission() {
-    for args in [b"".as_slice(), b"/CHECK-ISOLATED", b"/INPUTTEST", b"/HEADLESS-SUBSYSTEM /CHECK-ISOLATED"] {
+    for args in [
+        b"".as_slice(),
+        b"/CHECK-ISOLATED",
+        b"/INPUTTEST",
+        b"/HEADLESS-SUBSYSTEM /CHECK-ISOLATED",
+    ] {
         assert!(crate::runtime::bootstrap::arguments_supported(args));
     }
-    for args in [b"/NOHOSTTEST".as_slice(), b"/COMPOSITIONVERIFY", b"/SMOKE-WINDOW-IDLE", b"/CHECK-ISOLATED /CHECK-ISOLATED"] {
+    for args in [
+        b"/NOHOSTTEST".as_slice(),
+        b"/COMPOSITIONVERIFY",
+        b"/SMOKE-WINDOW-IDLE",
+        b"/CHECK-ISOLATED /CHECK-ISOLATED",
+    ] {
         assert!(!crate::runtime::bootstrap::arguments_supported(args));
     }
     crate::standard_fixture::with(|standard| {
@@ -142,7 +152,10 @@ fn actual_association_copied_launch_editor_and_writeback_policy_admission() {
         let mut old_version = bytes;
         old_version[4] = 1;
         assert!(d::decode_request(&old_version).is_none());
-        assert_eq!(unsafe { r4desk_wire_check(5, old_version.as_ptr(), old_version.len()) }, 0);
+        assert_eq!(
+            unsafe { r4desk_wire_check(5, old_version.as_ptr(), old_version.len()) },
+            0
+        );
         bytes[72] = 1;
         assert_eq!(
             unsafe { r4desk_wire_check(5, bytes.as_ptr(), bytes.len()) },
@@ -188,7 +201,10 @@ fn actual_association_copied_launch_editor_and_writeback_policy_admission() {
         let mut unknown_flag = rb;
         unknown_flag[68] |= 128;
         assert!(d::decode_response(&unknown_flag).is_none());
-        assert_eq!(unsafe { r4desk_wire_check(7, unknown_flag.as_ptr(), unknown_flag.len()) }, 0);
+        assert_eq!(
+            unsafe { r4desk_wire_check(7, unknown_flag.as_ptr(), unknown_flag.len()) },
+            0
+        );
         rb[127] = 1;
         assert_eq!(unsafe { r4desk_wire_check(7, rb.as_ptr(), rb.len()) }, 0);
         assert!(d::decode_response(&rb).is_none());

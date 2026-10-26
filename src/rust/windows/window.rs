@@ -44,6 +44,7 @@ impl ResizeHandle {
 #[derive(Clone, Debug)]
 pub struct Window {
     kind: Kind,
+    starting: bool,
     current: Rect,
     normal: Rect,
     visible: bool,
@@ -63,6 +64,7 @@ impl Window {
     pub fn new(kind: Kind, rect: Rect) -> Self {
         Self {
             kind,
+            starting: false,
             current: rect,
             normal: rect,
             visible: true,
@@ -151,6 +153,7 @@ impl Window {
         self.minimized = true;
     }
     pub fn close(&mut self) {
+        self.starting = false;
         self.leave_fullscreen();
         self.visible = false;
         self.minimized = false;
@@ -159,6 +162,13 @@ impl Window {
     }
     pub fn bind_instance(&mut self, id: u32) {
         self.instance_id = id;
+    }
+    pub fn starting(&self) -> bool {
+        self.starting
+    }
+    pub fn begin_launch(&mut self, title: &CStr) {
+        self.bind(Kind::App, 0, title);
+        self.starting = true;
     }
     pub fn bind_app(&mut self, id: u32, title: &CStr) {
         self.bind(Kind::App, id, title);
@@ -169,6 +179,7 @@ impl Window {
     fn bind(&mut self, kind: Kind, id: u32, title: &CStr) {
         self.leave_fullscreen();
         self.kind = kind;
+        self.starting = false;
         self.bind_instance(id);
         self.set_title(title);
         self.reset_min_size();
@@ -178,6 +189,7 @@ impl Window {
         self.close_requested_tick = 0;
     }
     pub fn unbind_instance(&mut self) {
+        self.starting = false;
         self.leave_fullscreen();
         self.instance_id = 0;
         self.close_requested = false;

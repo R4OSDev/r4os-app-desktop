@@ -1,7 +1,7 @@
 //! Desktop's current WINSVC policy over the general SDK service connection.
 //! One exact host generation is claimed before any output owner is created.
-use super::launch_wire as launch;
 use super::graphics_wire as images;
+use super::launch_wire as launch;
 use super::wire::{self, Wire};
 use crate::diagnostics::wire as diagnostic;
 use alloc::vec::Vec;
@@ -313,10 +313,19 @@ impl<'a> Host<'a> {
     /// Capture the observed activity before the call: a notification during
     /// the RPC remains unconsumed and triggers the next current snapshot.
     pub fn refresh_images(&mut self, activity: u64, missing: bool) -> Result<()> {
-        if !self.claimed || self.retiring { return Err(Error::InvalidProvider); }
-        if self.images.is_some() && self.images_activity == activity && !missing { return Ok(()); }
+        if !self.claimed || self.retiring {
+            return Err(Error::InvalidProvider);
+        }
+        if self.images.is_some() && self.images_activity == activity && !missing {
+            return Ok(());
+        }
         self.images = None;
-        let service = self.connection.as_ref().ok_or(Error::InvalidProvider)?.info.instance_id;
+        let service = self
+            .connection
+            .as_ref()
+            .ok_or(Error::InvalidProvider)?
+            .info
+            .instance_id;
         self.request.resize(a::ProgramProcessHandle::SIZE, 0);
         wire::encode(&self.owner, &mut self.request);
         self.call(images::OPERATION, images::SIZE)?;

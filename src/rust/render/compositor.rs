@@ -259,12 +259,7 @@ pub fn overlay_rect(overlay: Overlay<'_>, width: i32, height: i32) -> Option<Rec
         Overlay::Message(_) => (380, 172),
         Overlay::Tasks(_) => (crate::shell::tasks::WIDTH, crate::shell::tasks::HEIGHT),
     };
-    Some(Rect::new(
-        (width - w) / 2,
-        (height - h) / 2,
-        w,
-        h,
-    ))
+    Some(Rect::new((width - w) / 2, (height - h) / 2, w, h))
 }
 /// # Safety
 /// Every client's committed raster maps remain resident immutable native read
@@ -711,7 +706,14 @@ pub(crate) unsafe fn draw(
                                 input.hover,
                                 input.pressed,
                             ),
-                            Overlay::Tasks(view) => crate::shell::tasks::paint(ui, scene.width, scene.height, view, input.hover, input.pressed),
+                            Overlay::Tasks(view) => crate::shell::tasks::paint(
+                                ui,
+                                scene.width,
+                                scene.height,
+                                view,
+                                input.hover,
+                                input.pressed,
+                            ),
                             Overlay::None => Ok(()),
                         },
                     )?;

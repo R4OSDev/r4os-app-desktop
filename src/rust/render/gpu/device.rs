@@ -166,8 +166,12 @@ impl Device {
     pub fn live(&self) -> bool {
         self.handle.is_some()
     }
-    pub(crate) fn receipt_counts(&self) -> Arc<Loans> { self.loans.clone() }
-    pub(crate) fn identity(&self) -> Option<g::R4GfxDevice> { self.handle }
+    pub(crate) fn receipt_counts(&self) -> Arc<Loans> {
+        self.loans.clone()
+    }
+    pub(crate) fn identity(&self) -> Option<g::R4GfxDevice> {
+        self.handle
+    }
     fn free_storage(&mut self) {
         if let Some(storage) = self.storage.take() {
             unsafe {

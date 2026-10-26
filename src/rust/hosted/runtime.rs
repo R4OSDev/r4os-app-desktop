@@ -509,7 +509,7 @@ impl<'input> State<'input> {
             .class(&name, policy)
             .map_err(Failure::Classification)?;
         let console = class == a::R4XStartAppClass::console;
-        if self.failed_spawns.len() == 4 {
+        if self.failed_spawns.len() + self.pending_launches() >= 4 {
             return Err(Failure::WindowCapacity { console });
         }
         if !console {
@@ -557,6 +557,43 @@ impl<'input> State<'input> {
             )
             .map_err(Failure::Loader)?;
         *spawned = Some(handle);
+        self.accept_spawned(
+            programs,
+            app,
+            session,
+            index,
+            handle,
+            console,
+            path,
+            args.to_bytes(),
+            title.to_bytes(),
+            tick,
+            true,
+            dirty,
+        )
+    }
+    /// Exact worker completion has returned the handle; only this main-task
+    /// owner binds clients/windows/frames, publishes GUI association and focuses.
+    pub(crate) fn accept_spawned(
+        &mut self,
+        programs: &Programs<'_>,
+        app: &App<'_>,
+        session: &mut Session<'_, '_>,
+        index: usize,
+        handle: a::ProgramProcessHandle,
+        console: bool,
+        path: &[u8],
+        args: &[u8],
+        title: &[u8],
+        tick: u64,
+        focus: bool,
+        dirty: &mut Dirty,
+    ) -> core::result::Result<usize, Failure> {
+        let mut title_z = [0; 41];
+        if !copy(&mut title_z, title) {
+            return Err(Failure::Arguments);
+        }
+        let title = CStr::from_bytes_until_nul(&title_z).map_err(|_| Failure::Arguments)?;
         // Reap authority is retained even if old frame retirement refuses this
         // otherwise free slot. Never lose a successfully spawned generation.
         if !self.model.clients.slot_mut(index).unwrap().bind(
@@ -589,15 +626,36 @@ impl<'input> State<'input> {
             self.changes(&change, session, app, tick, dirty);
         }
         if console && index == 0 {
-            self.console.set(title.to_bytes(), path, args.to_bytes());
+            self.console.set(title.to_bytes(), path, args);
         }
         self.scroll[index] = Scroll {
             owner: handle,
             follow_tail: true,
             ..Default::default()
         };
-        self.focus(index, session, app, tick, dirty);
+        if focus {
+            self.focus(index, session, app, tick, dirty);
+        } else {
+            dirty.invalidate(self.model.windows.windows()[index].frame_surface().rect);
+        }
         Ok(index)
+    }
+    pub(crate) fn pending_launches(&self) -> usize {
+        self.model.pending_launches()
+    }
+    pub(crate) fn launch_capacity(&self) -> bool {
+        self.failed_spawns.len() + self.pending_launches() < 4
+    }
+    pub(crate) fn discard_loaded(&mut self, handle: a::ProgramProcessHandle) {
+        if self
+            .failed_spawns
+            .iter()
+            .any(|old| super::process::same(*old, handle))
+        {
+            return;
+        }
+        assert!(self.failed_spawns.len() + self.pending_launches() < 4);
+        self.failed_spawns.push(handle);
     }
     pub fn failed_spawns_drained(&self) -> bool {
         self.failed_spawns.is_empty()
@@ -621,7 +679,8 @@ impl<'input> State<'input> {
         dirty: &mut Dirty,
         args: &[u8],
     ) -> Result<()> {
-        if self.model.clients.slots()[1..].iter().any(|c| c.bound()) {
+        if self.pending_launches() != 0 || self.model.clients.slots()[1..].iter().any(|c| c.bound())
+        {
             return Err(Error::Raw(a::program_handle_error_would_block));
         }
         if self.model.clients.slots()[0].bound() {
@@ -689,20 +748,9 @@ impl<'input> State<'input> {
             }
         }
     }
-    fn single_instance(&self, path: &[u8]) -> Option<usize> {
+    pub(crate) fn single_instance(&self, path: &[u8]) -> Option<usize> {
         let name = filename(path);
-        if ![
-            b"NETCFG.R4X".as_slice(),
-            b"CLOCK.R4X",
-            b"TIMESET.R4X",
-            b"REGEDIT.R4X",
-            b"CALC.R4X",
-            b"APPDEF.R4X",
-            b"LOGCENTER.R4X",
-        ]
-        .iter()
-        .any(|v| name.eq_ignore_ascii_case(v))
-        {
+        if !single_instance_name(path) {
             return None;
         }
         (1..4).find(|&i| {
@@ -723,6 +771,11 @@ impl<'input> State<'input> {
             return;
         };
         if !client.bound() {
+            if self.model.cancel_launch(index) {
+                if let Some(change) = self.model.windows.close_unbound(index) {
+                    self.changes(&change, session, app, tick, dirty);
+                }
+            }
             return;
         }
         let handle = client.handle();
@@ -743,4 +796,19 @@ impl<'input> State<'input> {
         }
         dirty.invalidate(self.model.windows.windows()[index].frame_surface().rect);
     }
+}
+
+pub(crate) fn single_instance_name(path: &[u8]) -> bool {
+    let name = filename(path);
+    [
+        b"NETCFG.R4X".as_slice(),
+        b"CLOCK.R4X",
+        b"TIMESET.R4X",
+        b"REGEDIT.R4X",
+        b"CALC.R4X",
+        b"APPDEF.R4X",
+        b"LOGCENTER.R4X",
+    ]
+    .iter()
+    .any(|v| name.eq_ignore_ascii_case(v))
 }

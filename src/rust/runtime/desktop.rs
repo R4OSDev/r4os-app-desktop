@@ -71,6 +71,8 @@ type Result<T> = core::result::Result<T, &'static str>;
 mod console_check;
 #[path = "desktop_launch.rs"]
 mod external;
+#[path = "desktop_load.rs"]
+mod loading;
 fn owned<T>(initialize: impl FnOnce() -> Result<T>, name: &'static str) -> Result<Owned<T>> {
     Owned::new_with(initialize).map_err(|error| match error {
         super::owned::InitError::Memory => name,
@@ -111,6 +113,7 @@ struct Desktop<'a, 'input> {
     activity_sequence: u64,
     diagnostics: diagnostics::runtime::Owner,
     launches: external::Owner,
+    loads: super::launch_io::Owner<'a>,
     cursor_queued_tick: u64,
 }
 impl<'a, 'input> Desktop<'a, 'input> {
@@ -151,7 +154,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
         Ok(Self {
             expected,
             shell,
-            audio_io: super::audio_io::AudioIo::new(services, env.resources, owner).map_err(|_| "audio requests")?,
+            audio_io: super::audio_io::AudioIo::new(services, env.resources, owner)
+                .map_err(|_| "audio requests")?,
             hosted,
             frames,
             outputs,
@@ -181,6 +185,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             blink: true,
             activity_sequence: 0,
             launches: external::Owner::default(),
+            loads: super::launch_io::Owner::default(),
             diagnostics: diagnostics::runtime::Owner::new(
                 super::test_start::requested(env.app)
                     || env
@@ -233,6 +238,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         })
     }
     fn initialize(&mut self, env: &Environment<'a>, session: &mut Session<'_, '_>, time: Time) {
+        self.loads.stop_all(0);
         self.publisher
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
         if let Ok(path) = FilePath::parse(shell::desktop_folder::DIRECTORY) {
@@ -452,6 +458,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             time.tick,
             time.hz,
         );
+        self.poll_loads(env, session, programs, time, false);
         let bindings = core::array::from_fn(|i| {
             if !self.outputs.active()
                 && self.primary_admission == outputs::primary::Admission::Native
@@ -477,7 +484,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             bindings,
         );
         let mut transport = NativeTransport { host, programs };
-        self.windows.refresh_markers(transport.host, self.activity_sequence);
+        self.windows
+            .refresh_markers(transport.host, self.activity_sequence);
         self.windows.poll(
             transport.host.owner(),
             specs,
@@ -544,11 +552,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }) {
             self.bar();
         }
-        self.tray.publish_visibility(
-            transport.host,
-            time.tick,
-            u64::from(time.hz).div_ceil(20),
-        );
+        self.tray
+            .publish_visibility(transport.host, time.tick, u64::from(time.hz).div_ceil(20));
         if self.directory_active
             && env
                 .system
@@ -609,6 +614,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         audio: Option<&Audio<'_>>,
         time: Time,
     ) {
+        self.diagnostics.launch_status = (self.loads.pending(), self.loads.loading());
         if !self.diagnostics.pending() && host.diagnostic_work().is_none() {
             return;
         }
@@ -731,8 +737,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let slot = &self.hosted.model.clients.slots()[i];
             let target = self.diagnostics.benchmark.child;
             let handle = slot.handle();
-            if !slot.bound() || slot.retiring()
-                || handle.instance_id != target.instance || handle.generation != target.generation {
+            if !slot.bound()
+                || slot.retiring()
+                || handle.instance_id != target.instance
+                || handle.generation != target.generation
+            {
                 return None;
             }
             let win = &self.hosted.model.windows.windows()[i];
@@ -751,8 +760,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if let Some((frame, client, generation, _)) = trace_input {
             if let Some(trace) = &mut self.diagnostics.benchmark.trace {
                 trace.observe_context(
-                    self.outputs.active() || self.primary_admission != outputs::primary::Admission::Cpu,
-                    frame, client, generation,
+                    self.outputs.active()
+                        || self.primary_admission != outputs::primary::Admission::Cpu,
+                    frame,
+                    client,
+                    generation,
                 );
                 if self.outputs.active() {
                     for choice in self.outputs.composition_choices(client) {
@@ -761,7 +773,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 } else {
                     let mut choice = outputs::selection::Choice::primary(self.primary_admission);
                     if self.primary_admission == outputs::primary::Admission::Native {
-                        choice.execution = self.primary.output().map(outputs::native::Output::execution_observation);
+                        choice.execution = self
+                            .primary
+                            .output()
+                            .map(outputs::native::Output::execution_observation);
                     }
                     trace.observe_choice(choice, generation);
                 }
@@ -949,53 +964,46 @@ impl<'a, 'input> Desktop<'a, 'input> {
     ) {
         self.shell_damage();
         self.shell.close_top();
-        if let Err(error) = self.hosted.launch(
-            programs,
-            env.app,
-            session,
-            request.path(),
-            request.args(),
-            request.title(),
-            request.policy,
-            time.tick,
-            &mut self.dirty,
-        ) {
-            use crate::hosted::launch::Failure;
-            let (kind, text) = match error {
-                Failure::Path(_) => (MessageKind::Error, b"Invalid program path.".as_slice()),
-                Failure::Arguments => (
-                    MessageKind::Error,
-                    b"Program arguments or title are too long.".as_slice(),
-                ),
-                // program_class has its own -1/missing and -2/invalid-header
-                // contract; process-handle errors apply only after spawn.
-                Failure::Classification(r4os_sdk::storage::Error::Raw(-1))
-                | Failure::Loader(r4os_sdk::storage::Error::Raw(
-                    a::program_handle_error_not_found,
-                )) => (MessageKind::Error, b"Program was not found.".as_slice()),
-                Failure::Classification(_) => (
-                    MessageKind::Error,
-                    b"Program header could not be read or is invalid.".as_slice(),
-                ),
-                Failure::WindowCapacity { console } => (
-                    MessageKind::Warning,
-                    if console {
-                        b"No free console window slot is available.".as_slice()
-                    } else {
-                        b"No free GUI window slot is available.".as_slice()
-                    },
-                ),
-                Failure::Attachment => (
-                    MessageKind::Error,
-                    b"Program started but its window could not be attached.".as_slice(),
-                ),
-                Failure::Loader(_) => (
-                    MessageKind::Error,
-                    b"Program loader returned an error.".as_slice(),
-                ),
-            };
-            self.message(kind, b"Run", text);
+        if let Err(error) = self.begin_load(request, None, env, session, programs, time) {
+            self.launch_error(error);
         }
+    }
+    fn launch_error(&mut self, error: crate::hosted::launch::Failure) {
+        use crate::hosted::launch::Failure;
+        let (kind, text) = match error {
+            Failure::Path(_) => (MessageKind::Error, b"Invalid program path.".as_slice()),
+            Failure::Arguments => (
+                MessageKind::Error,
+                b"Program arguments or title are too long.".as_slice(),
+            ),
+            // program_class has its own -1/missing and -2/invalid-header
+            // contract; process-handle errors apply only after spawn.
+            Failure::Classification(r4os_sdk::storage::Error::Raw(-1))
+            | Failure::Loader(r4os_sdk::storage::Error::Raw(a::program_handle_error_not_found)) => {
+                (MessageKind::Error, b"Program was not found.".as_slice())
+            }
+            Failure::Classification(_) => (
+                MessageKind::Error,
+                b"Program header could not be read or is invalid.".as_slice(),
+            ),
+            Failure::WindowCapacity { console } => (
+                MessageKind::Warning,
+                if console {
+                    b"No free console window slot is available.".as_slice()
+                } else {
+                    b"No free GUI window slot is available.".as_slice()
+                },
+            ),
+            Failure::Attachment => (
+                MessageKind::Error,
+                b"Program started but its window could not be attached.".as_slice(),
+            ),
+            Failure::Loader(_) => (
+                MessageKind::Error,
+                b"Program loader returned an error.".as_slice(),
+            ),
+        };
+        self.message(kind, b"Run", text);
     }
     fn action(
         &mut self,
@@ -1115,15 +1123,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             Action::VolumeStep(step) => {
                 let percent = shell::volume::stepped(self.shell.audio.ui.percent, step);
-                self.shell
-                    .audio
-                    .set_percent(percent, true, time.tick);
+                self.shell.audio.set_percent(percent, true, time.tick);
                 self.bar();
             }
             Action::VolumePercent(percent) => {
-                self.shell
-                    .audio
-                    .set_percent(percent, true, time.tick);
+                self.shell.audio.set_percent(percent, true, time.tick);
                 self.bar();
             }
             Action::VolumePointer { x, commit } => {
@@ -1133,9 +1137,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     self.shell.config.taskbar_clock,
                 );
                 let percent = shell::volume::percent_at_x(shell::volume::track_rect(popup), x);
-                self.shell
-                    .audio
-                    .set_percent(percent, commit, time.tick);
+                self.shell.audio.set_percent(percent, commit, time.tick);
                 self.bar();
             }
             Action::VolumeMute => {
@@ -1503,7 +1505,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
             // Even during continuous rendering, consume the published
             // notification sequence. Zero timeout never parks this task.
             let _ = Input::new(session).wait_activity(
-                self.activity_sequence, 0, &mut self.activity_sequence,
+                self.activity_sequence,
+                0,
+                &mut self.activity_sequence,
             );
             env.app.sleep(0);
             return;
@@ -1528,6 +1532,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.primary.needs_polling()
             || self.windows.needs_polling()
             || self.cursor.retry_pending()
+            || self.loads.busy()
             || self.capture.screenshot_busy()
             || self.capture.recording_state() != 0
             || self.layout.busy()
@@ -1565,6 +1570,17 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let time = env.time().ok();
             let tick = time.map_or(0, |v| v.tick);
             let now = time.map_or(0, |v| v.nanoseconds);
+            self.poll_loads(
+                env,
+                session,
+                programs,
+                time.unwrap_or(Time {
+                    tick,
+                    nanoseconds: now,
+                    hz: 1000,
+                }),
+                true,
+            );
             let diagnostic = if self.diagnostics.pending() {
                 if let Some(time) = time {
                     let areas = self.areas();
@@ -1675,6 +1691,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 && self.windows.detached()
                 && !self.layout.busy()
                 && self.hosted.failed_spawns_drained()
+                && !self.loads.busy()
             {
                 break;
             }
@@ -1770,8 +1787,7 @@ impl bootstrap::Body for Coordinator {
         // check. It uses the productive console transport/snapshots below;
         // ordinary Desktop work continues through Spectra's byte contract.
         if app.args().eq_ignore_ascii_case(b"/INPUTTEST") {
-            let result =
-                console_check::run(desktop, &env, session, host, &programs);
+            let result = console_check::run(desktop, &env, session, host, &programs);
             desktop.drain(&env, session, host, &programs);
             return result;
         }

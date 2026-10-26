@@ -155,8 +155,13 @@ impl Controller {
     pub fn close(&mut self, api: &mut impl CursorApi, now: u64) -> bool {
         self.disabled = true;
         self.advance(api, now, 0, 0, false);
-        if !self.acquired && self.pending_sequence == 0 { self.discard_source(api); }
-        !self.acquired && self.pending_sequence == 0 && self.mapping.lease.id == 0 && self.reference.reference.id == 0
+        if !self.acquired && self.pending_sequence == 0 {
+            self.discard_source(api);
+        }
+        !self.acquired
+            && self.pending_sequence == 0
+            && self.mapping.lease.id == 0
+            && self.reference.reference.id == 0
     }
     fn advance(&mut self, api: &mut impl CursorApi, now: u64, x: i32, y: i32, wanted: bool) {
         if !api.supported() {
@@ -578,8 +583,13 @@ mod tests {
         assert!(!cursor.close(&mut model, 5) && cursor.acquired);
         model.finish();
         assert!(cursor.close(&mut model, 6));
-        assert!(!cursor.acquired && cursor.reference.reference.id == 0 && cursor.mapping.lease.id == 0);
-        let mut absent = Model { supported: false, ..Model::default() };
+        assert!(
+            !cursor.acquired && cursor.reference.reference.id == 0 && cursor.mapping.lease.id == 0
+        );
+        let mut absent = Model {
+            supported: false,
+            ..Model::default()
+        };
         assert!(Controller::default().close(&mut absent, 1));
     }
     #[test]

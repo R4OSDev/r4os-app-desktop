@@ -105,7 +105,15 @@ pub unsafe fn paint(
             }
         }
         Kind::App => {
-            if win.close_requested().is_some() {
+            if win.starting() {
+                ui.text(
+                    client.x + 10,
+                    client.y + 22,
+                    b"Starting program...",
+                    s::TEXT,
+                    s::CLIENT_BG,
+                )?;
+            } else if win.close_requested().is_some() {
                 ui.text(
                     client.x + 10,
                     client.y + 46,

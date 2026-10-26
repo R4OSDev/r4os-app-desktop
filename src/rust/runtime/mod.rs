@@ -11,12 +11,13 @@ pub mod owned;
 pub mod service;
 mod shell_io;
 mod test_start;
-pub mod views;
-pub(crate) mod wire;
-pub mod worker;
 #[cfg(test)]
 #[path = "../../../Tests/RustNative/runtime_foundation.rs"]
 mod tests;
+pub mod views;
+pub(crate) mod wire;
+pub mod worker;
 
-pub(crate) mod launch_wire;
 pub(crate) mod graphics_wire;
+pub(crate) mod launch_io;
+pub(crate) mod launch_wire;

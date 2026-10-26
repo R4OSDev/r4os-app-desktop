@@ -5,7 +5,7 @@ use core::{
     alloc::Layout,
     cell::UnsafeCell,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use r4os_sdk::resources::{JoinHandle, Resources, Timeout, Wait};
 
@@ -14,9 +14,16 @@ pub trait Task: Send + 'static {
 }
 pub struct Control {
     stop_ns: AtomicU64,
+    phase: AtomicU32,
     done: AtomicBool,
 }
 impl Control {
+    pub fn phase(&self) -> u32 {
+        self.phase.load(Ordering::Acquire)
+    }
+    pub fn publish_phase(&self, value: u32) {
+        self.phase.store(value, Ordering::Release);
+    }
     pub fn stopped(&self) -> bool {
         self.stop_ns.load(Ordering::Acquire) != 0
     }
@@ -78,6 +85,7 @@ impl<'a, P: Task> Worker<'a, P> {
             pointer.as_ptr().write(Shared {
                 control: Control {
                     stop_ns: AtomicU64::new(0),
+                    phase: AtomicU32::new(0),
                     done: AtomicBool::new(false),
                 },
                 task: UnsafeCell::new(task),
@@ -108,6 +116,10 @@ impl<'a, P: Task> Worker<'a, P> {
     pub fn stopping(&self) -> bool {
         self.pointer
             .is_some_and(|pointer| unsafe { &(*pointer.as_ptr()).control }.stopped())
+    }
+    pub fn phase(&self) -> u32 {
+        self.pointer
+            .map_or(0, |p| unsafe { &(*p.as_ptr()).control }.phase())
     }
     pub fn finished(&self) -> bool {
         self.pointer.is_none_or(|pointer| {

@@ -105,9 +105,13 @@ pub fn specification(
         let scale = u64::from(binding.scale);
         let width = (client.w as u64 * scale).div_ceil(120);
         let height = (client.h as u64 * scale).div_ceil(120);
-        if width == 0 || height == 0 || width > 32768 || height > 32768 { return None; }
+        if width == 0 || height == 0 || width > 32768 || height > 32768 {
+            return None;
+        }
         (width as u32, height as u32)
-    } else { (client.w as u32, client.h as u32) };
+    } else {
+        (client.w as u32, client.h as u32)
+    };
     let mut config = a::WindowGraphicsConfig {
         width,
         height,
@@ -226,9 +230,13 @@ impl<M: Memory, R: Receipt> Set<M, R> {
         }
     }
     pub fn refresh_markers(&self, host: &mut Host<'_>, activity: u64) {
-        if !host.claimed() || !self.windows.iter().any(Window::observes_images) { return; }
-        let missing = self.windows.iter().any(|w| w.observes_images()
-            && host.image_marker(w.surface()).is_none());
+        if !host.claimed() || !self.windows.iter().any(Window::observes_images) {
+            return;
+        }
+        let missing = self
+            .windows
+            .iter()
+            .any(|w| w.observes_images() && host.image_marker(w.surface()).is_none());
         let _ = host.refresh_images(activity, missing);
     }
     pub fn detached(&self) -> bool {

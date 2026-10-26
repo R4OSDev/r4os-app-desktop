@@ -73,7 +73,10 @@ unsafe extern "C" fn ported(
     match result {
         Ok(()) => 0,
         Err(Error::Native("UnsupportedColor")) => 1,
-        Err(error) => { eprintln!("ported wallpaper decode: {error:?}"); 2 },
+        Err(error) => {
+            eprintln!("ported wallpaper decode: {error:?}");
+            2
+        }
     }
 }
 #[test]
