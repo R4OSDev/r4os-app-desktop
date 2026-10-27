@@ -18,7 +18,10 @@ unsafe extern "C" fn create(
     flags: u32,
     out: *mut a::ProgramJoinHandle,
 ) -> i32 {
-    assert_eq!((stack, flags), (128 * 1024, 0));
+    assert_eq!(
+        (stack, flags),
+        (128 * 1024, a::thread_create_flag_compute_worker)
+    );
     if MODE.load(Ordering::Relaxed) == 3 {
         return a::thread_error_unsupported;
     }

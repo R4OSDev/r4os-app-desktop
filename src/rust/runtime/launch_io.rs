@@ -31,6 +31,7 @@ pub struct Load {
     pub expired: bool,
 }
 impl Task for Load {
+    const COMPUTE: bool = false;
     fn run(&mut self, control: &Control) -> i32 {
         if control.stopped() {
             return 0;

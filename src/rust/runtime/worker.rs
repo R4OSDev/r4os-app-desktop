@@ -10,6 +10,9 @@ use core::{
 use r4os_sdk::resources::{JoinHandle, Resources, Timeout, Wait};
 
 pub trait Task: Send + 'static {
+    // Compute threads cannot launch programs. Keep copied loader control on
+    // the ordinary thread role; owned data/preparation tasks opt in here.
+    const COMPUTE: bool = true;
     fn run(&mut self, control: &Control) -> i32;
 }
 pub struct Control {
@@ -91,7 +94,18 @@ impl<'a, P: Task> Worker<'a, P> {
                 task: UnsafeCell::new(task),
             });
         }
-        match unsafe { resources.create_thread(run::<P>, pointer.as_ptr() as u64, stack, 0) } {
+        match unsafe {
+            resources.create_thread(
+                run::<P>,
+                pointer.as_ptr() as u64,
+                stack,
+                if P::COMPUTE {
+                    r4os_sdk::abi::thread_create_flag_compute_worker
+                } else {
+                    0
+                },
+            )
+        } {
             Ok(thread) => Ok(Self {
                 pointer: Some(pointer),
                 thread,
