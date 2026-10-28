@@ -144,8 +144,18 @@ fn parent(c: *Context) !void {
 }
 
 fn producer(c: *Context) !void {
-    try need(c.draw.guiClear(0x00101010) > 0 and c.draw.guiPresent() >= 0, @src());
+    try need(c.draw.guiClear(0x00101010) > 0, @src());
+    if (c.native) {
+        // A new, child-qualified glyph color adds real contents to the same
+        // atlas as retained Desktop text. CPU fixture behavior stays intact.
+        const color: u32 = 0x800000 | ((c.owner.instance_id & 0xffff) << 8) | @as(u32, @truncate(c.owner.generation & 0xff));
+        try need(c.draw.guiDrawText(8, 8, "A", color, 0x00101010) == 1, @src());
+    }
+    try need(c.draw.guiPresent() >= 0, @src());
     trace(c, "WINIMAGE producer static GUI published");
+    // Explicit diagnostic exposure, still inside the original15s producer
+    // budget. It adds no wait or sampler to ordinary application launches.
+    if (c.native) c.sys.sleepTicks(c.sys.ticksFromMilliseconds(250));
     var request: a.WindowGraphicsRequest = .{ .owner = c.owner };
     var discovery: a.WindowGraphicsReply = .{};
     while (true) {

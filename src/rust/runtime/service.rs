@@ -24,6 +24,18 @@ impl From<SdkError> for Error {
         Self::Sdk(error)
     }
 }
+#[derive(Clone, Copy)]
+pub struct Failure {
+    pub sequence: u64,
+    pub operation: u16,
+    pub kind: &'static str,
+    pub raw: Option<i32>,
+    pub site_line: u32,
+    pub had_claim: bool,
+    pub endpoint: u32,
+    pub work_ticket: u64,
+    pub invalidated: bool,
+}
 pub struct Host<'a> {
     services: &'a Services<'a>,
     resources: &'a Resources<'a>,
@@ -38,6 +50,9 @@ pub struct Host<'a> {
     launch: Option<launch::Message>,
     images: Option<images::Snapshot>,
     images_activity: u64,
+    failures: [Option<Failure>; 4],
+    failure_count: u64,
+    failure_next: usize,
 }
 impl<'a> Host<'a> {
     pub fn new(
@@ -72,6 +87,9 @@ impl<'a> Host<'a> {
             launch: None,
             images: None,
             images_activity: 0,
+            failures: [None; 4],
+            failure_count: 0,
+            failure_next: 0,
         })
     }
     pub fn owner(&self) -> a::ProgramProcessHandle {
@@ -233,6 +251,12 @@ impl<'a> Host<'a> {
     }
     pub fn diagnostic_work(&self) -> Option<diagnostic::Work> {
         self.work
+    }
+    /// Copied failure values only. No clock, I/O, status RPC or normal poller.
+    /// Keep them across a connection reset so an explicit owner snapshot can
+    /// identify the operation that actually caused the two-second recovery.
+    pub fn failures(&self) -> (u64, &[Option<Failure>; 4]) {
+        (self.failure_count, &self.failures)
     }
     /// Keep a pending ticket through a lost completion. The controller retains
     /// the copied response and never repeats its operation while retrying ACK.
@@ -398,7 +422,7 @@ impl<'a> Host<'a> {
         Ok(reply)
     }
     pub(crate) fn invalidate(&mut self) {
-        self.fail();
+        self.fail_with(0, "explicit-reset", None);
     }
     fn exchange<I: Wire, O: Wire>(&mut self, operation: u16, request: &I) -> Result<O> {
         self.request
@@ -419,28 +443,87 @@ impl<'a> Host<'a> {
         self.response.resize(response_size, 0);
         self.response.fill(0);
         let connection = self.connection.as_mut().ok_or(Error::InvalidProvider)?;
-        let result = match connection.call(
+        let (result, kind, raw) = match connection.call(
             operation,
             &self.request,
             &mut self.response,
             Timeout::AfterNanos(250_000_000),
         ) {
-            Ok(Call::Response { bytes, .. }) if bytes == response_size => Ok(()),
-            Ok(Call::RemoteFailure(code)) => Err(Error::Raw(code)),
-            Ok(Call::TimedOut) => Err(Error::Raw(a::service_api_result_timeout)),
-            Ok(_) => Err(Error::InvalidProvider),
-            Err(error) => Err(error.into()),
+            Ok(Call::Response { bytes, .. }) if bytes == response_size => (Ok(()), "ok", None),
+            Ok(Call::RemoteFailure(code)) => (Err(Error::Raw(code)), "remote-failure", Some(code)),
+            Ok(Call::TimedOut) => (
+                Err(Error::Raw(a::service_api_result_timeout)),
+                "timeout",
+                Some(a::service_api_result_timeout),
+            ),
+            Ok(_) => (Err(Error::InvalidProvider), "response-size", None),
+            Err(error) => {
+                let raw = if let SdkError::Raw(code) = error {
+                    Some(code)
+                } else {
+                    None
+                };
+                (Err(error.into()), "sdk-error", raw)
+            }
         };
         if result.is_err() {
-            self.fail();
+            // These copied mailbox operations are safe to poll again. A
+            // timeout is not a provider-generation or host-claim receipt.
+            // Keep pending work/launch identities; never repeat their action.
+            let timeout = kind == "timeout"
+                && (operation == launch::EXCHANGE || operation == diagnostic::COMPLETE_OPERATION);
+            let rejected_completion = operation == diagnostic::COMPLETE_OPERATION
+                && kind == "remote-failure"
+                && matches!(
+                    raw,
+                    Some(a::service_api_result_invalid | a::service_api_result_not_found)
+                );
+            if timeout || rejected_completion {
+                self.record_failure(operation, kind, raw, false);
+                if rejected_completion {
+                    // The exact copied completion is no longer accepted.
+                    // This is never restart authorization or an action retry.
+                    self.work = None;
+                }
+            } else {
+                self.fail_with(operation, kind, raw);
+            }
         }
         result
     }
+    #[track_caller]
     fn fail(&mut self) {
+        self.fail_with(0, "validation", None);
+    }
+    #[track_caller]
+    fn fail_with(&mut self, operation: u16, kind: &'static str, raw: Option<i32>) {
+        self.record_failure(operation, kind, raw, true);
         self.claimed = false;
         self.work = None;
         self.launch = None;
         let _ = self.close();
+    }
+    #[track_caller]
+    fn record_failure(
+        &mut self,
+        operation: u16,
+        kind: &'static str,
+        raw: Option<i32>,
+        invalidated: bool,
+    ) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.failures[self.failure_next] = Some(Failure {
+            sequence: self.failure_count,
+            operation,
+            kind,
+            raw,
+            site_line: core::panic::Location::caller().line(),
+            had_claim: self.claimed,
+            endpoint: self.endpoint(),
+            work_ticket: self.work.map_or(0, |work| work.ticket),
+            invalidated,
+        });
+        self.failure_next = (self.failure_next + 1) % self.failures.len();
     }
     pub fn close(&mut self) -> Result<()> {
         self.claimed = false;

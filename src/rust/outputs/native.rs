@@ -323,6 +323,8 @@ impl<'a> Output<'a> {
         Some(super::selection::CaptureState {
             frame: state.cache.frame(),
             reused_captures: state.cache.reused_captures,
+            atlas_reused_layers: state.engine.atlas_reused_layers,
+            asset_misses: state.frame.assets.misses,
             captured_reads: state.reads.captured,
             completed_reads: state.reads.completed,
             failed_reads: state.reads.failed,

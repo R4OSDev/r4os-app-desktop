@@ -34,6 +34,12 @@ unsafe impl Memory for NoExternal {
 }
 const FULL: Rect = Rect::new(0, 0, 8, 8);
 const RIGHT: Rect = Rect::new(4, 2, 2, 4);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssetChange {
+    None,
+    Append,
+    Overwrite,
+}
 fn captured(
     cache: &mut Cache,
     frame: &mut Frame,
@@ -41,26 +47,74 @@ fn captured(
     mode: Mode,
     damage: Rect,
     right: Rect,
-    invalidate_asset: bool,
+    asset_change: AssetChange,
     paints: &Cell<u32>,
 ) {
+    let overwritten = if asset_change == AssetChange::Overwrite {
+        assert!(!engine.active());
+        let old = *frame
+            .commands()
+            .iter()
+            .find(|c| c.texture.is_some())
+            .unwrap();
+        // Fill the real original entry table. On the next frame intern must
+        // evict this old page and actually overwrite its first source tile.
+        assert_eq!(frame.assets.evictions, 0);
+        for n in frame.assets.misses as usize..crate::render::primitive_assets::ENTRY_CAPACITY {
+            let pixel = [0xff200000 | n as u32];
+            frame
+                .assets
+                .intern(View::new(
+                    Format::Argb,
+                    1,
+                    1,
+                    4,
+                    PixelBytes::from_words(&pixel).bytes(),
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            frame.assets.misses,
+            crate::render::primitive_assets::ENTRY_CAPACITY as u64
+        );
+        Some(old)
+    } else {
+        None
+    };
     engine.clear_sources().unwrap();
     frame.set_mirror(false).unwrap();
     cache.start(mode, Some(frame)).unwrap();
-    if invalidate_asset {
+    if asset_change != AssetChange::None {
         // Real atlas insertion changes an existing page's generation. Do not
         // edit an expected generation or the engine's reuse mask in the test.
-        let red = [0xffff0000];
-        frame
+        let pixel = [if asset_change == AssetChange::Append {
+            0xffff0000
+        } else {
+            0xff0000ff
+        }];
+        let entry = frame
             .assets
             .intern(View::new(
                 Format::Argb,
                 1,
                 1,
                 4,
-                PixelBytes::from_words(&red).bytes(),
+                PixelBytes::from_words(&pixel).bytes(),
             ))
             .unwrap();
+        if let Some(old) = overwritten {
+            assert_eq!(
+                (entry.texture, entry.rect),
+                (old.texture.unwrap(), old.source)
+            );
+            assert!(
+                !frame
+                    .assets
+                    .contains(old.content, entry.texture, old.source)
+            );
+            assert_ne!(entry.content, old.content);
+            assert!(frame.assets.evictions > 0);
+        }
     }
     if matches!(mode, Mode::NativeOutput(_)) {
         engine.reuse_capture(cache, frame, Some(damage)).unwrap();
@@ -124,14 +178,36 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
         let mode = Mode::NativeOutput(view);
         let paints = Cell::new(0);
         for (round, damage, bounds, asset, expected_paints) in [
-            (0, FULL, RIGHT, false, 1),
-            (1, Rect::new(0, 0, 1, 1), RIGHT, false, 1),
-            (2, RIGHT, RIGHT, false, 2),
-            (3, FULL, Rect::new(3, 2, 2, 4), false, 3),
-            (4, Rect::new(0, 0, 1, 1), Rect::new(3, 2, 2, 4), true, 4),
-            (5, Rect::new(0, 0, 1, 1), Rect::new(3, 2, 2, 4), false, 4),
+            (0, FULL, RIGHT, AssetChange::None, 1),
+            (1, Rect::new(0, 0, 1, 1), RIGHT, AssetChange::None, 1),
+            (2, RIGHT, RIGHT, AssetChange::None, 2),
+            (3, FULL, Rect::new(3, 2, 2, 4), AssetChange::None, 3),
+            (
+                4,
+                Rect::new(0, 0, 1, 1),
+                Rect::new(3, 2, 2, 4),
+                AssetChange::Append,
+                3,
+            ),
+            (
+                5,
+                Rect::new(0, 0, 1, 1),
+                Rect::new(3, 2, 2, 4),
+                AssetChange::None,
+                3,
+            ),
+            (
+                6,
+                Rect::new(0, 0, 1, 1),
+                Rect::new(3, 2, 2, 4),
+                AssetChange::Overwrite,
+                4,
+            ),
         ] {
             let reused = cache.reused_captures;
+            let draws = engine.primitive_draws;
+            let uploads = engine.jobs.uploaded_bytes;
+            let atlas_reuses = engine.atlas_reused_layers;
             captured(
                 &mut cache,
                 &mut frame,
@@ -162,6 +238,28 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
                 }
             }
             assert_eq!(gpu::visible(), expected, "round{round} original pixels");
+            if round == 4 {
+                assert!(cache.reused_captures > reused);
+                assert_eq!(
+                    engine.primitive_draws, draws,
+                    "foreign tile does not reraster unchanged layers"
+                );
+                assert_eq!(
+                    engine.jobs.uploaded_bytes - uploads,
+                    4,
+                    "real dirty tile upload remains required"
+                );
+                assert!(
+                    engine.atlas_reused_layers > atlas_reuses,
+                    "receipt follows successful GPU completion"
+                );
+            }
+            if round == 6 {
+                assert!(
+                    engine.primitive_draws > draws,
+                    "real tile overwrite/page reset must reraster"
+                );
+            }
         }
         captured(
             &mut cache,
@@ -170,7 +268,7 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
             Mode::Desktop(FULL),
             Rect::new(0, 0, 1, 1),
             Rect::new(3, 2, 2, 4),
-            false,
+            AssetChange::None,
             &paints,
         );
         assert_eq!(paints.get(), 5, "old native mask cannot cross CPU mode");
@@ -183,7 +281,7 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
             mode,
             FULL,
             RIGHT,
-            false,
+            AssetChange::None,
             &paints,
         );
         assert_eq!(paints.get(), 6, "cancel invalidates capture reuse");

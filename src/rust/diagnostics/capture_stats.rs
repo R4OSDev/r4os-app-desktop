@@ -14,6 +14,7 @@ pub fn run(
     caller: Identity,
     sequence: u64,
     observations: &[Option<CaptureObservation>; 4],
+    host: &crate::runtime::service::Host<'_>,
 ) -> Result<(), ()> {
     let path = wire::capture_path(caller, sequence).ok_or(())?;
     // This caller/generation owns only its three report names. Preserve any
@@ -50,13 +51,36 @@ pub fn run(
         }
         report.push_str(",\"capture\":");
         if let Some(s) = observation.state {
-            write!(report, "{{\"frame\":{},\"reused_captures\":{},\"captured_reads\":{},\"completed_reads\":{},\"failed_reads\":{},\"reads_empty\":{},\"external_receipts\":{}}}",s.frame,s.reused_captures,s.captured_reads,s.completed_reads,s.failed_reads,s.reads_empty,s.external_receipts).unwrap();
+            write!(report, "{{\"frame\":{},\"reused_captures\":{},\"atlas_reused_layers\":{},\"asset_misses\":{},\"captured_reads\":{},\"completed_reads\":{},\"failed_reads\":{},\"reads_empty\":{},\"external_receipts\":{}}}",s.frame,s.reused_captures,s.atlas_reused_layers,s.asset_misses,s.captured_reads,s.completed_reads,s.failed_reads,s.reads_empty,s.external_receipts).unwrap();
         } else {
             report.push_str("null");
         }
         report.push('}');
     }
-    report.push_str("]}");
+    let (count, failures) = host.failures();
+    write!(report, "],\"service_failures\":{{\"total\":{},\"retained_capacity\":4,\"scope\":\"Failure-only values; no timestamp, poller or elapsed cause inferred\",\"records\":[", count).unwrap();
+    for (index, failure) in failures.iter().flatten().enumerate() {
+        if index != 0 {
+            report.push(',');
+        }
+        write!(
+            report,
+            "{{\"sequence\":{},\"operation\":{},\"kind\":\"{}\",\"raw\":",
+            failure.sequence, failure.operation, failure.kind
+        )
+        .unwrap();
+        match failure.raw {
+            Some(raw) => write!(report, "{}", raw).unwrap(),
+            None => report.push_str("null"),
+        }
+        write!(
+            report,
+            ",\"site_line\":{},\"had_claim\":{},\"endpoint\":{},\"work_ticket\":{},\"invalidated\":{}}}",
+            failure.site_line, failure.had_claim, failure.endpoint, failure.work_ticket, failure.invalidated
+        )
+        .unwrap();
+    }
+    report.push_str("]}}");
     let path = FilePath::parse(path.as_bytes()).map_err(|_| ())?;
     if env
         .system

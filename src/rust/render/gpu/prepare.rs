@@ -442,6 +442,7 @@ impl Engine {
     pub(super) fn plan_reuse(&mut self, cache: &Cache, recording: Option<&Frame>) {
         self.reuse_layers = [false; layers::CAPACITY];
         self.redraw_regions = [None; layers::CAPACITY];
+        self.atlas_reuse_pending = 0;
         let Some(frame) = recording else {
             return;
         };
@@ -462,6 +463,7 @@ impl Engine {
             let mut matched = 0;
             let mut comparable = true;
             let mut changed = Rect::ZERO;
+            let mut unrelated_atlas_change = false;
             for command in frame.commands().iter().filter(|c| c.layer as usize == i) {
                 let Some(old) = previous.next() else {
                     comparable = false;
@@ -471,12 +473,17 @@ impl Engine {
                     changed = changed.merged(footprint(command)).merged(footprint(old));
                 }
                 if let Some(texture) = command.texture {
-                    let generation = frame.assets.texture(texture as usize).generation;
-                    if generation == 0
-                        || generation != self.snapshot_assets[texture as usize]
-                        || generation != self.resources.assets[texture as usize].generation
-                    {
+                    if !frame.assets.resident_content(
+                        command.content,
+                        texture,
+                        command.source,
+                        self.resources.assets[texture as usize].generation,
+                    ) {
                         changed = changed.merged(footprint(command));
+                    } else if frame.assets.texture(texture as usize).generation
+                        != self.snapshot_assets[texture as usize]
+                    {
+                        unrelated_atlas_change = true;
                     }
                 }
                 matched += 1;
@@ -488,6 +495,9 @@ impl Engine {
                 // pixels outside this region remain resident.
                 self.reuse_layers[i] = changed.is_empty();
                 self.redraw_regions[i] = (!changed.is_empty()).then_some(changed);
+                if changed.is_empty() && unrelated_atlas_change {
+                    self.atlas_reuse_pending += 1;
+                }
             } else if matched != 0 {
                 // GUI delta chains can change command count. The existing
                 // output damage contract still bounds all changed pixels on
@@ -543,8 +553,10 @@ impl Engine {
         }
         for command in &self.snapshot {
             if let Some(texture) = command.texture {
-                let generation = frame.assets.texture(texture as usize).generation;
-                if generation == 0 || generation != self.snapshot_assets[texture as usize] {
+                if !frame
+                    .assets
+                    .contains(command.content, texture, command.source)
+                {
                     self.reuse_layers[command.layer as usize] = false;
                 }
             }
@@ -575,6 +587,12 @@ impl Engine {
         if frame.mirror() {
             return;
         }
+        // remember follows the actual successful output completion. A failed
+        // plan or cancelled GPU transaction never becomes a reuse receipt.
+        self.atlas_reused_layers = self
+            .atlas_reused_layers
+            .saturating_add(self.atlas_reuse_pending);
+        self.atlas_reuse_pending = 0;
         self.snapshot.extend_from_slice(frame.commands());
         for (i, entry) in cache.entries().iter().enumerate() {
             self.snapshot_images[i] = if entry.frame == cache.frame() && !entry.external {
@@ -622,6 +640,7 @@ fn same_command(x: &Command, y: &Command) -> bool {
     };
     x.layer == y.layer
         && x.texture == y.texture
+        && x.content == y.content
         && x.source == y.source
         && x.target == y.target
         && x.scissor == y.scissor

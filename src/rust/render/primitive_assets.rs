@@ -2,6 +2,7 @@
 //! and LRU admission. Pages used by the current frame cannot be evicted.
 use super::{geometry::Rect, primitive_image::View};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 pub const TEXTURE_CAPACITY: usize = 32;
 pub const ENTRY_CAPACITY: usize = 2048;
 pub const ATLAS_COUNT: usize = 8;
@@ -17,6 +18,21 @@ pub enum Error {
     Graphics,
 }
 pub type Result<T> = core::result::Result<T, Error>;
+// New contents receive a unique version even across distinct output caches.
+// Hits do not touch this counter. Overflow refuses admission, never aliases
+// an old tile or an uploaded page after eviction/recreation.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+fn next_generation(counter: &AtomicU64) -> Result<u64> {
+    counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
+        .map(|prior| prior + 1)
+        .map_err(|_| Error::Overflow)
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Content {
+    pub slot: u16,
+    pub revision: u64,
+}
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct Entry {
@@ -25,6 +41,7 @@ pub struct Entry {
     pub key: [u8; 32],
     pub texture: u8,
     pub rect: Rect,
+    pub content: Content,
 }
 #[derive(Default)]
 pub struct Texture {
@@ -64,7 +81,6 @@ pub struct Cache {
     budget: usize,
     reserved: usize,
     frame: u64,
-    generation: u64,
     pub hits: u64,
     pub misses: u64,
     pub converted_pixels: u64,
@@ -87,7 +103,6 @@ impl Cache {
             budget,
             reserved: bytes,
             frame: 0,
-            generation: 0,
             hits: 0,
             misses: 0,
             converted_pixels: 0,
@@ -105,6 +120,29 @@ impl Cache {
     }
     pub fn texture(&self, index: usize) -> &Texture {
         &self.textures[index]
+    }
+    pub fn contains(&self, content: Content, texture: u8, source: Rect) -> bool {
+        content.revision != 0
+            && self
+                .entries
+                .get(content.slot as usize)
+                .is_some_and(|entry| {
+                    entry.live
+                        && entry.content == content
+                        && entry.texture == texture
+                        && entry.rect == source
+                })
+    }
+    pub fn resident_content(
+        &self,
+        content: Content,
+        texture: u8,
+        source: Rect,
+        uploaded: u64,
+    ) -> bool {
+        self.contains(content, texture, source)
+            && uploaded >= content.revision
+            && uploaded <= self.textures[texture as usize].generation
     }
     /// The composition owner calls this only after the preceding frame's
     /// worker jobs have physically drained; a Rust drop is not that receipt.
@@ -224,7 +262,7 @@ impl Cache {
             .ok_or(Error::Capacity)?;
         let texture = &mut self.textures[index];
         let rect = texture.placement(width, height).ok_or(Error::Capacity)?;
-        let generation = self.generation.checked_add(1).ok_or(Error::Overflow)?;
+        let generation = next_generation(&GENERATION)?;
         let mut opaque = true;
         for y in 0..height as usize {
             for x in 0..width as usize {
@@ -241,7 +279,6 @@ impl Cache {
         texture.y = rect.y as u32;
         texture.row_height = texture.row_height.max(height);
         texture.generation = generation;
-        self.generation = generation;
         texture.pinned = self.frame;
         texture.touched = self.frame;
         texture.dirty = Some(texture.dirty.map_or(rect, |prior| prior.merged(rect)));
@@ -251,6 +288,10 @@ impl Cache {
             key,
             texture: index as u8,
             rect,
+            content: Content {
+                slot: u16::try_from(entry_index).map_err(|_| Error::Capacity)?,
+                revision: generation,
+            },
         };
         self.entries[entry_index] = entry;
         self.misses = self.misses.saturating_add(1);
@@ -305,6 +346,7 @@ mod tests {
         };
         let first = atlas.intern(view).unwrap();
         let generation = atlas.texture(first.texture as usize).generation;
+        assert!(atlas.contains(first.content, first.texture, first.rect));
         atlas.intern(view).unwrap();
         assert_eq!(atlas.hits, 1);
         assert_eq!(atlas.converted_pixels, 4);
@@ -315,6 +357,9 @@ mod tests {
         atlas.intern(view).unwrap();
         assert_eq!(atlas.misses, 3);
         assert!(atlas.texture(first.texture as usize).generation > generation);
+        assert!(atlas.contains(first.content, first.texture, first.rect));
+        assert!(atlas.resident_content(first.content, first.texture, first.rect, generation));
+        assert!(!atlas.resident_content(first.content, first.texture, first.rect, 0));
         atlas.uploaded(first.texture as usize, generation);
         assert!(atlas.texture(first.texture as usize).dirty.is_some());
         let mut large = [0x123456u32; 129 * 129];
@@ -338,6 +383,7 @@ mod tests {
         atlas.start(2).unwrap();
         atlas.intern(large_view()).unwrap();
         assert!(atlas.evictions != 0 && atlas.reserved <= atlas.budget);
+        assert!(!atlas.contains(first.content, first.texture, first.rect));
         let conversions = atlas.converted_pixels;
         large[7] ^= 1;
         atlas
@@ -354,6 +400,16 @@ mod tests {
         // transparent pixels elsewhere on the same atlas page are irrelevant.
         let mut opacity = Cache::new(metadata + 512 * 512 * 4).unwrap();
         opacity.start(1).unwrap();
+        let duplicate = opacity.intern(view).unwrap();
+        assert_ne!(
+            duplicate.content, first.content,
+            "new cache cannot alias an old content handle"
+        );
+        assert!(!opacity.contains(first.content, first.texture, first.rect));
+        let exhausted = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(next_generation(&exhausted), Ok(u64::MAX));
+        assert_eq!(next_generation(&exhausted), Err(Error::Overflow));
+        assert_eq!(exhausted.load(Ordering::Relaxed), u64::MAX);
         let mixed = [0xff123456, 0x80123456];
         let argb = View::new(
             Format::Argb,

@@ -644,7 +644,9 @@ impl Owner {
                 }
             }
             Op::CaptureStats => {
-                if super::capture_stats::run(env, r.caller, r.item, &v.output_captures).is_err() {
+                if super::capture_stats::run(env, r.caller, r.item, &v.output_captures, host)
+                    .is_err()
+                {
                     out.result = a::service_api_result_invalid;
                 }
             }

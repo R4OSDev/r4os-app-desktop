@@ -194,3 +194,43 @@ image reads/returns (2->4 each), zero remaining reads/receipts, and three exact
 exit0 reaps. The earlier failed originals remain distinct observations for66;
 this functional pass supplies no measured elapsed speedup or physical receipt.
 One final STANDARD59 06365b71-c83d-4402-9d2e-fceea278e30e has30samples/4workers/metric2/all6scores validated locally and by complete server original/reference readback. Original SHA57905aa20c87623f0519ac7151fd70e6b41e6e7a8e802101fee6ca28e35a0cf2. Unisolated scores do not establish a desktop speedup. Publication is coordinated by the workspace roadmap.
+
+## Stable atlas contents (0.87.60)
+
+Desktop175 records a tile's entry slot and unique nonwrapping content version
+in each primitive. Capture and raster reuse validate that exact live entry,
+texture and source rectangle in constant time. Adding a disjoint glyph or icon
+to the same page preserves existing tiles. Eviction/reset invalidates their
+entries; a recreated cache cannot alias an old content reference. The unique
+version is allocated only on a cache miss; hits keep their existing work.
+
+Page versions still control dirty uploads, physical upload completion and GPU
+residency. Native images, fences, source returns, view/damage/pixel guards and
+original budgets/capacities remain. No dirty-history scan or normal sampler.
+The existing productive owner case now proves an actual four-byte foreign-tile
+upload with no extra CPU paint/raster, then a real2048-entry eviction, overwrite
+of the old source rectangle and required reraster against original GPU pixels.
+Existing14 owner cases/3geometry/1clock pass; version exhaustion refuses a new
+identity. Matching Spectra88 reads explicit asset misses and atlas layer reuses
+counted only after actual successful GPU completion. Its native WINIMAGE104
+branch publishes a child-qualified new glyph within the original15s budget;
+the CPU branch and real2BO/fence/Take/Return/reuse/Close oracles remain.
+Current KVM4 original long cases and native16 graphics/audio/resource checks
+pass; one final STANDARD is validated locally and by R4OS Server. No elapsed speedup or physical visibility
+claim follows from the functional checks.
+
+Desktop177 also keeps the existing WINSVC claim through a timeout of the
+idempotent copied4739 mailbox poll or4503 completion acknowledgement. It
+retains the exact work/launch receipt and never repeats its action. A
+definitive stale completion discards only that old job; actual provider,
+generation and response-validation failures still invalidate the host.
+The original250ms limit remains. Failure-only owner values now distinguish
+retained failures from invalidations, with no normal clock, RPC or sampler.
+This addresses the observed two-second recovery amplification; it does not
+isolate the initial scheduling delay or qualify native rendering.
+
+Current qualification and limits for Desktop177/WINSVC24/Spectra91/NVIDIA336
+are recorded in `Docs/Core/Parallelitaet.txt`, section0.87.60. The observerless
+native check proves new atlas content, completed unchanged-layer reuse, real
+GPU image returns and exact child reaps. Earlier failed originals remain
+separate evidence. Physical sight/hearing/latency checks were explicitly skipped.

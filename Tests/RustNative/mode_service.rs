@@ -1,6 +1,7 @@
 //! The actual Host and owned SDK I/O boundary. A controlled peer retains the
 //! original addresses until exact Close ACK while main-task input progresses.
 use super::*;
+use crate::{diagnostics::wire as diagnostic, runtime::launch_wire as launch};
 use r4os_sdk::{App, ImportSpec, StartupInfo};
 use std::{
     sync::Mutex,
@@ -28,6 +29,9 @@ struct Peer {
     refuse: bool,
     malformed: bool,
     image_calls: u32,
+    next_error: Option<(u16, i32, i32)>,
+    work: Option<diagnostic::Work>,
+    launch: Option<launch::Message>,
 }
 static CASE: Mutex<()> = Mutex::new(());
 static STATE: Mutex<Peer> = Mutex::new(Peer {
@@ -41,6 +45,9 @@ static STATE: Mutex<Peer> = Mutex::new(Peer {
     refuse: false,
     malformed: false,
     image_calls: 0,
+    next_error: None,
+    work: None,
+    launch: None,
 });
 unsafe extern "C" fn open(_: *const u8, out: *mut a::ServiceInfo) -> i32 {
     let mut peer = STATE.lock().unwrap();
@@ -86,9 +93,63 @@ unsafe extern "C" fn call(
         op != a::window_mode_op_exchange,
         "mode work blocked in synchronous call"
     );
+    {
+        let mut peer = STATE.lock().unwrap();
+        if let Some((operation, raw, status)) = peer.next_error {
+            if operation == op {
+                peer.next_error = None;
+                unsafe {
+                    header.write(a::ServiceMessageHeader {
+                        status,
+                        ..Default::default()
+                    })
+                };
+                return raw;
+            }
+        }
+    }
     let source = unsafe { core::slice::from_raw_parts(request, count as usize) };
     let out = unsafe { core::slice::from_raw_parts_mut(response, capacity as usize) };
     match op {
+        launch::EXCHANGE => {
+            let size = a::TrayDesktopExchange::SIZE;
+            let mut value: a::TrayDesktopExchange = wire::decode(source).unwrap();
+            value.desktop_epoch = value.desktop_owner.generation;
+            wire::encode(&value, &mut out[..size]);
+            let peer = STATE.lock().unwrap();
+            diagnostic::encode_work(
+                (&mut out[size..size + diagnostic::WORK_SIZE])
+                    .try_into()
+                    .unwrap(),
+                peer.work,
+            );
+            launch::encode(
+                peer.launch.unwrap_or(launch::Message {
+                    broker: launch::Identity {
+                        instance: 31,
+                        generation: 9,
+                    },
+                    ..Default::default()
+                }),
+                (&mut out[size + diagnostic::WORK_SIZE..])
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+        diagnostic::COMPLETE_OPERATION => {
+            let mut peer = STATE.lock().unwrap();
+            let ticket = u64::from_le_bytes(source[..8].try_into().unwrap());
+            if peer.work.is_none_or(|work| work.ticket != ticket) {
+                unsafe {
+                    header.write(a::ServiceMessageHeader {
+                        status: a::service_api_result_invalid,
+                        ..Default::default()
+                    })
+                };
+                return 0;
+            }
+            peer.work = None;
+        }
         images::OPERATION => {
             let mut peer = STATE.lock().unwrap();
             peer.image_calls += 1;
@@ -132,6 +193,124 @@ unsafe extern "C" fn call(
         })
     };
     capacity as i32
+}
+fn copied_work() -> diagnostic::Work {
+    diagnostic::Work {
+        ticket: 77,
+        deadline_tick: 900,
+        broker: diagnostic::Identity {
+            instance: 31,
+            generation: 9,
+        },
+        request: diagnostic::Request {
+            op: diagnostic::Op::CaptureStats,
+            caller: diagnostic::Identity {
+                instance: 3,
+                generation: 7,
+            },
+            target: diagnostic::Identity::default(),
+            dx: 0,
+            dy: 0,
+            item: 0,
+            deadline_tick: 900,
+        },
+    }
+}
+#[test]
+fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
+    with(|services, resources, owner| {
+        *STATE.lock().unwrap() = Peer::default();
+        let mut host = Host::new(services, resources, owner).unwrap();
+        host.initialize().unwrap();
+        let work = copied_work();
+        let launch = launch::Message {
+            broker: launch::Identity {
+                instance: 31,
+                generation: 9,
+            },
+            request: launch::Identity {
+                instance: 4,
+                generation: 8,
+            },
+            desktop: launch::Identity {
+                instance: owner.instance_id,
+                generation: owner.generation,
+            },
+            phase: launch::STARTING,
+            ..Default::default()
+        };
+        {
+            let mut peer = STATE.lock().unwrap();
+            peer.work = Some(work);
+            peer.launch = Some(launch);
+        }
+        let request = a::TrayDesktopExchange {
+            desktop_owner: owner,
+            ..Default::default()
+        };
+        host.tray(&request).unwrap();
+        STATE.lock().unwrap().next_error =
+            Some((launch::EXCHANGE, a::service_api_result_timeout, 0));
+        assert!(host.tray(&request).is_err());
+        assert!(
+            host.claimed(),
+            "a cancelled mailbox poll must not reset the Desktop's live host"
+        );
+        assert_eq!(host.diagnostic_work(), Some(work));
+        assert_eq!(host.launch_mailbox(), Some(launch));
+        host.tray(&request).unwrap();
+        assert_eq!(host.diagnostic_work(), Some(work));
+        assert_eq!(host.launch_mailbox(), Some(launch));
+        assert_eq!(
+            STATE.lock().unwrap().open,
+            1,
+            "no reopen or two-second recovery"
+        );
+        // A retired provider still invalidates the common connection.
+        STATE.lock().unwrap().next_error =
+            Some((launch::EXCHANGE, a::service_api_result_not_running, 0));
+        assert!(host.tray(&request).is_err());
+        assert!(!host.claimed());
+    });
+}
+#[test]
+fn copied_completion_timeout_then_stale_receipt_drops_only_exact_work() {
+    with(|services, resources, owner| {
+        *STATE.lock().unwrap() = Peer::default();
+        let mut host = Host::new(services, resources, owner).unwrap();
+        host.initialize().unwrap();
+        let work = copied_work();
+        STATE.lock().unwrap().work = Some(work);
+        host.tray(&a::TrayDesktopExchange {
+            desktop_owner: owner,
+            ..Default::default()
+        })
+        .unwrap();
+        let response = diagnostic::Response::new(work.request, diagnostic::Identity::of(owner));
+        STATE.lock().unwrap().next_error = Some((
+            diagnostic::COMPLETE_OPERATION,
+            a::service_api_result_timeout,
+            0,
+        ));
+        assert!(host.diagnostic_complete(work, response).is_err());
+        assert!(host.claimed());
+        assert_eq!(
+            host.diagnostic_work(),
+            Some(work),
+            "controller retains its copied response through a lost ACK"
+        );
+        // The broker consumed the original result before its ACK was lost.
+        STATE.lock().unwrap().work = None;
+        assert!(host.diagnostic_complete(work, response).is_err());
+        assert!(host.claimed());
+        assert_eq!(host.diagnostic_work(), None);
+        assert_eq!(STATE.lock().unwrap().open, 1);
+        host.tray(&a::TrayDesktopExchange {
+            desktop_owner: owner,
+            ..Default::default()
+        })
+        .unwrap();
+    });
 }
 unsafe extern "C" fn submit(
     _: u32,
@@ -367,6 +546,18 @@ fn image_markers_follow_activity_without_tray_delay_and_close_revokes_snapshot()
         assert!(host.refresh_images(8, false).is_err());
         assert!(!host.claimed());
         assert!(host.image_marker(surface).is_none());
+        // The copied failure receipt must preserve the original refusal and
+        // closed owner without an implicit reopen or an observing status RPC.
+        let (count, failures) = host.failures();
+        assert_eq!(count, 1);
+        let failure = failures.iter().flatten().next().unwrap();
+        assert!(failure.had_claim && failure.site_line != 0);
+        assert!(failure.invalidated);
+        assert_eq!(failure.kind, "validation");
+        let calls = STATE.lock().unwrap().image_calls;
+        assert_eq!(host.failures().0, 1);
+        assert_eq!(STATE.lock().unwrap().image_calls, calls);
+        assert!(!host.claimed());
     });
 }
 #[test]

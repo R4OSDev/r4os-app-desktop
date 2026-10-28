@@ -6,7 +6,7 @@ use super::{
     geometry::Rect,
     output_geometry as geometry,
     pixels::PixelBytes,
-    primitive_assets::{Cache, Error, Result},
+    primitive_assets::{Cache, Content, Error, Result},
     primitive_image::{Format, Paint, Picture, View},
     scene::{CpuScene, Indexed8Nearest, Mapping, Xrgb32Nearest, intersect},
 };
@@ -17,6 +17,7 @@ pub const CAPACITY: usize = 8192;
 pub struct Command {
     pub layer: u8,
     pub texture: Option<u8>,
+    pub content: Content,
     pub source: Rect,
     pub target: Rect,
     pub scissor: Rect,
@@ -30,6 +31,7 @@ impl Command {
         Self {
             layer,
             texture: None,
+            content: Content::default(),
             source: Rect::ZERO,
             target: rect,
             scissor: rect,
@@ -299,6 +301,7 @@ impl Frame {
                 self.append(Command {
                     layer: active.layer,
                     texture: Some(entry.texture),
+                    content: entry.content,
                     source: entry.rect,
                     target: self.local(target)?,
                     scissor: self.local(clip)?,
@@ -353,6 +356,7 @@ impl Frame {
         self.append(Command {
             layer: active.layer,
             texture: Some(entry.texture),
+            content: entry.content,
             source: entry.rect,
             target: self.local(coverage)?,
             scissor: self.local(clip)?,

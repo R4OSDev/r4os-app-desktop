@@ -116,6 +116,8 @@ pub struct Engine {
     snapshot: Vec<Command>,
     snapshot_images: [g::R4GfxResource; layers::CAPACITY],
     snapshot_assets: [u64; primitive_assets::TEXTURE_CAPACITY],
+    atlas_reuse_pending: u64,
+    pub atlas_reused_layers: u64,
     reuse_layers: [bool; layers::CAPACITY],
     redraw_regions: [Option<Rect>; layers::CAPACITY],
     batch_enabled: bool,
@@ -180,6 +182,8 @@ impl Engine {
             snapshot: Vec::new(),
             snapshot_images: [g::R4GfxResource::default(); layers::CAPACITY],
             snapshot_assets: [0; primitive_assets::TEXTURE_CAPACITY],
+            atlas_reuse_pending: 0,
+            atlas_reused_layers: 0,
             reuse_layers: [false; layers::CAPACITY],
             redraw_regions: [None; layers::CAPACITY],
             batch_enabled: false,
@@ -305,6 +309,7 @@ impl Engine {
         }
         self.target_damage = [None; 3];
         self.snapshot.clear();
+        self.atlas_reuse_pending = 0;
     }
     pub fn composition_damage(
         &mut self,

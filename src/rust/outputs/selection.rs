@@ -154,6 +154,8 @@ pub struct Execution {
 pub struct CaptureState {
     pub frame: u64,
     pub reused_captures: u64,
+    pub atlas_reused_layers: u64,
+    pub asset_misses: u64,
     pub captured_reads: u64,
     pub completed_reads: u64,
     pub failed_reads: u64,
