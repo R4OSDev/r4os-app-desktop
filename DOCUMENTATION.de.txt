@@ -317,3 +317,97 @@ rote Originale bleiben in66; physische Sicht/Hoeren/Latenz SKIP.
 Genau1finalSTANDARD62 e9f64dc9-ec35-4765-9cd1-c7220270545a/30/4/metric2/6valid:
 lokal und R4OS Server vollstaendig validiert; OriginalSHA256 a87bc2f70d68f2111b589f93f15f6e0b6d026372e1e84407cd9497bac8e78c23.
 Vollstaendige Belege: Docs/Core/Parallelitaet.txt/0.87.62 und Laufarchiv.
+
+0.87.63 / Desktop181: getrennte Damageflaechen bis zur Ausgabereparatur
+-------------------------------------------------------------------
+SPEED-052: Native Capture, CPU-Replay und die neueste wartende Szene
+behalten bis zu acht Rechtecke. Auch jedes der drei moeglichen Ausgabebilder
+haelt eine eigene begrenzte Liste aller seit seinem letzten gueltigen Inhalt
+fehlenden Aenderungen. Erst nach realem erfolgreichem Abschluss wird genau
+diese Bildschuld geleert. Neu angelegte/invalidierte Bilder bleiben voll zu
+reparieren; Abbruch und Generationswechsel erhalten ihre bisherigen Regeln.
+
+Ueberlappende Rechtecke werden vereinigt. Erst das neunte verlangt die
+vorhandene Wahl des Paars mit der kleinsten zusaetzlichen Flaeche; deren
+neue Ueberlappungen werden ebenfalls vereinigt. Kein Bereich wird dadurch
+doppelt komponiert. Skalierung und Drehung nutzen die gepruefte Viewport-
+Projektion. Bei anderen Skalen als120 bleiben ein logischer Texel und ein
+nativer Pixel als konservativer Rand um Samplegrid/Rundung erhalten;
+erst danach wird an die Ausgabegrenzen beschnitten. Der vorhandene
+Nearest-Sampler bleibt unveraendert. Ein skalierter oder gedrehter View
+verliert seine partielle Reparatur nicht mehr allein wegen seiner Geometrie.
+
+Uploads und Layerprimitive bleiben einmalige Vorbereitung. Jede getrennte
+Ausgaberegion durchlaeuft danach Clear/Layerreihenfolge und gegebenenfalls
+Farbencode mit den bisherigen echten Jobabhaengigkeiten und Quittungen.
+Quanten, Deadlines, Bildleihen, Sichtbarkeiten und Abbau sind unveraendert.
+Eine leere Reparatur darf ohne erfundenen GPU-Job dargestellt werden.
+Die bestehende partielle Rasterung eines einzelnen Layers darf weiterhin
+ein konservatives Rechteck nutzen; diese Aenderung betrifft insbesondere
+die nachfolgende Komposition und Ausgabekonvertierung. Der separate
+Remote-Capture-Adapter erhaelt weiterhin sein bisheriges einzelnes Copy-
+Rechteck; das verdichtet nicht die GPU-Reparaturliste.
+
+Der vorhandene explizite CaptureStats-Bericht ergaenzt composed_regions,
+composed_pixels, composition_envelope_pixels und multi_region_frames.
+Sie zaehlen nur erfolgreich physisch beendete Kompositionen. Pixel meint
+die Summe der Ausgaberegionen, nicht alle Layer-/Raster-/Shaderzugriffe.
+Die Zaehler erzeugen weder Sampler noch neuen RPC oder Zeitmessung.
+
+Lokale Qualifikation:33 Rust-Besitzerfaelle,3 gemeinsame Geometriefaelle
+und1 genauer Uhrfall;461 aktuelle Eingabehashes und normaler D181-Build.
+138 echte Bildvergleiche durch den originalen GPU-/Readbackbesitzer:
+zwei unterschiedliche Bildalter, vier Drehungen, Skalen60/120/150/180,
+echte Texturatlas-Abtastung mit transparentem/teiltransparentem Hintergrund,
+lineare Komposition/Encode und getrennt direkte SDR-Ausgabe. Referenzbilder
+werden jeweils voll invalidiert und neu aufgebaut; exakte Pixel, freie
+Jobs/Bilder sowie unveraenderte Abschlussvertraege gelten weiter.
+Zwei entfernte Einpixel-Aenderungen bei Skala120 reparieren2 statt64Pixel:
+2 direkte Kompositionsjobs statt1 beziehungsweise4 lineare Kompositions-
+und Encodejobs statt2. Rasterjobs werden separat abgezogen. Das belegt
+Flaeche gegen Submitzahl, keinen gemessenen Zeitgewinn. Der originale
+Neun-Punkte-Fall behaelt8Regionen/10Pixel, und CPU-Replay behaelt einen
+unveraenderten Layer zwischen zwei entfernten Damageflaechen.
+KVM4Q1: SMP, DESKTOP HOST/RESTART/CAPTURE/LAUNCH, CPUWINIMAGE und alle
+originalen langen BASIC-/GB-/SNES60s-Vertraege einschliesslich Close/Reap
+bestanden. BOOT417 und fuenf Module direkt aus dem Gastimage abgeglichen;
+normaler Poweroff0. Kein neuer63-Fachlauf musste wiederholt werden.
+
+OssiPC:63/417/D181/W24/S92/N337,16 konfiguriert/schedulierbar. Das einzelne
+5403217Byte-Paket wurde voll transportverglichen, VERIFY/STAGE, einmal
+COMMIT, Batch22cleanup und normaler frischer Boot56.253s. D181/W24/S92/N337
+wurden anschliessend alle frisch vollstaendig gelesen und byteverglichen.
+CONFIG503 bleibt original/R4NV19automatic native-cpu/Boot1920x1080.
+Originaler beobachterloser REPLAY mit gleichem Device4/Target6:
+sichtbar quittierte Frames10->18, Regionen14->24, Mehrregionenframes4->6,
+reparierte Pixel5677100->8190188, Huellrechtecke11987648->17566544.
+Damit2513088 reparierte gegen5578896 Huellpixel im beobachteten Intervall;
+Hintergrundarbeit ist enthalten, kein isolierter Zeit-/Latenzvergleich.
+CPU-Reuse190->262/AtlasReuse50->68/Misses255->257, zwei echte native
+Bildleseleihen zurueck, drei genaue Exit0-Reaps, Rest0/Fehlerhistorien0.
+Normaler PostGPU-Neustart54.417s; aktuelles REBOOT.LOG belegt
+nativeDMA stopped/resources0/Driver- und Display-ShutdownOK/warm417.
+Terminaler FLR ist kein allgemeiner graceful- oder Hotmodul-Unloadbeleg.
+Keine erzwungene Recovery; naechste17 unbenutzt. Drei eigene native Exporte
+nach vollstaendigem GET-Vergleich exakt entfernt, Originale lokal erhalten.
+
+Unveraenderter Kernel417 verwendet die Original59Full2/Clock1/native16-
+CPU/FPU/Lifecycle/Idle-Belege. N337 Original14x2/Ring/sequenzielleAudio
+stammen aus61, Spectra92 Besitzer/Build aus62; keine neuen Laeufe behauptet.
+Physische Sicht/Hoeren/Eingabelatenz SKIP. Skalierungs-/Rotationsprofile
+sind auf dem Host geprueft; am OssiPC wurde kein solches Profil umgeschaltet
+oder als neue Hardwareabnahme ausgegeben. Die18 frueheren unabhaengigen
+Fehlbeobachtungen bleiben fuer66 erhalten; dieser Pass isoliert ihre Ursachen
+nicht und beweist weder Noise noch eine allgemeine Fehlerbehebung.
+
+Genau ein finaler STANDARD63: 8525c025-d292-4fd2-b0e9-b5e055d1cc25, Suite3/Primaermetrik2,
+30 Samples/je4vollstaendigeKVM-Worker/sechs gueltige Scores.
+Status: lokal und R4OS Server vollstaendig validiert.
+OriginalSHA256 eee862fd038a9197b4ae05161a517e0454c3f029687c93738203ea488ff33dfe
+Unisolierter Vergleich zu62, kein Beschleunigungsfaktor oder Score-Rerun.
+Originale/Rohdaten/Arbeits-/Artefakt-/Vergleichskontexte/ServervollGET und
+frischerReferenzGET/rekursiveSHA256SUMS:
+ExFiles/Reports/Benchmarks/8525c025-d292-4fd2-b0e9-b5e055d1cc25/.
+Eines von151Modulen geaendert,150gleich; Kernel417/SDK105/Contract54 gleich.
+141kanonischeModule/1057Testeintraege/483Docs. PublicFullSlim51 und
+Recovery65 bleiben getrennte Releasearbeiten.

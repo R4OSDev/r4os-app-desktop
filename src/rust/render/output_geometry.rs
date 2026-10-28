@@ -125,3 +125,31 @@ pub fn raster_rect(view: topology::Viewport, value: Rect) -> Result<Rect> {
         i32::try_from(r[3]).map_err(|_| Error::Bounds)?,
     ))
 }
+
+/// Damage covers every sample influenced by the logical change. Exact
+/// unit-scale rotation mapping uses the normal raster edges. Other scales
+/// retain a conservative logical-texel and destination-pixel margin around
+/// the sample grid and rounded edges. The current nearest sampler is unchanged;
+/// clipping happens only after projection.
+pub fn damage_rect(view: topology::Viewport, value: Rect) -> Result<Option<Rect>> {
+    let Some(clipped) = super::scene::intersect(logical(view)?, value) else {
+        return Ok(None);
+    };
+    let scaled = view.scale != topology::SCALE_UNIT;
+    let projected = raster_rect(
+        view,
+        if scaled {
+            clipped.inset(-1, -1)
+        } else {
+            clipped
+        },
+    )?;
+    Ok(super::scene::intersect(
+        if scaled {
+            projected.inset(-1, -1)
+        } else {
+            projected
+        },
+        native(view),
+    ))
+}

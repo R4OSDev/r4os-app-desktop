@@ -52,7 +52,7 @@ pub fn run(
         }
         report.push_str(",\"capture\":");
         if let Some(s) = observation.state {
-            write!(report, "{{\"frame\":{},\"reused_captures\":{},\"atlas_reused_layers\":{},\"asset_misses\":{},\"captured_reads\":{},\"completed_reads\":{},\"failed_reads\":{},\"reads_empty\":{},\"external_receipts\":{},\"prepared_while_busy\":{},\"coalesced_scenes\":{},\"prepared_with_gpu_jobs\":{},\"prepared_during_worker\":{},\"pending_scene\":{}}}",s.frame,s.reused_captures,s.atlas_reused_layers,s.asset_misses,s.captured_reads,s.completed_reads,s.failed_reads,s.reads_empty,s.external_receipts,s.prepared_while_busy,s.coalesced_scenes,s.prepared_with_gpu_jobs,s.prepared_during_worker,s.pending_scene).unwrap();
+            write!(report, "{{\"frame\":{},\"reused_captures\":{},\"atlas_reused_layers\":{},\"asset_misses\":{},\"captured_reads\":{},\"completed_reads\":{},\"failed_reads\":{},\"reads_empty\":{},\"external_receipts\":{},\"prepared_while_busy\":{},\"coalesced_scenes\":{},\"prepared_with_gpu_jobs\":{},\"prepared_during_worker\":{},\"pending_scene\":{},\"composed_regions\":{},\"composed_pixels\":{},\"composition_envelope_pixels\":{},\"multi_region_frames\":{}}}",s.frame,s.reused_captures,s.atlas_reused_layers,s.asset_misses,s.captured_reads,s.completed_reads,s.failed_reads,s.reads_empty,s.external_receipts,s.prepared_while_busy,s.coalesced_scenes,s.prepared_with_gpu_jobs,s.prepared_during_worker,s.pending_scene,s.composed_regions,s.composed_pixels,s.composition_envelope_pixels,s.multi_region_frames).unwrap();
         } else {
             report.push_str("null");
         }

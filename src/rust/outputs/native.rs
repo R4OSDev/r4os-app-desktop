@@ -5,7 +5,7 @@ use crate::{
     hosted::{native_images::Reads, replay::Shapes, window_image::Memory, window_set::Set},
     render::{
         compositor::{Scene, Stats},
-        geometry::Rect,
+        geometry::{Rect, Regions},
         gpu::{
             self,
             device::{Device, Error as DeviceError},
@@ -60,7 +60,7 @@ struct State {
     frame: Frame,
     reads: Reads,
     capture: RemoteCapture,
-    capture_damage: Option<Rect>,
+    capture_damage: Option<Regions>,
     capture_cursor: CaptureCursor,
 }
 impl State {
@@ -79,7 +79,9 @@ impl State {
             self.capture.record(
                 self.engine.output_index,
                 self.cache.frame(),
-                self.capture_damage.unwrap_or(bounds),
+                self.capture_damage
+                    .and_then(|r| r.bounds())
+                    .unwrap_or(bounds),
                 view,
                 self.capture_cursor,
             );
@@ -370,6 +372,10 @@ impl<'a> Output<'a> {
             prepared_with_gpu_jobs: self.scenes_prepared_with_gpu_jobs,
             prepared_during_worker: self.scenes_prepared_during_worker,
             pending_scene: newest.is_some_and(|s| s.captured),
+            composed_regions: state.engine.composed_regions,
+            composed_pixels: state.engine.composed_pixels,
+            composition_envelope_pixels: state.engine.composition_envelope_pixels,
+            multi_region_frames: state.engine.multi_region_frames,
         })
     }
     pub fn execution_observation(&self) -> super::selection::Execution {
@@ -686,7 +692,7 @@ impl<'a> Output<'a> {
         };
         self.capture_error = result.as_ref().err().copied();
         if result.is_ok() {
-            state.capture_damage = damage.iter().copied().reduce(Rect::merged);
+            state.capture_damage = Some(Regions::from_slice(damage));
             self.captured_frame = state.cache.frame();
         }
         result

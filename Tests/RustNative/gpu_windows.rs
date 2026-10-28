@@ -321,7 +321,10 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
                 );
                 assert_eq!(windows.front(1).unwrap().readers(), 3);
                 assert_eq!(
-                    first.adopt_recording(&mut recorder, Some(geometry::logical(view).unwrap())),
+                    first.adopt_recording(
+                        &mut recorder,
+                        Some(geometry::logical(view).unwrap().into())
+                    ),
                     Err(Error::Busy)
                 );
                 assert!(!first.return_recording(&mut latest_reads.completion(&mut windows)));

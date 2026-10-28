@@ -114,6 +114,63 @@ pub const CURSOR_W: i32 = 12;
 pub const CURSOR_H: i32 = 18;
 pub const MAX_DAMAGE_REGIONS: usize = 8;
 
+/// Bounded damage carried by a captured scene and each output image. The
+/// original ninth-region area policy applies; newly overlapping pairs are
+/// normalized so composition never repaints an overlap twice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Regions {
+    rects: [Rect; MAX_DAMAGE_REGIONS],
+    count: usize,
+}
+impl Regions {
+    pub fn as_slice(&self) -> &[Rect] {
+        &self.rects[..self.count]
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    pub fn len(&self) -> usize {
+        self.count
+    }
+    pub fn add(&mut self, rect: Rect) {
+        append_damage_region(&mut self.rects, &mut self.count, rect);
+        // The cheapest overflow pair can intersect a third old region.
+        // At most eight insertions reapply the original overlap closure.
+        let prior = *self;
+        self.count = 0;
+        for &value in prior.as_slice() {
+            append_damage_region(&mut self.rects, &mut self.count, value);
+        }
+    }
+    pub fn from_slice(rects: &[Rect]) -> Self {
+        let mut value = Self::default();
+        for &rect in rects {
+            value.add(rect);
+        }
+        value
+    }
+    pub fn merged(mut self, other: Self) -> Self {
+        for &rect in other.as_slice() {
+            self.add(rect);
+        }
+        self
+    }
+    pub fn intersects(&self, rect: Rect) -> bool {
+        self.as_slice().iter().any(|r| r.intersects(rect))
+    }
+    pub fn bounds(&self) -> Option<Rect> {
+        self.as_slice().iter().copied().reduce(Rect::merged)
+    }
+    pub fn area(&self) -> u64 {
+        self.as_slice().iter().map(|r| r.area()).sum()
+    }
+}
+impl From<Rect> for Regions {
+    fn from(rect: Rect) -> Self {
+        Self::from_slice(core::slice::from_ref(&rect))
+    }
+}
+
 /// The ninth region coalesces the cheapest pair, preserving the original
 /// stable first-pair tie break and swap-removal/overlap restart order.
 pub fn append_damage_region(
@@ -357,6 +414,7 @@ mod tests {
     #[test]
     fn ninth_scattered_pixel_stays_bounded() {
         let mut dirty = Dirty::default();
+        let mut carried = Regions::default();
         let points = [
             (0, 0),
             (2, 0),
@@ -370,11 +428,21 @@ mod tests {
         ];
         for (x, y) in points {
             dirty.invalidate(Rect::new(x, y, 1, 1));
+            carried.add(Rect::new(x, y, 1, 1));
         }
         assert_eq!(dirty.regions().len(), MAX_DAMAGE_REGIONS);
         assert_eq!(dirty.regions().iter().map(|r| r.area()).sum::<u64>(), 10);
+        assert_eq!((carried.len(), carried.area()), (MAX_DAMAGE_REGIONS, 10));
         for (x, y) in points {
             assert!(dirty.regions().iter().any(|r| r.contains(x, y)));
+            assert!(carried.as_slice().iter().any(|r| r.contains(x, y)));
+        }
+        for (i, region) in carried.as_slice().iter().enumerate() {
+            assert!(
+                carried.as_slice()[i + 1..]
+                    .iter()
+                    .all(|other| !region.intersects(*other))
+            );
         }
     }
 }

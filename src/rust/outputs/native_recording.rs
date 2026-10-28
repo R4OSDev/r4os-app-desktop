@@ -9,7 +9,7 @@ pub(super) struct Recording {
     pub(super) recorder: Engine,
     pub(super) reads: Reads,
     replay: RecordingReplay,
-    pub(super) damage: Option<Rect>,
+    pub(super) damage: Option<Regions>,
     pub(super) input_ns: u64,
     pub(super) cursor: CaptureCursor,
     pub(super) captured: bool,
@@ -83,9 +83,8 @@ impl Recording {
             )
         };
         if result.is_ok() {
-            if let Some(changed) = regions.iter().copied().reduce(Rect::merged) {
-                self.damage = Some(self.damage.map_or(changed, |old| old.merged(changed)));
-            }
+            let changed = Regions::from_slice(regions);
+            self.damage = Some(self.damage.map_or(changed, |old| old.merged(changed)));
             self.input_ns = input_ns;
             self.cursor = cursor;
             self.captured = true;

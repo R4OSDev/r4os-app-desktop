@@ -67,12 +67,13 @@ fn recorded(
     frame: &mut Frame,
     engine: &mut Engine,
     mode: Mode,
-    damage: Rect,
+    damage: impl Into<Regions>,
     right: Rect,
     asset_change: AssetChange,
     paints: &Cell<u32>,
     mut replay: Option<&mut RecordingReplay>,
 ) {
+    let damage = damage.into();
     let overwritten = if asset_change == AssetChange::Overwrite {
         assert!(!engine.active());
         let old = *frame
@@ -246,6 +247,24 @@ fn cpu_scene_replay_keeps_unchanged_tiles_without_inventing_gpu_residency() {
             Some(&mut replay),
         );
         assert_eq!(paints.get(), 3);
+        let reused = cache.reused_captures;
+        recorded(
+            &mut cache,
+            &mut frame,
+            &mut recorder,
+            Mode::NativeOutput(view),
+            Regions::from_slice(&[Rect::new(0, 0, 1, 1), Rect::new(7, 7, 1, 1)]),
+            RIGHT,
+            AssetChange::None,
+            &paints,
+            Some(&mut replay),
+        );
+        assert_eq!(
+            paints.get(),
+            3,
+            "an unchanged layer between two damaged corners stays reusable"
+        );
+        assert_eq!(cache.reused_captures, reused + 1);
         recorded(
             &mut cache,
             &mut frame,
@@ -264,7 +283,7 @@ fn cpu_scene_replay_keeps_unchanged_tiles_without_inventing_gpu_residency() {
         );
         let mut transaction = Engine::new().unwrap();
         transaction
-            .adopt_recording(&mut recorder, Some(FULL))
+            .adopt_recording(&mut recorder, Some(FULL.into()))
             .unwrap();
         gpu::begin(app, device, &mut transaction, &cache, Some(&frame));
         gpu::pump(

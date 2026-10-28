@@ -2,6 +2,20 @@
 //! Every admitted job is tracked before metadata queries; no native wait here.
 use super::*;
 impl Engine {
+    fn finish_region(&mut self) {
+        self.next_region += 1;
+        if let Some(&area) = self.encode_regions.as_slice().get(self.next_region) {
+            self.encode_area = area;
+            self.next_command = 0;
+            self.phase = Phase::LinearClear;
+        } else {
+            self.phase = if self.destination == Destination::Display {
+                Phase::Present
+            } else {
+                Phase::Drain
+            };
+        }
+    }
     fn composition_target(&self) -> g::R4GfxResource {
         if self.direct_sdr {
             self.resources.outputs[self.output_index].resource
@@ -322,6 +336,10 @@ impl Engine {
                 self.phase = Phase::LinearClear;
             }
             Phase::LinearClear => {
+                if self.encode_regions.is_empty() {
+                    self.finish_region();
+                    return Ok(());
+                }
                 if self.clear_working && !self.replace_background {
                     let slot = self.jobs.reserve()?;
                     let request = g::R4GfxRenderRequest {
@@ -435,11 +453,7 @@ impl Engine {
             }
             Phase::Encode => {
                 if self.direct_sdr {
-                    self.phase = if self.destination == Destination::Display {
-                        Phase::Present
-                    } else {
-                        Phase::Drain
-                    };
+                    self.finish_region();
                     return Ok(());
                 }
                 let slot = self.jobs.reserve()?;
@@ -494,11 +508,7 @@ impl Engine {
                 accepted(rc)?;
                 self.jobs.track(s, slot, handle, None, 0, 0)?;
                 self.render_jobs = self.render_jobs.saturating_add(1);
-                self.phase = if self.destination == Destination::Display {
-                    Phase::Present
-                } else {
-                    Phase::Drain
-                };
+                self.finish_region();
             }
             Phase::Present => {
                 if self.chain.slot != 0 {

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::render::{
     color,
-    geometry::Rect,
+    geometry::{Rect, Regions},
     layers::{self, Cache},
     output_geometry as geometry, primitive_assets,
     primitive_frame::{Command, Frame},
@@ -109,9 +109,11 @@ pub struct Engine {
     clear_working: bool,
     replace_background: bool,
     encode_area: Rect,
-    capture_damage: Option<Rect>,
+    encode_regions: Regions,
+    next_region: usize,
+    capture_damage: Option<Regions>,
     capture_view: Option<geometry::topology::Viewport>,
-    target_damage: [Option<Rect>; 3],
+    target_damage: [Regions; 3],
     sources: Vec<Source>,
     snapshot: Vec<Command>,
     snapshot_images: [g::R4GfxResource; layers::CAPACITY],
@@ -128,6 +130,10 @@ pub struct Engine {
     pub primitive_jobs: u64,
     pub primitive_draws: u64,
     pub primitive_batch_peak: usize,
+    pub composed_regions: u64,
+    pub composed_pixels: u64,
+    pub composition_envelope_pixels: u64,
+    pub multi_region_frames: u64,
 }
 impl Engine {
     pub const ADMISSION_LIMIT: usize = 64;
@@ -175,9 +181,11 @@ impl Engine {
             clear_working: true,
             replace_background: false,
             encode_area: Rect::ZERO,
+            encode_regions: Regions::default(),
+            next_region: 0,
             capture_damage: None,
             capture_view: None,
-            target_damage: [None; 3],
+            target_damage: [Regions::default(); 3],
             sources,
             snapshot: Vec::new(),
             snapshot_images: [g::R4GfxResource::default(); layers::CAPACITY],
@@ -194,6 +202,10 @@ impl Engine {
             primitive_jobs: 0,
             primitive_draws: 0,
             primitive_batch_peak: 0,
+            composed_regions: 0,
+            composed_pixels: 0,
+            composition_envelope_pixels: 0,
+            multi_region_frames: 0,
         })
     }
     pub fn active(&self) -> bool {
@@ -296,7 +308,7 @@ impl Engine {
     /// Transfer a CPU-only recording's exact external read identities only
     /// after the previous transaction has physically retired. GPU resources,
     /// fences, swapchain images and completion history stay with this owner.
-    pub fn adopt_recording(&mut self, recorded: &mut Self, damage: Option<Rect>) -> Result<()> {
+    pub fn adopt_recording(&mut self, recorded: &mut Self, damage: Option<Regions>) -> Result<()> {
         if self.active()
             || !self.jobs.drained()
             || self.sources.iter().any(|s| s.borrowed)
@@ -357,14 +369,14 @@ impl Engine {
         for value in &mut self.resources.outputs {
             value.generation = 0;
         }
-        self.target_damage = [None; 3];
+        self.target_damage = [Regions::default(); 3];
         self.snapshot.clear();
         self.atlas_reuse_pending = 0;
     }
     pub fn composition_damage(
         &mut self,
         view: geometry::topology::Viewport,
-        damage: Option<Rect>,
+        damage: Option<Regions>,
     ) -> Result<()> {
         if self.active() {
             return Err(Error::Busy);
@@ -374,17 +386,16 @@ impl Engine {
         }
         self.capture_view = Some(view);
         self.capture_damage = None;
-        if view.scale != 120 || view.rotation != geometry::topology::Rotation::Normal {
-            return Ok(());
-        }
-        let bounds = geometry::logical(view).map_err(|_| Error::State)?;
-        if let Some(clipped) = damage.and_then(|d| intersect(bounds, d)) {
-            self.capture_damage = Some(Rect::new(
-                clipped.x - bounds.x,
-                clipped.y - bounds.y,
-                clipped.w,
-                clipped.h,
-            ));
+        if let Some(damage) = damage {
+            let mut native = Regions::default();
+            for &rect in damage.as_slice() {
+                if let Some(clipped) =
+                    geometry::damage_rect(view, rect).map_err(|_| Error::State)?
+                {
+                    native.add(clipped);
+                }
+            }
+            self.capture_damage = Some(native);
         }
         Ok(())
     }
@@ -587,29 +598,40 @@ impl Engine {
             return Err(Error::State);
         }
         self.clear_working = self.needs_full(cache.screen().w, cache.screen().h);
-        self.encode_area = cache
-            .commands()
-            .iter()
-            .fold(Rect::ZERO, |area, c| area.merged(c.scissor));
+        self.encode_regions = Regions::default();
+        for command in cache.commands() {
+            self.encode_regions.add(command.scissor);
+        }
         if let Some(damage) = self.capture_damage {
             if cache.commands()[0].scissor != cache.screen() {
                 return Err(Error::Incomplete);
             }
             for old in &mut self.target_damage {
-                *old = Some(old.map_or(damage, |v| v.merged(damage)));
+                *old = old.merged(damage);
             }
             if self.resources.outputs[self.output_index].generation != 0 {
-                self.encode_area = self.target_damage[self.output_index].unwrap();
+                self.encode_regions = self.target_damage[self.output_index];
             }
             self.clear_working = true;
         } else {
-            self.target_damage = [Some(cache.screen()); 3];
+            self.target_damage = [cache.screen().into(); 3];
         }
+        self.next_region = 0;
+        self.encode_area = self
+            .encode_regions
+            .as_slice()
+            .first()
+            .copied()
+            .unwrap_or(Rect::ZERO);
         let first = cache.commands()[0];
         self.replace_background = self.clear_working
             && !self.hdr_frame
             && !cache.entries()[first.entry as usize].external
-            && intersect(first.scissor, self.encode_area) == Some(self.encode_area);
+            && self
+                .encode_regions
+                .as_slice()
+                .iter()
+                .all(|&r| intersect(first.scissor, r) == Some(r));
         if let Some(acquired) = self.acquired {
             self.chain_frames[acquired.slot as usize - 1] = cache.frame();
             self.reported[acquired.slot as usize - 1] = false;
@@ -717,7 +739,21 @@ impl Engine {
             self.phase = Phase::Idle;
             if self.fault.is_none() {
                 self.resources.outputs[self.output_index].generation = self.frame;
-                self.target_damage[self.output_index] = None;
+                self.target_damage[self.output_index] = Regions::default();
+                self.composed_regions = self
+                    .composed_regions
+                    .saturating_add(self.encode_regions.len() as u64);
+                self.composed_pixels = self
+                    .composed_pixels
+                    .saturating_add(self.encode_regions.area());
+                self.composition_envelope_pixels = self.composition_envelope_pixels.saturating_add(
+                    self.encode_regions
+                        .bounds()
+                        .map_or(0, |r| r.w as u64 * r.h as u64),
+                );
+                if self.encode_regions.len() > 1 {
+                    self.multi_region_frames = self.multi_region_frames.saturating_add(1);
+                }
                 if recording.is_some() {
                     for (i, entry) in cache.entries().iter().enumerate() {
                         if entry.frame == cache.frame() {

@@ -225,11 +225,14 @@ fn bounded_packet_skips_only_clipped_compatible_draws() {
                         scale: 120,
                         ..Default::default()
                     },
-                    Some(if turn == 0 {
-                        FULL
-                    } else {
-                        Rect::new(1, 1, 3, 1)
-                    }),
+                    Some(
+                        (if turn == 0 {
+                            FULL
+                        } else {
+                            Rect::new(1, 1, 3, 1)
+                        })
+                        .into(),
+                    ),
                 )
                 .unwrap();
             let jobs = engine.primitive_jobs;
@@ -447,11 +450,14 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
                         scale: 120,
                         ..Default::default()
                     },
-                    Some(match turn {
-                        0 => FULL,
-                        1 => Rect::new(6, 6, 1, 1),
-                        _ => Rect::new(5, 5, 2, 2),
-                    }),
+                    Some(
+                        (match turn {
+                            0 => FULL,
+                            1 => Rect::new(6, 6, 1, 1),
+                            _ => Rect::new(5, 5, 2, 2),
+                        })
+                        .into(),
+                    ),
                 )
                 .unwrap();
             let draws = engine.primitive_draws;
@@ -467,7 +473,7 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
                     .all(|image| image.resource.slot == 0)
             );
             if turn == 2 {
-                assert_eq!(engine.capture_damage, Some(Rect::new(5, 5, 2, 2)));
+                assert_eq!(engine.capture_damage, Some(Rect::new(5, 5, 2, 2).into()));
                 let layer = frame.commands()[0].layer as usize;
                 assert_eq!(
                     engine.redraw_regions[layer],
@@ -1048,4 +1054,307 @@ fn original_fifo_distinguishes_copy_from_visible_and_retains_both_outputs() {
         let s = device.bind(app).unwrap();
         engine.close(&s).unwrap();
     });
+}
+
+#[test]
+fn separated_damage_repairs_both_target_ages_and_matches_full_scaled_rotated_pixels() {
+    use crate::capture::readback::Readback;
+    use geometry::topology::{Point, Rotation, Viewport};
+
+    fn pixels(app: &App<'_>, device: &mut Device, engine: &Engine) -> [u32; 64] {
+        let mut reader = {
+            let s = device.bind(app).unwrap();
+            let mut value = unsafe { Readback::new(app, &s) }.unwrap();
+            value
+                .prepare(&s, 8, 8, engine.output_format, engine.output_color)
+                .unwrap();
+            value
+                .begin(
+                    &s,
+                    engine.resources.outputs[engine.output_index].resource,
+                    1,
+                    engine.frame,
+                    0,
+                    &[g::R4GfxRect {
+                        x: 0,
+                        y: 0,
+                        width: 8,
+                        height: 8,
+                    }],
+                    1,
+                    1000,
+                )
+                .unwrap();
+            value
+        };
+        for _ in 0..32 {
+            let s = device.bind(app).unwrap();
+            control(&s, 0, 0);
+            reader.poll(&s, 2).unwrap();
+            if !reader.pending() {
+                break;
+            }
+        }
+        let result = reader.pixels().unwrap().try_into().unwrap();
+        reader.acknowledge(true).unwrap();
+        let s = device.bind(app).unwrap();
+        assert_eq!(reader.source().unwrap().slot, 0);
+        reader.close(&s).unwrap();
+        result
+    }
+    fn scene(cache: &mut Cache, frame: &mut Frame, view: Viewport, native: bool, colors: [u32; 2]) {
+        let bounds = geometry::logical(view).unwrap();
+        cache
+            .start(
+                if native {
+                    Mode::NativeOutput(view)
+                } else {
+                    Mode::Desktop(FULL)
+                },
+                Some(frame),
+            )
+            .unwrap();
+        cache
+            .paint(1, bounds, bounds, Some(frame), None, |p| {
+                if native {
+                    // Real atlas sampling and the float composition/encode
+                    // path, including a translucent first layer. The later
+                    // Desktop variant independently exercises direct SDR.
+                    let count = (bounds.w * bounds.h) as usize;
+                    let mut source: Vec<u32> = (0..count)
+                        .map(|i| ((i as u32 % 4) * 85 << 24) | 0x203040)
+                        .collect();
+                    source[0] = 0xff000000 | colors[0];
+                    source[count - 1] = 0xff000000 | colors[1];
+                    source[(bounds.h / 2 * bounds.w + bounds.w / 2) as usize] = 0xffaabbcc;
+                    return p.picture(Picture {
+                        view: View::new(
+                            Format::Argb,
+                            bounds.w as u32,
+                            bounds.h as u32,
+                            bounds.w as usize * 4,
+                            PixelBytes::from_words(&source).bytes(),
+                        ),
+                        viewport: bounds,
+                        clip: bounds,
+                        source_x: 0,
+                        source_y: 0,
+                        guest_w: bounds.w as u32,
+                        guest_h: bounds.h as u32,
+                    });
+                }
+                p.fill(bounds, 0x203040)?;
+                p.fill(Rect::new(bounds.x, bounds.y, 1, 1), colors[0])?;
+                p.fill(
+                    Rect::new(bounds.right() - 1, bounds.bottom() - 1, 1, 1),
+                    colors[1],
+                )?;
+                p.fill(
+                    Rect::new(bounds.x + bounds.w / 2, bounds.y + bounds.h / 2, 1, 1),
+                    0xaabbcc,
+                )
+            })
+            .unwrap();
+        cache.finish(Some(frame)).unwrap();
+    }
+    let variants = [
+        Rotation::Normal,
+        Rotation::Clockwise90,
+        Rotation::Clockwise180,
+        Rotation::Clockwise270,
+    ]
+    .into_iter()
+    .flat_map(|rotation| {
+        [60, 120, 150, 180]
+            .into_iter()
+            .map(move |scale| (true, rotation, scale))
+    })
+    .chain([(false, Rotation::Normal, 120)]);
+    for (native, rotation, scale) in variants {
+        with(|app, device| {
+            let view = Viewport {
+                pixel_w: 8,
+                pixel_h: 8,
+                scale,
+                rotation,
+                origin: if native {
+                    Point { x: -19, y: 7 }
+                } else {
+                    Point::default()
+                },
+            };
+            let bounds = geometry::logical(view).unwrap();
+            let points = [
+                Rect::new(bounds.x, bounds.y, 1, 1),
+                Rect::new(bounds.right() - 1, bounds.bottom() - 1, 1, 1),
+            ];
+            let mut cache = Cache::new(1024 * 1024).unwrap();
+            let mut reference_cache = Cache::new(1024 * 1024).unwrap();
+            let mut frame = Frame::new().unwrap();
+            let mut reference_frame = Frame::new().unwrap();
+            frame.set_mirror(false).unwrap();
+            reference_frame.set_mirror(false).unwrap();
+            let mut engine = Engine::new().unwrap();
+            let mut reference = Engine::new().unwrap();
+            reference.destination = Destination::Readback;
+            let mut colors = [0x113355, 0x7799bb];
+            let s = device.bind(app).unwrap();
+            control(&s, 4, 1);
+            drop(s);
+            for pair in 0..4 {
+                let s = device.bind(app).unwrap();
+                control(&s, 5, 0);
+                drop(s);
+                for member in 0..2 {
+                    let step = pair * 2 + member;
+                    let changed = if step == 0 {
+                        bounds
+                    } else {
+                        let index = (step + 1) % 2;
+                        colors[index] ^= 0x010307 * step as u32;
+                        points[index]
+                    };
+                    scene(&mut cache, &mut frame, view, native, colors);
+                    scene(
+                        &mut reference_cache,
+                        &mut reference_frame,
+                        view,
+                        native,
+                        colors,
+                    );
+                    engine
+                        .composition_damage(view, Some(changed.into()))
+                        .unwrap();
+                    // The reference always recomposes the entire output, with
+                    // no damage hint or history from the implementation above.
+                    reference.invalidate();
+                    begin(
+                        app,
+                        device,
+                        &mut reference,
+                        &reference_cache,
+                        Some(&reference_frame),
+                    );
+                    pump(
+                        app,
+                        device,
+                        &mut reference,
+                        &mut reference_cache,
+                        Some(&mut reference_frame),
+                        Progress::Copied,
+                    );
+                    let expected = pixels(app, device, &reference);
+                    let before_jobs = engine.render_jobs;
+                    let before_primitives = engine.primitive_jobs;
+                    let before_pixels = engine.composed_pixels;
+                    begin(app, device, &mut engine, &cache, Some(&frame));
+                    assert_eq!(engine.output_index, member);
+                    if step < 2 {
+                        assert_eq!(engine.encode_regions, FULL.into());
+                    } else {
+                        assert_eq!(engine.encode_regions.len(), 2, "{view:?}");
+                        assert!(engine.encode_regions.area() < 64, "{view:?}");
+                        assert!(
+                            !engine.encode_regions.intersects(Rect::new(3, 3, 1, 1))
+                                || scale != 120
+                        );
+                    }
+                    let area = engine.encode_regions.area();
+                    let regions = engine.encode_regions.len() as u64;
+                    let jobs_per_region = if engine.direct_sdr { 1 } else { 2 };
+                    assert_eq!(engine.direct_sdr, !native);
+                    pump(
+                        app,
+                        device,
+                        &mut engine,
+                        &mut cache,
+                        Some(&mut frame),
+                        Progress::Copied,
+                    );
+                    assert_eq!(
+                        engine.render_jobs
+                            - before_jobs
+                            - (engine.primitive_jobs - before_primitives),
+                        regions * jobs_per_region,
+                        "composition/encode jobs exclude the separately counted layer raster jobs"
+                    );
+                    assert_eq!(engine.composed_pixels - before_pixels, area);
+                    assert_eq!(
+                        pixels(app, device, &engine),
+                        expected,
+                        "step={step}, native={native}, {view:?}"
+                    );
+                    if step >= 2 && scale == 120 {
+                        assert_eq!(area, 2, "two pixels replace the previous 64-pixel envelope");
+                    }
+                }
+                let s = device.bind(app).unwrap();
+                control(&s, 5, 1);
+                drop(s);
+                let mut receipts = 0;
+                for _ in 0..32 {
+                    let s = device.bind(app).unwrap();
+                    control(&s, 0, 0);
+                    engine.poll_presentation(&s).unwrap();
+                    if let Some(done) = engine.completion() {
+                        assert_eq!(done.status.result, 1);
+                        receipts += 1;
+                    }
+                    if !engine.pending() {
+                        break;
+                    }
+                }
+                assert_eq!(receipts, 2);
+                assert!(!engine.pending());
+            }
+            assert_eq!(engine.multi_region_frames, 6);
+            assert!(engine.composed_pixels < engine.composition_envelope_pixels);
+            if !native {
+                let expected = pixels(app, device, &reference);
+                // First catch up the older image; an unchanged subsequent
+                // capture must really present without a fabricated GPU job.
+                for unchanged in 0..2 {
+                    scene(&mut cache, &mut frame, view, native, colors);
+                    engine
+                        .composition_damage(view, Some(Regions::default()))
+                        .unwrap();
+                    let before_jobs = engine.render_jobs;
+                    begin(app, device, &mut engine, &cache, Some(&frame));
+                    if unchanged == 1 {
+                        assert!(engine.encode_regions.is_empty());
+                    }
+                    pump(
+                        app,
+                        device,
+                        &mut engine,
+                        &mut cache,
+                        Some(&mut frame),
+                        Progress::Copied,
+                    );
+                    if unchanged == 1 {
+                        assert_eq!(engine.render_jobs, before_jobs);
+                    }
+                    assert_eq!(pixels(app, device, &engine), expected);
+                    let mut receipts = 0;
+                    for _ in 0..32 {
+                        let s = device.bind(app).unwrap();
+                        control(&s, 0, 0);
+                        engine.poll_presentation(&s).unwrap();
+                        if let Some(done) = engine.completion() {
+                            assert_eq!(done.status.result, 1);
+                            receipts += 1;
+                        }
+                        if !engine.pending() {
+                            break;
+                        }
+                    }
+                    assert_eq!(receipts, 1);
+                    assert!(!engine.pending());
+                }
+            }
+            let s = device.bind(app).unwrap();
+            engine.close(&s).unwrap();
+            reference.close(&s).unwrap();
+        });
+    }
 }

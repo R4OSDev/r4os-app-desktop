@@ -166,6 +166,10 @@ pub struct CaptureState {
     pub prepared_with_gpu_jobs: u64,
     pub prepared_during_worker: u64,
     pub pending_scene: bool,
+    pub composed_regions: u64,
+    pub composed_pixels: u64,
+    pub composition_envelope_pixels: u64,
+    pub multi_region_frames: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureObservation {

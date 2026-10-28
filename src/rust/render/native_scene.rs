@@ -2,7 +2,7 @@
 //! Commands, assets and exact external read identities belong to the output.
 use super::{
     compositor::{self, Scene, Stats},
-    geometry::Rect,
+    geometry::{Rect, Regions},
     gpu::engine::Engine,
     gpu::receipt::Consumer,
     layers::{Cache, Mode},
@@ -45,7 +45,12 @@ impl RecordingReplay {
         self.complete = cache.captured() && cache.complete_scene;
         frame.exchange_commands(&mut self.commands);
     }
-    fn prepare(&mut self, cache: &Cache, frame: &mut Frame, changed: Option<Rect>) -> Result<()> {
+    fn prepare(
+        &mut self,
+        cache: &Cache,
+        frame: &mut Frame,
+        changed: Option<Regions>,
+    ) -> Result<()> {
         self.reusable.fill(false);
         let Some(changed) = changed else {
             return Ok(());
@@ -62,7 +67,7 @@ impl RecordingReplay {
             self.reusable[i] = entry.initialized
                 && !entry.external
                 && entry.frame == self.frame
-                && super::scene::intersect(entry.capture_bounds, changed).is_none();
+                && !changed.intersects(entry.capture_bounds);
         }
         for command in &self.commands {
             if let Some(texture) = command.texture {
@@ -239,7 +244,7 @@ unsafe fn capture_impl<M: Memory>(
     }
     frame.set_mirror(false)?;
     cache.start(mode, Some(frame))?;
-    let changed = damage.iter().copied().reduce(Rect::merged);
+    let changed = Some(Regions::from_slice(damage));
     if matches!(mode, Mode::NativeOutput(_)) {
         if let Some(replay) = recording_replay.as_deref_mut() {
             replay.prepare(cache, frame, changed)?;

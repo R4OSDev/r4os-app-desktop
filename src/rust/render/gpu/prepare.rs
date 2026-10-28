@@ -503,7 +503,12 @@ impl Engine {
                 // output damage contract still bounds all changed pixels on
                 // this retained image; newly allocated images never enter.
                 if let Some(damage) = self.capture_damage {
-                    if let Some(area) = intersect(damage, entry.bounds) {
+                    let area = damage
+                        .as_slice()
+                        .iter()
+                        .filter_map(|&r| intersect(r, entry.bounds))
+                        .reduce(Rect::merged);
+                    if let Some(area) = area {
                         self.redraw_regions[i] = Some(Rect::new(
                             area.x - entry.bounds.x,
                             area.y - entry.bounds.y,
@@ -521,7 +526,7 @@ impl Engine {
         &mut self,
         cache: &Cache,
         frame: &mut Frame,
-        damage: Option<Rect>,
+        damage: Option<Regions>,
     ) -> Result<()> {
         self.reuse_layers = [false; layers::CAPACITY];
         let Some(changed) = damage else {
@@ -546,7 +551,7 @@ impl Engine {
             self.reuse_layers[i] = entry.initialized
                 && !entry.external
                 && entry.frame == self.frame
-                && intersect(entry.capture_bounds, changed).is_none()
+                && !changed.intersects(entry.capture_bounds)
                 && image.generation == entry.generation
                 && image.resource.slot != 0
                 && same_resource(image.resource, self.snapshot_images[i]);
