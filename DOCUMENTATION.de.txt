@@ -505,4 +505,6 @@ ExFiles/Reports/Benchmarks/432e32ac-0ac0-4b6a-b03a-2a9900b312ae/.
 1von151Modulen neu,150gleich; Kernel417/SDK105/Contract54 unveraendert.
 141Module/1057Testeintraege/483Docs; temporaerer Helfer getrennt erhalten.
 Alle18vorherigen Fehler plus Q1CaptureStats bleiben unabhaengig fuer66 offen.
-PublicFullSlim51 und Release-/Recoveryarbeiten65 bleiben getrennt.
+Die veroeffentlichten Full-/Slim-Pakete0.87.51 werden hier nicht ersetzt.
+Recovery wird als eigene Komponente versioniert; seine Versionsnummer
+bezeichnet keine zusaetzliche Aufgabe fuer Unterversion0.87.65.
