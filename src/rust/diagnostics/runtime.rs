@@ -33,6 +33,7 @@ pub struct View<'call, 'input> {
     pub work_areas: [Rect; 4],
     pub width: i32,
     pub height: i32,
+    pub output_captures: [Option<crate::outputs::selection::CaptureObservation>; 4],
 }
 #[derive(Default)]
 pub struct Effects {
@@ -640,6 +641,11 @@ impl Owner {
                     .is_err()
                 {
                     out.result = -1
+                }
+            }
+            Op::CaptureStats => {
+                if super::capture_stats::run(env, r.caller, r.item, &v.output_captures).is_err() {
+                    out.result = a::service_api_result_invalid;
                 }
             }
         }

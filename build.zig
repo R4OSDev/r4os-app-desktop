@@ -13,7 +13,10 @@ pub fn build(b: *std.Build) void {
 
     const check_wire = b.createModule(.{ .root_source_file = b.path("Contract/desktop_check_v2.zig"), .target = b.graph.host });
     _ = sdk.addR4MFWithOptions(b.path("Tests/WindowImages/module.R4MF"), .{ .zig_module_roots = &.{b.path("Contract/desktop_check_v2.zig")} });
-    b.step("window-images-fixture", "Build explicit real Desktop/WINSVC CPU image fixture").dependOn(b.getInstallStep());
+    const image_step = b.step("window-images-fixture", "Build explicit real Desktop/WINSVC CPU image fixture");
+    image_step.dependOn(b.getInstallStep());
+    const image_status = b.createModule(.{ .root_source_file = b.path("Tests/WindowImages/native_status.zig"), .target = b.graph.host });
+    image_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = image_status })).step);
     b.step("diagnostic-test", "Explicit bounded Desktop work byte contract and generation binding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = check_wire })).step);
 
     const test_target = b.graph.host;

@@ -618,6 +618,14 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if !self.diagnostics.pending() && host.diagnostic_work().is_none() {
             return;
         }
+        let output_captures = if host
+            .diagnostic_work()
+            .is_some_and(|work| work.request.op == diagnostics::wire::Op::CaptureStats)
+        {
+            self.capture_observations()
+        } else {
+            [None; 4]
+        };
         let work_areas = self.areas();
         let mut view = diagnostics::runtime::View {
             hosted: &mut self.hosted,
@@ -629,6 +637,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             work_areas,
             width: self.width,
             height: self.height,
+            output_captures,
         };
         let effects = self.diagnostics.poll(
             &mut view,
@@ -660,6 +669,32 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.diagnostics.capture_override();
         self.publisher
             .sync(&mut self.outputs, self.primary.output_mut());
+    }
+    fn capture_observations(&self) -> [Option<outputs::selection::CaptureObservation>; 4] {
+        let mut observations = [None; 4];
+        if self.outputs.active() {
+            for (slot, choice) in
+                observations
+                    .iter_mut()
+                    .zip(
+                        self.outputs
+                            .composition_choices(self.outputs.desktop_bounds),
+                    )
+            {
+                *slot = Some(outputs::selection::CaptureObservation {
+                    state: choice.target.and_then(|t| self.outputs.capture_state(t)),
+                    choice,
+                });
+            }
+        } else {
+            let mut choice = outputs::selection::Choice::primary(self.primary_admission);
+            let state = self.primary.output().and_then(|owner| {
+                choice.execution = Some(owner.execution_observation());
+                owner.capture_state()
+            });
+            observations[0] = Some(outputs::selection::CaptureObservation { choice, state });
+        }
+        observations
     }
     fn cursor(&mut self, env: &Environment<'a>, time: Time) {
         let mut info = a::DisplayCursorInfo::default();
@@ -1609,6 +1644,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         work_areas: areas,
                         width: self.width,
                         height: self.height,
+                        output_captures: [None; 4],
                     };
                     self.diagnostics.end(
                         &mut view,

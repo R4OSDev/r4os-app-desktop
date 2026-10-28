@@ -148,6 +148,23 @@ pub struct Execution {
     pub copied_ns: Option<u64>,
     pub visible_ns: Option<u64>,
 }
+/// Copied only for explicit owner diagnostics. None means the worker owns
+/// the state; it must not be interpreted as zero work or a release receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureState {
+    pub frame: u64,
+    pub reused_captures: u64,
+    pub captured_reads: u64,
+    pub completed_reads: u64,
+    pub failed_reads: u64,
+    pub reads_empty: bool,
+    pub external_receipts: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureObservation {
+    pub choice: Choice,
+    pub state: Option<CaptureState>,
+}
 impl Execution {
     fn same_owner(self, other: Self) -> bool {
         (

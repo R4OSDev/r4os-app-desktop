@@ -22,11 +22,17 @@ struct Read {
 }
 pub struct Reads {
     entries: [Option<Read>; crate::windows::controller::SLOT_COUNT],
+    pub captured: u64,
+    pub completed: u64,
+    pub failed: u64,
 }
 impl Default for Reads {
     fn default() -> Self {
         Self {
             entries: [None; crate::windows::controller::SLOT_COUNT],
+            captured: 0,
+            completed: 0,
+            failed: 0,
         }
     }
 }
@@ -101,6 +107,7 @@ impl Reads {
             window,
             identity,
         });
+        self.captured = self.captured.saturating_add(1);
         Ok(())
     }
     pub fn completion<'a, M: Memory>(
@@ -136,6 +143,8 @@ impl<M: Memory> FinishExternal for Completion<'_, M> {
         self.windows
             .finish_read(read.window, read.identity, receipt, failed)?;
         self.reads.entries[slot] = None;
+        self.reads.completed = self.reads.completed.saturating_add(1);
+        self.reads.failed = self.reads.failed.saturating_add(u64::from(failed));
         Ok(())
     }
 }

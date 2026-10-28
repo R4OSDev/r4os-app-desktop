@@ -31,8 +31,12 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
         damage: Rect,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
+        // Only NativeOutput computed this capture's reusable mask. Keep the
+        // immutable engine snapshot separate from the mutable cache/frame,
+        // and end this borrow before any external read can change the engine.
+        let replay = self.cache.view().map(|_| self.engine.replay());
         self.cache
-            .paint(key, bounds, damage, Some(self.frame), None, paint)
+            .paint(key, bounds, damage, Some(self.frame), replay, paint)
     }
     fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()> {
         self.reads.capture(
@@ -132,3 +136,7 @@ pub unsafe fn capture<M: Memory>(
     capture.finished = true;
     Ok(stats)
 }
+
+#[cfg(test)]
+#[path = "../../../Tests/RustNative/native_capture.rs"]
+mod tests;

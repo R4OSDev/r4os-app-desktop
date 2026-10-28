@@ -318,6 +318,18 @@ impl<'a> Output<'a> {
     pub fn external_receipts(&self) -> usize {
         self.receipts.external()
     }
+    pub fn capture_state(&self) -> Option<super::selection::CaptureState> {
+        let state = self.state.as_ref()?;
+        Some(super::selection::CaptureState {
+            frame: state.cache.frame(),
+            reused_captures: state.cache.reused_captures,
+            captured_reads: state.reads.captured,
+            completed_reads: state.reads.completed,
+            failed_reads: state.reads.failed,
+            reads_empty: state.reads.empty(),
+            external_receipts: self.receipts.external(),
+        })
+    }
     pub fn execution_observation(&self) -> super::selection::Execution {
         let time = |value: u64| (value != 0).then_some(value);
         super::selection::Execution {

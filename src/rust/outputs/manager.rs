@@ -290,6 +290,17 @@ impl<'a> Manager<'a> {
                 && old.connection_generation == target.connection_generation
         })
     }
+    pub fn capture_state(
+        &self,
+        target: super::selection::Target,
+    ) -> Option<super::selection::CaptureState> {
+        self.slots
+            .iter()
+            .find(|s| super::selection::Target::from(s.target) == target)?
+            .resource
+            .gpu()?
+            .capture_state()
+    }
     pub fn color_ready(&mut self, app: &App<'_>, entry: Entry) -> bool {
         if self.software_only(entry.target)
             || entry.presentation.flags & a::display_presentation_info_native == 0

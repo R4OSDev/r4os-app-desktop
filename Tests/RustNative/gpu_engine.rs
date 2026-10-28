@@ -145,7 +145,7 @@ fn expected(color: u32) -> [u32; 64] {
     }
     out
 }
-fn begin(
+pub(crate) fn begin(
     app: &App<'_>,
     device: &mut Device,
     engine: &mut Engine,
@@ -158,7 +158,7 @@ fn begin(
         .unwrap();
     unsafe { engine.begin(&s, cache, frame, 1000) }.unwrap();
 }
-fn pump(
+pub(crate) fn pump(
     app: &App<'_>,
     device: &mut Device,
     engine: &mut Engine,

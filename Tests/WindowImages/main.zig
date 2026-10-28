@@ -1,12 +1,16 @@
-//! Explicit disposable KVM fixture. Uses the real Rust Desktop, real WINSVC
-//! and CPU queue/BOs. Native GPU execution and physical latency are excluded.
+//! Explicit owner fixture using the real Rust Desktop and WINSVC. Default
+//! execution uses CPU queue/BOs; nativeProducer requires actual native GPU
+//! receipts. Neither path supplies a physical visibility or latency receipt.
 const std = @import("std");
 const r = @import("r4os");
 const a = r.abi;
 const work = @import("desktop_check");
+pub const NativeStatus = @import("native_status.zig");
 var last_phase: []const u8 = "entry";
 var last_rpc: i32 = 0;
 var last_window: i32 = 0;
+var last_native_phase: u32 = 0;
+var last_native_result: i32 = 0;
 const report = "C:\\TEMP\\WINIMG.TXT";
 const path = "C:\\TEMP\\WINIMAGE.R4X";
 const Context = struct {
@@ -16,7 +20,11 @@ const Context = struct {
     owner: a.ProgramProcessHandle,
     endpoint: u32,
     deadline: u64,
+    native: bool = false,
+    native_report: ?[*:0]const u8 = null,
+    native_report_failed: bool = false,
     fn check(self: *const Context) !void {
+        if (self.native_report_failed) return error.NativeStatusWrite;
         if (self.sys.programShouldClose() or self.sys.ticks() >= self.deadline) return error.Timeout;
     }
     fn rpc(self: *const Context, op: u16, request: anytype) !a.WindowGraphicsReply {
@@ -48,9 +56,14 @@ const Context = struct {
         return .{ .instance_id = std.mem.readInt(u32, bytes[32..36], .little), .generation = std.mem.readInt(u64, bytes[40..48], .little) };
     }
 };
-fn trace(sys: r.r4sys.Context, value: []const u8) void {
+fn trace(c: *Context, value: []const u8) void {
     last_phase = value;
-    _ = sys.fileWrite(report, value);
+    if (c.native) {
+        const path_value = c.native_report orelse { c.native_report_failed = true; return; };
+        var bytes: [512]u8 = undefined;
+        const text = NativeStatus.encode(&bytes, .{ .instance = c.owner.instance_id, .generation = c.owner.generation }, value) catch { c.native_report_failed = true; return; };
+        if (c.sys.fileWrite(path_value, text) != @as(i32, @intCast(text.len))) c.native_report_failed = true;
+    } else _ = c.sys.fileWrite(report, value);
 }
 fn identity(h: a.ProgramProcessHandle) work.Identity {
     return .{ .instance = h.instance_id, .generation = h.generation };
@@ -132,7 +145,7 @@ fn parent(c: *Context) !void {
 
 fn producer(c: *Context) !void {
     try need(c.draw.guiClear(0x00101010) > 0 and c.draw.guiPresent() >= 0, @src());
-    trace(c.sys, "WINIMAGE producer static GUI published");
+    trace(c, "WINIMAGE producer static GUI published");
     var request: a.WindowGraphicsRequest = .{ .owner = c.owner };
     var discovery: a.WindowGraphicsReply = .{};
     while (true) {
@@ -147,9 +160,9 @@ fn producer(c: *Context) !void {
         }
         c.sys.sleepTicks(1);
     }
-    trace(c.sys, "WINIMAGE producer surface discovered");
+    trace(c, "WINIMAGE producer surface discovered");
     const config = discovery.config;
-    try need(config.backend.binding.adapter_id == 0 and config.width > 0 and config.height > 0, @src());
+    try need((if (c.native) config.backend.binding.adapter_id != 0 else config.backend.binding.adapter_id == 0) and config.width > 0 and config.height > 0, @src());
     request.surface = discovery.surface;
     request.config_revision = config.revision;
     var format: ?u32 = null;
@@ -171,7 +184,32 @@ fn producer(c: *Context) !void {
     defer for (&refs) |*value| {
         if (value.reference.id != 0) _ = c.draw.gfxBufferRelease(&value.reference);
     };
-    for (&refs) |*value| try need(c.draw.gfxBufferCreate(&descriptor, value) == a.gfx_buffer_result_ok, @src());
+    for (&refs, 0..) |*value, index| {
+        if (!c.native or index == 2) {
+            try need(c.draw.gfxBufferCreate(&descriptor, value) == a.gfx_buffer_result_ok, @src());
+        } else {
+            var allocation: a.GfxNativeStatus = .{};
+            last_phase = "native allocation start";
+            last_rpc = c.draw.gfxNativeStart(&.{ .adapter_id = config.backend.binding.adapter_id, .memory_generation = config.backend.memory_generation, .kind = 1, .width = config.width, .height = config.height, .format = a.gfx_buffer_format_xrgb8888, .usage = 28, .layout = 0, .deadline_ns = (c.sys.monotonicNanoseconds() orelse return error.Clock) + 3_000_000_000 }, &allocation);
+            last_native_phase = allocation.phase;
+            last_native_result = allocation.result;
+            try need(last_rpc == a.gfx_buffer_result_ok, @src());
+            const ticket = allocation.request;
+            var received = false;
+            defer if (!received) {
+                _ = c.draw.gfxNativeClose(&ticket);
+            };
+            last_phase = "native allocation wait";
+            last_rpc = c.draw.gfxNativeWait(&ticket, c.sys.ticksFromMilliseconds(3000), &allocation);
+            last_native_phase = allocation.phase;
+            last_native_result = allocation.result;
+            try need(last_rpc == a.gfx_buffer_result_ok and allocation.phase == 2 and allocation.result == a.gfx_buffer_result_ok, @src());
+            last_phase = "native allocation receive";
+            last_rpc = c.draw.gfxNativeReceive(&ticket, value);
+            try need(last_rpc == a.gfx_buffer_result_ok, @src());
+            received = true;
+        }
+    }
     for (0..2) |index| {
         request.action = a.window_graphics_attach;
         request.request_serial += 1;
@@ -179,10 +217,12 @@ fn producer(c: *Context) !void {
         request.source = refs[index].reference;
         try need((try c.rpc(a.window_graphics_op_client, &request)).result == a.window_graphics_ok, @src());
     }
-    trace(c.sys, "WINIMAGE producer BOs attached");
+    trace(c, "WINIMAGE producer BOs attached");
     const queue = c.draw.queues();
     var handle: a.GfxQueueHandle = .{};
-    try need(queue.open(&.{}, &handle) == a.gfx_queue_ok, @src());
+    const binding = config.backend.binding;
+    const queue_config: a.GfxQueueConfig = if (c.native) .{ .adapter_id = binding.adapter_id, .device_generation = binding.device_generation, .reset_generation = binding.reset_generation, .milestone = binding.milestone } else .{};
+    try need(queue.open(&queue_config, &handle) == a.gfx_queue_ok, @src());
     var queue_open = true;
     defer if (queue_open) {
         _ = queue.close(&handle);
@@ -211,7 +251,17 @@ fn producer(c: *Context) !void {
         @memset(@as([*]u8, @ptrFromInt(map.cpu_address))[0..@intCast(bytes)], if (round == 0) 0x5a else 0x7b);
         try need(c.draw.gfxBufferUnmap(&map.lease) == a.gfx_buffer_result_ok, @src());
         var status: a.GfxFenceStatus = .{};
-        try need(queue.submit(&handle, &.{ .source = refs[2].reference, .target = refs[acquired.image_slot].reference, .byte_length = bytes, .deadline_ns = (c.sys.monotonicNanoseconds() orelse return error.Clock) + 5_000_000_000 }, &status) == a.gfx_queue_ok, @src());
+        var submission: a.GfxSubmission = .{ .source = refs[2].reference, .target = refs[acquired.image_slot].reference, .byte_length = bytes, .deadline_ns = (c.sys.monotonicNanoseconds() orelse return error.Clock) + 5_000_000_000 };
+        if (c.native) {
+            var target: a.GfxBufferDescriptor = .{};
+            try need(c.draw.gfxBufferDescribe(&refs[acquired.image_slot].reference, &target) == a.gfx_buffer_result_ok and target.location == a.gfx_buffer_location_device_local and target.adapter_id == binding.adapter_id and target.device_generation == config.backend.memory_generation, @src());
+            submission.operation = a.gfx_queue_operation_copy_rows;
+            submission.byte_length = @as(u64, config.width) * 4;
+            submission.row_count = config.height;
+            submission.source_pitch = config.width * 4;
+            submission.target_pitch = target.plane_pitches[0];
+        }
+        try need(queue.submit(&handle, &submission, &status) == a.gfx_queue_ok, @src());
         fences[round] = status.fence;
         try need(c.draw.gfxFenceWait(&status.fence, c.sys.ticksFromMilliseconds(3000), a.gfx_queue_wait_resources_released, &status) == a.gfx_queue_ok and status.result == a.gfx_queue_result_complete, @src());
         request.action = a.window_graphics_present;
@@ -232,7 +282,7 @@ fn producer(c: *Context) !void {
             c.sys.sleepTicks(1);
         }
     }
-    trace(c.sys, "WINIMAGE producer two leases observed");
+    trace(c, "WINIMAGE producer two leases observed");
     // The second real Take retires the first image; verify its own slot and
     // fresh token only become reusable after the genuine consumer return.
     request.action = a.window_graphics_acquire;
@@ -246,7 +296,7 @@ fn producer(c: *Context) !void {
         try need(again.result == a.window_graphics_not_ready, @src());
         c.sys.sleepTicks(1);
     }
-    trace(c.sys, "WINIMAGE producer first image reused");
+    trace(c, "WINIMAGE producer first image reused");
     request.action = a.window_graphics_close_chain;
     request.request_serial += 1;
     try need((try c.rpc(a.window_graphics_op_client, &request)).result == a.window_graphics_ok, @src());
@@ -266,12 +316,11 @@ fn producer(c: *Context) !void {
         try need(c.draw.gfxBufferRelease(&value.reference) == a.gfx_buffer_result_ok, @src());
         value.* = .{};
     }
-    trace(c.sys, "WINIMAGE two real CPU frames leased, empty-wake progress, exact reuse and closed-chain ACK: OK");
+    trace(c, if (c.native) "WINIMAGE two real native frames leased, empty-wake progress, exact reuse and closed-chain ACK: OK" else "WINIMAGE two real CPU frames leased, empty-wake progress, exact reuse and closed-chain ACK: OK");
 }
 pub fn r4_app_main(app: *r.App) i32 {
     const sys = app.system();
     const child_mode = std.mem.eql(u8, app.args(), "/PRODUCER");
-    if (child_mode) trace(sys, "WINIMAGE producer entry");
     var service: a.ServiceInfo = .{};
     if (sys.serviceOpen("WINSVC", &service) != 0) return 2;
     defer _ = sys.serviceClose(service.handle);
@@ -279,10 +328,11 @@ pub fn r4_app_main(app: *r.App) i32 {
     if (sys.programOpenHandle(@intCast(app.raw.instance_id), &owner) != 0) return 3;
     var c: Context = .{ .sys = sys, .draw = app.drawing() orelse return 4, .desk = app.desktop() orelse return 5, .owner = owner, .endpoint = service.handle, .deadline = sys.ticks() +| sys.ticksFromMilliseconds(45000) };
     if (child_mode) {
+        trace(&c, "WINIMAGE producer entry");
         c.deadline = sys.ticks() +| sys.ticksFromMilliseconds(15000);
         producer(&c) catch |err| {
             var failure: [256]u8 = undefined;
-            trace(sys, std.fmt.bufPrint(&failure, "WINIMAGE producer FAILED: {s} line={d} window={d} rpc={d} phase={s}", .{ @errorName(err), failed_line, last_window, last_rpc, last_phase }) catch "WINIMAGE producer FAILED report");
+            trace(&c, std.fmt.bufPrint(&failure, "WINIMAGE producer FAILED: {s} line={d} window={d} rpc={d} phase={s}", .{ @errorName(err), failed_line, last_window, last_rpc, last_phase }) catch "WINIMAGE producer FAILED report");
             return 1;
         };
     } else parent(&c) catch |err| {
@@ -294,4 +344,25 @@ pub fn r4_app_main(app: *r.App) i32 {
         return 1;
     };
     return 0;
+}
+
+/// Existing exact two-image/Return/reuse/Close-chain oracle on the actual
+/// published native backend. Spectra owns the GUI child and its exact reap.
+pub fn nativeProducer(app: *r.App, status_path: [*:0]const u8) i32 {
+    const sys = app.system();
+    var service: a.ServiceInfo = .{};
+    if (sys.serviceOpen("WINSVC", &service) != 0) return 2;
+    defer _ = sys.serviceClose(service.handle);
+    var owner: a.ProgramProcessHandle = .{};
+    if (sys.programOpenHandle(@intCast(app.raw.instance_id), &owner) != 0) return 3;
+    var c: Context = .{ .sys = sys, .draw = app.drawing() orelse return 4, .desk = app.desktop() orelse return 5, .owner = owner, .endpoint = service.handle, .native = true, .native_report = status_path, .deadline = sys.ticks() +| sys.ticksFromMilliseconds(15000) };
+    trace(&c, "WINIMAGE native entry");
+    if (c.native_report_failed) return 8;
+    producer(&c) catch |err| {
+        var text: [256]u8 = undefined;
+        trace(&c, std.fmt.bufPrint(&text, "WINIMAGE native FAILED: {s} line={d} rpc={d} phase={s} native-phase={d} native-result={d}", .{ @errorName(err), failed_line, last_rpc, last_phase, last_native_phase, last_native_result }) catch "WINIMAGE native FAILED");
+        return 1;
+    };
+    trace(&c, NativeStatus.success);
+    return if (c.native_report_failed) 8 else 0;
 }

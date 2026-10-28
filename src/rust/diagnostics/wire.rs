@@ -33,6 +33,7 @@ pub enum Op {
     SnesFinish,
     Maximize,
     LaunchStatus,
+    CaptureStats,
 }
 impl Op {
     fn decode(value: u32) -> Option<Self> {
@@ -59,6 +60,7 @@ impl Op {
             20 => Self::SnesFinish,
             21 => Self::Maximize,
             22 => Self::LaunchStatus,
+            23 => Self::CaptureStats,
             _ => return None,
         })
     }
@@ -375,6 +377,16 @@ pub fn software_path(owner: Identity) -> Option<alloc::string::String> {
             "C:\\TEMP\\DP{:08X}-{:016X}.JSON",
             owner.instance,
             owner.generation
+        )
+    })
+}
+pub fn capture_path(owner: Identity, sequence: u64) -> Option<alloc::string::String> {
+    (owner.valid() && sequence <= 2).then(|| {
+        alloc::format!(
+            "C:\\TEMP\\CR{:08X}-{:016X}-{}.JSON",
+            owner.instance,
+            owner.generation,
+            sequence
         )
     })
 }

@@ -158,3 +158,39 @@ follows from the local software and native-model checks.
 
 Original R4OS material uses Apache License 2.0. See `LICENSE`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md` and the historical source transfer in `PROVENANCE.txt`.
+
+## Productive CPU capture replay (0.87.59)
+
+NativeOutput capture passes the current immutable engine replay descriptor into
+the layer cache. Eligible unchanged layers skip the CPU painter, preserving the
+existing exact layer/image/asset generations, bounds, scissor and damage guards.
+CPU/Desktop capture cannot use an old NativeOutput reuse mask. The painter call
+and the original independent GPU pixel oracle cover reuse, actual damage, geometry,
+atlas generation changes, CPU mode and cancellation.
+
+`SPECTRA CHECK DESKTOP /REPLAY` retains the existing APPDEF/CLOCK windows and
+original two-second revision contract, then runs the retained WINIMAGE producer
+with two actual device-local BOs on the published native binding. Its native
+branch is an explicitly owned Spectra GUI child; the original CPU fixture stays
+unchanged in behavior. Three explicit owner snapshots require increasing
+CPU capture reuse, completed native frames, actual native reads and all matching
+read returns after close on the same device/reset identity. A worker-owned state
+is unavailable, never a zero counter. No normal diagnostic polling, extra worker,
+forced rendering or optical visibility claim is introduced. CaptureStats opcode23
+retains the private80-byte request/144-byte response; Desktop, WINSVC and Spectra
+must be updated together. Reports are caller/generation-qualified, exclusive,
+and removed only by the owning check.
+
+The productive adapter and original GPU-pixel/owner cases pass locally. Fresh
+KVM4 and native16 qualification also pass with Desktop174/WINSVC21/Spectra86.
+The native GUI child uses a parent-claimed generation/nonce status file and
+an exact child-generation header; GUI completion output is unavailable by
+contract. File deletion follows actual reap. Native buffer/allocation calls
+require their canonical success1. The original queue/Take/Return/reuse/Close
+and timeout oracles remain. Two host cases reject stale paths and foreign or
+nonterminal receipts. Native case10 without observation fixtures proves
+CPU capture reuse125->161, visible native frames19->25, two additional actual
+image reads/returns (2->4 each), zero remaining reads/receipts, and three exact
+exit0 reaps. The earlier failed originals remain distinct observations for66;
+this functional pass supplies no measured elapsed speedup or physical receipt.
+One final STANDARD59 06365b71-c83d-4402-9d2e-fceea278e30e has30samples/4workers/metric2/all6scores validated locally and by complete server original/reference readback. Original SHA57905aa20c87623f0519ac7151fd70e6b41e6e7a8e802101fee6ca28e35a0cf2. Unisolated scores do not establish a desktop speedup. Publication is coordinated by the workspace roadmap.

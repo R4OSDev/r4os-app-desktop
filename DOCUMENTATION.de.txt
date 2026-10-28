@@ -112,3 +112,32 @@ Registrywechsel und Dienstverlust verwerfen alte Quittungen. Der vorhandene
 WINSVC-Snapshot-/DESKRUN-Poll, Aktivierung und Cleanup bleiben beim Besitzer.
 Gezielte native Faelle: RustNative.ps1 -Filter shell::tray. Fachbelege und
 Grenzen: Docs/Desktop/README.txt, Abschnitt0.87.15.
+
+0.87.59 / Desktop0.1.174: produktives Capture-Replay
+------------------------------------------------
+NativeOutput reicht den vorhandenen Engine-Replay unter kurzen getrennten
+Leihen an Cache::paint weiter. Unveraenderte Layer erreichen damit den fruehen
+CPU-Erfassungszweig. Damage, Layer-/Bild-/Assetgeneration, Bounds und Scissor
+bleiben verbindlich; CPU/Desktop-Modi verwenden kein altes Native-Mask.
+SPECTRA CHECK DESKTOP /REPLAY prueft explizit den aktiven nativen Owner, echte
+Bildleihen und deren Rueckgabe. Privater Opcode23/80ByteRequest/144ByteResponse;
+WINSVC21 und Spectra86 gehoeren zu dieser Diagnoseerweiterung. Kein Sampler im
+Normalbetrieb; keine physische Sicht- oder Latenzzusage.
+
+Ergaenzung59: APPDEF/CLOCK erzeugen klassische Flaechen und keine nativen BOs.
+Die originale2100ms-Pruefung bleibt; danach eigener WINIMAGE-Produzent mit
+zwei echten Device-local-BOs/GPU-Fences/Take/Return/Wiederverwendung/Close.
+Gleiche60sGesamtfrist/3sRPC, exklusiver neuer Sessionbesitz nach Reap der
+Originale. Erste native83-Pruefung NativeImageReadMissing bleibt als FAIL
+erhalten; CPU-Reuse9->36/Frames3->7 ist trotzdem separat belegt. Native
+Fall10 mit86 ohne Beobachter besteht: CPU-Reuse125->161, sichtbare native
+Frames19->25, zwei neue echte Bildleihen/Rueckgaben(2->4), Restleihen/Receipts0
+und drei exakteExit0-Reaps. KVM4-Originale und native16-Pruefungen bestanden.
+Fruehere Faelle bleiben getrennte offene Beobachtungen fuer66; kein
+Sekunden-Speedup oder physischer Sichtbeleg folgt daraus. GUI-CompletionRead liefert fuer
+diesen Prozess korrekt output_unavailable(-12). Fixture1.0.3 schreibt deshalb
+eine vor Spawn vom Parent beanspruchte generation-/noncegebundene Statusdatei
+mit exaktem Kindsheader; Loeschen erst nach Reap. Native Buffer- und
+Allokationsaufrufe verlangen den kanonischen Erfolg1; Queue/Service/Process
+behalten ihre anderen Rueckgabevertraege. Zwei Hostfaelle sichern Pfad- und
+Quittungszuordnung; das ist keine native GPU-Abnahme.
