@@ -207,3 +207,37 @@ ReferenzGET normalisiert gleich; OriginalSHA256 d538b089c24b973ba14209cdad415fed
 Gesamt135.521406/IPC141.872165 gegen59 137.870960/146.849660 unisoliert;
 keinSpeedup-/Noise-/Regressionsursachenbeweis und keinScore-/Uploadrerun.
 Alle Originale/Kontexte/SHA256 unter ExFiles/Reports/Benchmarks/87c87a4d-427c-4a9f-8c22-ac49e189dd03/.
+
+0.87.61 / begrenzte Primitive-Pakete (lokal/nativ qualifiziert)
+--------------------------------------------------------
+Die vorhandene16er-Liste scannt hoechstens16 Kommandos. Vollstaendig vom
+aktuellen Redraw weggeclippte Kommandos desselben Layers, derselben Textur
+und desselben Blendzustands unterbrechen eine kompatible sichtbare Liste
+nicht mehr. Der Cursor zaehlt gescannte Kommandos getrennt von eingereichten
+Draws; erfolgreiche Einreichung/Jobtracking bleibt Voraussetzung fuer das
+Vorruecken. Abhaengigkeit gilt weiterhin fuer den ersten Draw der Liste.
+Zustands-/Ressourcenwechsel bleiben Grenzen, auch wenn der betreffende
+Draw gerade geclippt ist. Fremde Kompositionsschichten besitzen verschiedene
+Quellen und bleiben deshalb eigene Jobs; gleiche Pipeline allein erlaubt
+kein Zusammenlegen ihrer Retentions-/Schreibrechte.
+
+Ein konkreter partieller Redraw mit zwei geaenderten Bildpunkten und einem
+dazwischen aufgezeichneten unveraenderten, geclippten Bild braucht zuvor
+drei, jetzt zwei Primitive-Jobs. Dieselben drei sichtbaren Draws, alle64
+Originalpixel und unberuehrte Bildteile werden gegen den echten R4GFX-
+Besitzer geprueft. Der alte Code scheitert am Jobzaehler3statt2, der neue
+besteht;19Desktop-/3Geometrie-/1Clockfaelle bestehen. Kein allgemeiner
+Beschleunigungsfaktor aus diesem Arbeitszaehler. Kernel417/SDK105/C54 und
+Desktop-Warte-/Aufnahmebudgets bleiben gleich.
+
+0.87.61 Abschluss: aktuelle KVM4-/Native16-/Originalpixel-/Fence-/
+Ressourcen- und normale PostGPU-Neustartbelege stehen in
+Docs/Core/Parallelitaet.txt/0.87.61. Physische Sicht/Hoeren/Latenz SKIP.
+FinalerSTANDARD61: 287b890d-9d42-43de-95a1-7d39d67a8ae4, Suite3/metric2/30Samples/
+4vollstaendigeKVM-Worker/sechs gueltige Scores, lokal und R4OS Server
+vollstaendig validiert. Original- und frischer Referenz-GET vollstaendig
+verlustfrei normalisiert gleich; OriginalSHA256
+e496252f8ba7cfd01f400749f933a02005c60647f1f57ff8c72f4dbd584ba2a8.
+Gesamt139.615124/IPC131.865145 gegen60 135.521406/141.872165 unisoliert;
+kein Speedup-, Noise- oder Regressionsursachenbeweis, kein Score-/Uploadrerun.
+Originale/Kontexte/SHA256: ExFiles/Reports/Benchmarks/287b890d-9d42-43de-95a1-7d39d67a8ae4/.

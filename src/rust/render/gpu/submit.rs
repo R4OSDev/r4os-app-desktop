@@ -147,21 +147,30 @@ impl Engine {
                 let mut grids = [g::R4GfxLogicalGrid::default(); g::render_list_capacity as usize];
                 let mut mapped = false;
                 let mut count = 0;
+                let mut end = self.next_primitive;
                 let limit = if self.batch_enabled {
                     requests.len()
                 } else {
                     1
                 };
-                while count < limit && self.next_primitive + count < frame.commands().len() {
-                    let command = frame.commands()[self.next_primitive + count];
+                // Validate one bounded packet before making the provider call.
+                // Fully clipped commands of this same state do not split two
+                // visible draws. Different resources/blend/layer remain a
+                // boundary even when their command happens to be clipped.
+                while count < limit
+                    && end < frame.commands().len()
+                    && end - self.next_primitive < requests.len()
+                {
+                    let command = frame.commands()[end];
                     if command.layer != first.layer
                         || command.texture != first.texture
                         || command.over != first.over
                     {
                         break;
                     }
+                    end += 1;
                     let Some(clip) = self.primitive_clip(command) else {
-                        break;
+                        continue;
                     };
                     grids[count] = logical_grid(command.grid);
                     mapped |= command.grid.enabled != 0;
@@ -233,7 +242,7 @@ impl Engine {
                 accepted(rc)?;
                 self.jobs.track(s, slot, handle, None, 0, 0)?;
                 self.jobs.mark_layer_write(first.layer as usize, slot)?;
-                self.next_primitive += count;
+                self.next_primitive = end;
                 self.render_jobs = self.render_jobs.saturating_add(1);
                 self.primitive_jobs = self.primitive_jobs.saturating_add(1);
                 self.primitive_draws = self.primitive_draws.saturating_add(count as u64);

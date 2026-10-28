@@ -182,6 +182,89 @@ pub(crate) fn pump(
     panic!("original scheduling model stalled");
 }
 #[test]
+fn bounded_packet_skips_only_clipped_compatible_draws() {
+    with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut engine = Engine::new().unwrap();
+        let mut frame = Frame::new().unwrap();
+        frame.set_mirror(false).unwrap();
+        let white = [0xffffff];
+        let green = [0x00ff00];
+        for turn in 0..2 {
+            cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+            cache
+                .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
+                    p.fill(FULL, 0)?;
+                    for (x, y) in [(1, 1), (6, 6), (3, 1)] {
+                        let pixels = if turn == 0 || y == 6 { &white } else { &green };
+                        p.picture(Picture {
+                            view: View::new(
+                                Format::Xrgb,
+                                1,
+                                1,
+                                4,
+                                PixelBytes::from_words(pixels).bytes(),
+                            ),
+                            viewport: Rect::new(x, y, 1, 1),
+                            clip: FULL,
+                            source_x: 0,
+                            source_y: 0,
+                            guest_w: 1,
+                            guest_h: 1,
+                        })?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            cache.finish(Some(&frame)).unwrap();
+            engine
+                .composition_damage(
+                    geometry::topology::Viewport {
+                        pixel_w: 8,
+                        pixel_h: 8,
+                        scale: 120,
+                        ..Default::default()
+                    },
+                    Some(if turn == 0 {
+                        FULL
+                    } else {
+                        Rect::new(1, 1, 3, 1)
+                    }),
+                )
+                .unwrap();
+            let jobs = engine.primitive_jobs;
+            let draws = engine.primitive_draws;
+            begin(app, device, &mut engine, &cache, Some(&frame));
+            pump(
+                app,
+                device,
+                &mut engine,
+                &mut cache,
+                Some(&mut frame),
+                Progress::Copied,
+            );
+            let mut pixels = [0; 64];
+            for index in [9, 11] {
+                pixels[index] = if turn == 0 { 0xffffff } else { 0x00ff00 };
+            }
+            pixels[54] = 0xffffff;
+            assert_eq!(visible(), pixels, "same visible and preserved pixels");
+            assert_eq!(
+                engine.primitive_draws - draws,
+                if turn == 0 { 4 } else { 3 }
+            );
+            assert_eq!(
+                engine.primitive_jobs - jobs,
+                2,
+                "one fill packet and one immutable image packet"
+            );
+        }
+        let s = device.bind(app).unwrap();
+        engine.close(&s).unwrap();
+    });
+}
+
+#[test]
 fn original_upload_partial_cancel_alpha_and_primitive_reuse_oracles() {
     with(|app, device| {
         let mut cache = Cache::new(1024 * 1024).unwrap();
