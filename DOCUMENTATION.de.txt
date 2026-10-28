@@ -371,7 +371,9 @@ unveraenderten Layer zwischen zwei entfernten Damageflaechen.
 KVM4Q1: SMP, DESKTOP HOST/RESTART/CAPTURE/LAUNCH, CPUWINIMAGE und alle
 originalen langen BASIC-/GB-/SNES60s-Vertraege einschliesslich Close/Reap
 bestanden. BOOT417 und fuenf Module direkt aus dem Gastimage abgeglichen;
-normaler Poweroff0. Kein neuer63-Fachlauf musste wiederholt werden.
+normaler Poweroff0. KVM und nativer Fachlauf bestanden jeweils beim ersten
+Aufruf. Entwicklungsfaelle korrigierten zuvor die getrennte Jobzaehlung und
+die volle Referenzinvalidierung; ihre Originalprotokolle bleiben erhalten.
 
 OssiPC:63/417/D181/W24/S92/N337,16 konfiguriert/schedulierbar. Das einzelne
 5403217Byte-Paket wurde voll transportverglichen, VERIFY/STAGE, einmal
