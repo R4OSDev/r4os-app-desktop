@@ -300,6 +300,46 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
                 assert!(first.active());
                 assert_eq!(windows.front(1).unwrap().readers(), 2);
                 assert!(!windows.front(1).unwrap().has_receipt());
+            }
+            // A third CPU-only scene may borrow this very same front while
+            // the original first GPU graph is still waiting on its producer.
+            // Replacing it returns only that unsubmitted read, without a
+            // consumer fence or failure and without touching either GPU loan.
+            let mut recorder = Engine::new().unwrap();
+            let mut latest = Cache::new(1024).unwrap();
+            let mut latest_frame = Frame::new().unwrap();
+            latest_frame.set_mirror(false).unwrap();
+            let mut latest_reads = Reads::default();
+            for _ in 0..2 {
+                capture_window(
+                    &mut latest,
+                    &mut latest_frame,
+                    &mut recorder,
+                    &mut latest_reads,
+                    &mut windows,
+                    view,
+                );
+                assert_eq!(windows.front(1).unwrap().readers(), 3);
+                assert_eq!(
+                    first.adopt_recording(&mut recorder, Some(geometry::logical(view).unwrap())),
+                    Err(Error::Busy)
+                );
+                assert!(!first.return_recording(&mut latest_reads.completion(&mut windows)));
+                assert!(recorder.return_recording(&mut latest_reads.completion(&mut windows)));
+                assert!(latest_reads.empty());
+                assert_eq!(windows.front(1).unwrap().readers(), 2);
+                assert!(!windows.front(1).unwrap().has_receipt());
+            }
+            assert_eq!(
+                (
+                    latest_reads.captured,
+                    latest_reads.completed,
+                    latest_reads.failed
+                ),
+                (2, 2, 0)
+            );
+            {
+                let s = device.bind(app).unwrap();
                 control(&s, 12, 1);
             }
             pump_window(
@@ -356,6 +396,39 @@ fn original_two_readers_four_fractional_rotations_and_lost_return_fence_ack() {
             assert_eq!(windows.front(1).unwrap().readers(), 0);
             let allocated = stats()[1];
             let imported = stats()[11];
+            // Adopt the one latest CPU recording into a real, already warm
+            // transaction with existing images and a completed source receipt.
+            capture_window(
+                &mut latest,
+                &mut latest_frame,
+                &mut recorder,
+                &mut latest_reads,
+                &mut windows,
+                view,
+            );
+            assert_eq!(windows.front(1).unwrap().readers(), 1);
+            assert!(reads2.empty());
+            second.adopt_recording(&mut recorder, None).unwrap();
+            core::mem::swap(&mut two, &mut latest);
+            core::mem::swap(&mut frame2, &mut latest_frame);
+            latest_reads.captured += reads2.captured;
+            latest_reads.completed += reads2.completed;
+            latest_reads.failed += reads2.failed;
+            core::mem::swap(&mut reads2, &mut latest_reads);
+            begin(app, device, &mut second, &two, Some(&frame2));
+            pump_window(
+                app,
+                device,
+                &mut second,
+                &mut two,
+                &mut frame2,
+                &mut reads2,
+                &mut windows,
+            );
+            assert_eq!(windows.front(1).unwrap().readers(), 0);
+            assert_eq!(reads2.captured, reads2.completed);
+            assert_eq!(reads2.failed, 0);
+            assert_eq!((stats()[1], stats()[11]), (allocated, imported));
             capture_window(
                 &mut two,
                 &mut frame2,

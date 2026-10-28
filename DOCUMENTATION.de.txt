@@ -241,3 +241,79 @@ e496252f8ba7cfd01f400749f933a02005c60647f1f57ff8c72f4dbd584ba2a8.
 Gesamt139.615124/IPC131.865145 gegen60 135.521406/141.872165 unisoliert;
 kein Speedup-, Noise- oder Regressionsursachenbeweis, kein Score-/Uploadrerun.
 Originale/Kontexte/SHA256: ExFiles/Reports/Benchmarks/287b890d-9d42-43de-95a1-7d39d67a8ae4/.
+
+0.87.62 / Desktop0.1.180: neueste Szene waehrend alter GPU-Arbeit
+----------------------------------------------------------------
+Output behaelt den eingereichten State mit Device, Ressourcen, Jobs,
+Swapchain und echten Quittungen. Daneben liegt hoechstens eine noch nicht
+eingereichte CPU-Aufzeichnung des neuesten UI-Zustands.
+Jede weitere Aenderung ersetzt diese Aufzeichnung. Es entsteht keine FIFO
+ueberholter Bilder. Der Ereignisloop erfasst neue Invalidierungen zuerst;
+ohne neue Invalidierung startet er die schon vorbereitete Szene selbst.
+
+Die Aufnahme erfordert keine neue Device-Session. Vor dem Einreichen
+prueft der GPU-Besitzer erneut Faehigkeiten, exakte Device-/Resetgeneration,
+freie Bildzulassung, beendete alte GPU-Jobs und deren Bildleseleihen.
+Ein Generationswechsel macht die wartende Aufnahme ungueltig; ihre Leihen
+bleiben bis zur ausdruecklichen Rueckgabe besessen. Ein sichtbarer Front-
+Buffer bleibt ein echter Lebenszeitbesitzer, erlaubt aber weiterhin die
+vorhandene Zulassung eines anderen Back-Buffers.
+
+Native Cache-/Kommandometadaten werden getrennt gefuehrt. Atlaspixel teilen
+Arc-Seiten bis zum ersten Schreibzugriff; Uploadquittung, Verdraengung und
+Pixelkopien aendern den alten GPU-Snapshot nicht. Pro Aufnahme gelten weiter
+32Texturen/2048Assets/8192Primitive/64MB-Atlasbudget. Alter und neuester
+CPU-Atlas haben zusammen hoechstens128MB Pixel plus begrenzte Metadaten;
+die vorhandene256MB-GPU-Ressourcenrechnung bleibt beim Transaktionsowner.
+Der kalte vorhandene256KB-Compute-Worker bekommt vorher einen Metadaten-
+Seed; im normalen Pfad wird erst bei tatsaechlicher Ueberlappung geforkt.
+Eine Aufnahme bei ruhender GPU entfernt den alten Seed vor dem Schreiben.
+
+CPU-Replay von unveraenderten Layern besagt nur, dass die CPU-Kommandos
+wiederverwendbar sind. Die reale Engine prueft ihre GPU-Residency separat.
+Damage der ueberholten Aufnahmen bleibt bis zur naechsten Einreichung
+vereinigt. Der alte Desktop-Modus erfasst eine vollstaendige neue Szene.
+Eine nie eingereichte Aufnahme gibt exakt ihre eigenen Bildleseleihen mit
+None-Consumer und ohne Fehler zurueck. GPU-eigene Leihen/Fences bleiben bis
+zum echten Abschluss erhalten; Close/Drop behalten unquittierte Besitzer.
+Es kommen weder Threads noch laengere Deadlines oder neue API-/ABI-Slots hinzu.
+
+Der explizite desktop-capture-owner-v1-Bericht ergaenzt kumulative
+prepared_while_busy/coalesced_scenes/prepared_with_gpu_jobs/
+prepared_during_worker und pending_scene. prepared_with_gpu_jobs bedeutet:
+waehrend der Aufnahme besitzt die alte aktive Engine noch GPU-Jobs ohne
+Quittung des physischen Endes. Der Zaehler allein ist kein optischer oder
+isolierter Latenzbeleg; kein zusaetzlicher Sampler laeuft im Normalbetrieb.
+Die Besitzerfaelle halten echten Worker bzw. GPU-Modelljobs zurueck,
+erfassen B/C/D nach A, pruefen A unveraendert und danach direkt D, exakte
+Pixel, alte/neue Eingabezeit, Cursor und vollstaendigen Abbau. Weitere
+Faelle pruefen CPU-Replay ohne GPU-Residency, Atlas-COW und zusaetzliche
+Bildleihen waehrend des originalen Zwei-Leser-/Rotationsfalls.
+Desktop180: CPU-Replaymasken gelten nur im aktuellen nativen View. Ein
+Wechsel zum Desktop-Modus erzwingt dessen eigene Aufnahme; die alte Maske
+darf keine benoetigten Zeichenbefehle ueberspringen. Der originale
+GPU-Bildtest uebernimmt zudem echte neue CPU-Bildleihen in eine warme
+Engine und behaelt alle Pixel-/Fence-/Rueckgabepruefungen.
+
+Vor dem Abbau eines fehlgeschlagenen nativen Outputs bleiben hoechstens
+vier reine Fehlerwerte im Manager: Ziel, Stufe, GPU-/Capturefehler, Frame,
+Worker-/Visiblezustand und alte/neue Leihen. Ein workerbesessener State
+bleibt im Bericht unbekannt (null), statt eine Freigabe vorzutaueschen.
+Nur der explizite CaptureStats-Bericht serialisiert diese Werte; kein
+Polling oder neuer RPC. Ein unabhaengiger SDK-Zig-JSONparser prueft leere
+und volle Berichte einschliesslich uint64MAX.
+
+23 Rust-Besitzerfaelle, drei originale Geometriefaelle und eine genaue
+Uhr bestehen; der normale Produktbuild ist erfolgreich. Die aktuelle
+KVM-/Native-/STANDARD-Abnahme ist im Abschluss unten belegt. Der fruehere D179-Nativlauf
+verlor den GR-Owner waehrend eines echten Bild-Bind; dieser Fehler bleibt
+als OBS-08762-NATIVE-BIND1 erhalten. Der Maskenfix besitzt einen eigenen
+Hostbeleg, erklaert aber nicht allein die native Abbruchursache.
+
+0.87.62 Abschluss: Desktop180/Spectra92 lokale Owner23/3/1, KVM4Q5 mit
+originalen langen60s-Vertraegen, native16/2BOreturns/3Exit0reaps/keine
+nativeFailures und normaler PostGPU-Ressourcenabbau bestanden. Historische
+rote Originale bleiben in66; physische Sicht/Hoeren/Latenz SKIP.
+Genau1finalSTANDARD62 e9f64dc9-ec35-4765-9cd1-c7220270545a/30/4/metric2/6valid:
+lokal und R4OS Server vollstaendig validiert; OriginalSHA256 a87bc2f70d68f2111b589f93f15f6e0b6d026372e1e84407cd9497bac8e78c23.
+Vollstaendige Belege: Docs/Core/Parallelitaet.txt/0.87.62 und Laufarchiv.

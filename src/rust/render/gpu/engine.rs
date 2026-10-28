@@ -293,6 +293,56 @@ impl Engine {
         }
         Ok(())
     }
+    /// Transfer a CPU-only recording's exact external read identities only
+    /// after the previous transaction has physically retired. GPU resources,
+    /// fences, swapchain images and completion history stay with this owner.
+    pub fn adopt_recording(&mut self, recorded: &mut Self, damage: Option<Rect>) -> Result<()> {
+        if self.active()
+            || !self.jobs.drained()
+            || self.sources.iter().any(|s| s.borrowed)
+            || !recorded.cpu_recording()
+        {
+            return Err(Error::Busy);
+        }
+        if let Some(view) = recorded.capture_view {
+            self.composition_damage(view, damage)?;
+        } else {
+            self.capture_view = None;
+            self.capture_damage = None;
+        }
+        core::mem::swap(&mut self.sources, &mut recorded.sources);
+        self.present_intent = 0;
+        Ok(())
+    }
+    pub fn return_recording(&mut self, finish: &mut impl FinishExternal) -> bool {
+        if !self.cpu_recording() {
+            return false;
+        }
+        self.finish_external(finish, false)
+    }
+    fn cpu_recording(&self) -> bool {
+        !self.active()
+            && self.jobs.drained()
+            && self.chain.slot == 0
+            && self.resources.charged == 0
+            && self
+                .resources
+                .layers
+                .iter()
+                .chain(self.resources.assets.iter())
+                .chain(self.resources.outputs.iter())
+                .chain(self.resources.workings.iter())
+                .chain(core::iter::once(&self.resources.staging))
+                .all(|i| i.resource.slot == 0 && i.color_view.slot == 0 && i.opaque_view.slot == 0)
+            && [
+                self.resources.over,
+                self.resources.blit,
+                self.resources.fill,
+                self.resources.sampler,
+            ]
+            .iter()
+            .all(|r| r.slot == 0)
+    }
     fn external_source(&self, index: usize) -> Option<External> {
         let source = self.sources.get(index)?;
         if source.borrowed { source.value } else { None }

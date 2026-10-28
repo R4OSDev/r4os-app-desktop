@@ -92,6 +92,41 @@ impl Cache {
     pub fn entries(&self) -> &[Entry] {
         &self.entries
     }
+    /// Only native recordings can be forked without duplicating raster
+    /// buffers. External image metadata grants no read loan by itself.
+    pub fn fork_recording(&self) -> Result<Self> {
+        if self.collecting
+            || self.failure.is_some()
+            || !self.scratch.is_empty()
+            || self.entries.iter().any(|e| !e.pixels.is_empty())
+        {
+            return Err(Error::State);
+        }
+        let mut out = Self::new(self.budget)?;
+        for (to, from) in out.entries.iter_mut().zip(&self.entries) {
+            *to = Entry {
+                key: from.key,
+                pixels: Vec::new(),
+                bounds: from.bounds,
+                capture_bounds: from.capture_bounds,
+                generation: from.generation,
+                frame: from.frame,
+                dirty: from.dirty,
+                initialized: from.initialized,
+                external: from.external,
+            };
+        }
+        out.commands.extend_from_slice(&self.commands);
+        out.screen = self.screen;
+        out.logical = self.logical;
+        out.view = self.view;
+        out.frame = self.frame;
+        out.complete_scene = self.complete_scene;
+        out.changed_bytes = self.changed_bytes;
+        out.unchanged_layers = self.unchanged_layers;
+        out.reused_captures = self.reused_captures;
+        Ok(out)
+    }
     pub fn commands(&self) -> &[Command] {
         &self.commands
     }

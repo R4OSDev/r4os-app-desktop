@@ -31,6 +31,9 @@ use r4os_sdk::{
     App, StartupInfo, abi as a, c_facades as c, graphics::Graphics, resources::Resources,
     time::Clock,
 };
+#[path = "native_recording.rs"]
+mod recording;
+use recording::Recording;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Progress {
@@ -187,6 +190,17 @@ fn now(app: &App<'_>) -> Option<u64> {
 pub struct Output<'a> {
     state: Option<Owned<State>>,
     preparation: Option<Worker<'a, Preparation>>,
+    seed: Option<Owned<Recording>>,
+    newest: Option<Owned<Recording>>,
+    latest_input_ns: u64,
+    latest_time: u64,
+    capture_error: Option<CaptureError>,
+    failure_stage: &'static str,
+    latest_cursor: CaptureCursor,
+    pub scenes_prepared_while_busy: u64,
+    pub scenes_coalesced: u64,
+    pub scenes_prepared_with_gpu_jobs: u64,
+    pub scenes_prepared_during_worker: u64,
     deadline: u64,
     revision: u64,
     failed_revision: Option<u64>,
@@ -279,6 +293,17 @@ impl<'a> Output<'a> {
         Ok(Self {
             state: Some(state),
             preparation: None,
+            seed: None,
+            newest: None,
+            latest_input_ns: 0,
+            latest_time: 0,
+            capture_error: None,
+            failure_stage: "none",
+            latest_cursor: CaptureCursor::default(),
+            scenes_prepared_while_busy: 0,
+            scenes_coalesced: 0,
+            scenes_prepared_with_gpu_jobs: 0,
+            scenes_prepared_during_worker: 0,
             deadline: 0,
             revision: 0,
             failed_revision: None,
@@ -311,7 +336,7 @@ impl<'a> Output<'a> {
             device_generation: self.device_generation,
             reset_generation: self.reset_generation,
             operations: self.gpu_operations,
-            ready: !self.blocks_capture(time) && self.preparation.is_none(),
+            ready: !self.blocks_capture(time),
             receipts: self.receipts.external(),
         })
     }
@@ -320,16 +345,31 @@ impl<'a> Output<'a> {
     }
     pub fn capture_state(&self) -> Option<super::selection::CaptureState> {
         let state = self.state.as_ref()?;
+        let newest = self.newest.as_deref();
         Some(super::selection::CaptureState {
             frame: state.cache.frame(),
             reused_captures: state.cache.reused_captures,
             atlas_reused_layers: state.engine.atlas_reused_layers,
             asset_misses: state.frame.assets.misses,
-            captured_reads: state.reads.captured,
-            completed_reads: state.reads.completed,
-            failed_reads: state.reads.failed,
-            reads_empty: state.reads.empty(),
+            captured_reads: state
+                .reads
+                .captured
+                .saturating_add(newest.map_or(0, |s| s.reads.captured)),
+            completed_reads: state
+                .reads
+                .completed
+                .saturating_add(newest.map_or(0, |s| s.reads.completed)),
+            failed_reads: state
+                .reads
+                .failed
+                .saturating_add(newest.map_or(0, |s| s.reads.failed)),
+            reads_empty: state.reads.empty() && newest.is_none_or(|s| s.reads.empty()),
             external_receipts: self.receipts.external(),
+            prepared_while_busy: self.scenes_prepared_while_busy,
+            coalesced_scenes: self.scenes_coalesced,
+            prepared_with_gpu_jobs: self.scenes_prepared_with_gpu_jobs,
+            prepared_during_worker: self.scenes_prepared_during_worker,
+            pending_scene: newest.is_some_and(|s| s.captured),
         })
     }
     pub fn execution_observation(&self) -> super::selection::Execution {
@@ -353,6 +393,27 @@ impl<'a> Output<'a> {
             visible_ns: self.completed_status.and_then(|s| time(s.visible_ns)),
         }
     }
+    pub fn failure_observation(
+        &self,
+        target: a::GfxOutputTarget,
+    ) -> super::selection::NativeFailure {
+        let state = self.state.as_deref();
+        let latest = self.newest.as_deref();
+        super::selection::NativeFailure {
+            target: target.into(),
+            stage: self.failure_stage,
+            gpu_error: state.and_then(|s| s.engine.fault),
+            capture_error: self.capture_error,
+            frame: state.map(|s| s.cache.frame()),
+            latest_frame: latest.map(|s| s.cache.frame()),
+            worker_pending: self.preparation.is_some(),
+            awaiting_visible: self.awaiting_visible,
+            latest_captured: latest.is_some_and(|s| s.captured),
+            old_reads_empty: state.map(|s| s.reads.empty()),
+            latest_reads_empty: latest.is_none_or(|s| s.reads.empty()),
+            gpu_physically_retired: state.map(|s| s.engine.jobs.physically_retired()),
+        }
+    }
     pub fn clean_frame(
         &self,
         target: a::GfxOutputTarget,
@@ -365,7 +426,10 @@ impl<'a> Output<'a> {
         })
     }
     pub fn busy(&self) -> bool {
-        self.preparation.is_some()
+        self.newest
+            .as_ref()
+            .is_some_and(|s| s.captured || !s.reads.empty())
+            || self.preparation.is_some()
             || self.awaiting_visible
             || self
                 .state
@@ -389,7 +453,10 @@ impl<'a> Output<'a> {
         Decision::operations(required, info.gpu_operations)
     }
     pub fn needs_polling(&self) -> bool {
-        self.preparation.is_some()
+        self.newest
+            .as_ref()
+            .is_some_and(|s| s.captured || !s.reads.empty())
+            || self.preparation.is_some()
             || self.awaiting_visible
             || self.state.as_ref().is_some_and(|s| {
                 s.engine.needs_polling() || !s.reads.empty() || s.capture.needs_polling()
@@ -401,6 +468,16 @@ impl<'a> Output<'a> {
         })
     }
     pub fn blocks_capture(&self, time: u64) -> bool {
+        if !self.failure_reported
+            && (self.newest.is_some()
+                || self.seed.is_some()
+                || self
+                    .state
+                    .as_ref()
+                    .is_some_and(|s| s.cache.captured() && s.engine.fault.is_none()))
+        {
+            return false;
+        }
         !self.failure_reported
             && (self.preparation.is_some()
                 || self.awaiting_visible
@@ -408,6 +485,17 @@ impl<'a> Output<'a> {
                     .state
                     .as_ref()
                     .is_none_or(|s| s.engine.capture_blocked(time)))
+    }
+    /// The event loop gives newly dirty input precedence over this one draft.
+    /// Only physical retirement and visibility allow promotion to a transaction.
+    pub fn pending_ready(&self, time: u64) -> bool {
+        self.failed_revision.is_none()
+            && self.preparation.is_none()
+            && !self.awaiting_visible
+            && self.newest.as_ref().is_some_and(|s| s.captured)
+            && self.state.as_ref().is_some_and(|s| {
+                s.reads.empty() && s.engine.fault.is_none() && !s.engine.capture_blocked(time)
+            })
     }
     pub fn capture_wait_ticks(&self, time: u64, hz: u32, limit: u64) -> u64 {
         self.state
@@ -419,9 +507,21 @@ impl<'a> Output<'a> {
             return false;
         }
         self.revision = revision;
+        self.latest_input_ns = input_ns;
+        self.latest_time = time;
+        // The worker owns the old device, not the independent CPU recording.
+        // Actual device/reset/capability admission is repeated before submit.
+        if self.preparation.is_some() {
+            return self.seed.is_some() || self.newest.is_some();
+        }
         let Some(state) = self.state.as_deref_mut() else {
             return false;
         };
+        // CPU recording uses the last admitted generation and never calls the
+        // device. Fresh capability/reset/image admission belongs to promotion.
+        if self.newest.is_some() || self.awaiting_visible || state.engine.capture_blocked(time) {
+            return self.seed.is_some() || self.newest.is_some() || state.cache.captured();
+        }
         let Ok(session) = state.device.bind(app) else {
             return false;
         };
@@ -446,6 +546,15 @@ impl<'a> Output<'a> {
             state.engine.invalidate();
             self.device_generation = info.device_generation;
             self.reset_generation = info.reset_generation;
+            if self
+                .newest
+                .as_ref()
+                .is_some_and(|s| s.generation != (self.device_generation, self.reset_generation))
+            {
+                self.failed_revision = Some(revision);
+                return false;
+            }
+            self.seed = None;
         }
         state.engine.input_ns = input_ns;
         match state.engine.acquire(&session, input_ns) {
@@ -472,6 +581,71 @@ impl<'a> Output<'a> {
         icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
         shapes: &mut impl Shapes,
     ) -> Result<Stats, CaptureError> {
+        self.capture_error = None;
+        self.failure_stage = "capture";
+        let older_busy = self.preparation.is_some()
+            || self.awaiting_visible
+            || self
+                .state
+                .as_ref()
+                .is_none_or(|s| s.engine.capture_blocked(self.latest_time) || !s.reads.empty());
+        let unretired_gpu_jobs = self
+            .state
+            .as_ref()
+            .is_some_and(|s| s.engine.active() && !s.engine.jobs.physically_retired());
+        if older_busy || self.newest.is_some() {
+            if self.newest.is_none() {
+                self.newest = self.seed.take();
+                if self.newest.is_none() {
+                    if let Some(state) = self.state.as_deref() {
+                        self.newest = Owned::new_with(|| {
+                            Recording::seed(
+                                &state.cache,
+                                &state.frame,
+                                (self.device_generation, self.reset_generation),
+                            )
+                        })
+                        .ok();
+                    }
+                }
+            }
+            let newest = self.newest.as_mut().ok_or(CaptureError::State)?;
+            let replacing = newest.captured;
+            self.failure_stage = "capture-newest";
+            let result = unsafe {
+                newest.capture(
+                    windows,
+                    mode,
+                    scene,
+                    damage,
+                    fonts_cache,
+                    fonts,
+                    icons,
+                    shapes,
+                    self.latest_input_ns,
+                    self.latest_cursor,
+                )
+            };
+            self.capture_error = result.as_ref().err().copied();
+            if result.is_ok() {
+                if unretired_gpu_jobs {
+                    self.scenes_prepared_with_gpu_jobs =
+                        self.scenes_prepared_with_gpu_jobs.saturating_add(1);
+                }
+                if self.preparation.is_some() {
+                    self.scenes_prepared_during_worker =
+                        self.scenes_prepared_during_worker.saturating_add(1);
+                }
+                if older_busy {
+                    self.scenes_prepared_while_busy =
+                        self.scenes_prepared_while_busy.saturating_add(1);
+                }
+                if replacing {
+                    self.scenes_coalesced = self.scenes_coalesced.saturating_add(1);
+                }
+            }
+            return result;
+        }
         // A retained visible front still makes lifetime teardown busy. It
         // does not block capture into the distinct back buffer admitted by
         // available(). The scene owner separately checks active GPU work and
@@ -479,6 +653,8 @@ impl<'a> Output<'a> {
         if self.preparation.is_some() || self.awaiting_visible {
             return Err(CaptureError::State);
         }
+        // Nothing still samples these CPU pages; avoid COW on the hot idle path.
+        self.seed = None;
         let state = self.state.as_deref_mut().ok_or(CaptureError::State)?;
         // The original single-display caller reconstructs a new/rotating
         // target before capture. Keep that rule with the native target owner;
@@ -508,6 +684,7 @@ impl<'a> Output<'a> {
                 shapes,
             )
         };
+        self.capture_error = result.as_ref().err().copied();
         if result.is_ok() {
             state.capture_damage = damage.iter().copied().reduce(Rect::merged);
             self.captured_frame = state.cache.frame();
@@ -525,7 +702,65 @@ impl<'a> Output<'a> {
         time: u64,
     ) -> bool {
         if self.preparation.is_some() || self.awaiting_visible {
-            return false;
+            return self.newest.as_ref().is_some_and(|s| s.captured);
+        }
+        if self.state.as_ref().is_some_and(|s| s.engine.active()) {
+            return self.newest.as_ref().is_some_and(|s| s.captured);
+        }
+        if self.newest.as_ref().is_some_and(|s| s.captured) {
+            if !self.pending_ready(time) {
+                return true;
+            }
+            let state = match self.state.as_deref_mut() {
+                Some(s) => s,
+                None => return false,
+            };
+            let newest = self.newest.as_mut().unwrap();
+            {
+                let Ok(session) = state.device.bind(app) else {
+                    return true;
+                };
+                let Ok(info) = session.refresh() else {
+                    return true;
+                };
+                let required = state.engine.required_operations();
+                if newest.generation != (info.device_generation, info.reset_generation)
+                    || info.gpu_operations & required != required
+                {
+                    self.failure_stage = "promote-admission";
+                    self.failed_revision = Some(self.revision);
+                    return false;
+                }
+                match state.engine.acquire(&session, newest.input_ns) {
+                    Ok(()) => (),
+                    Err(gpu::Error::Busy) => return true,
+                    Err(error) => {
+                        state.engine.cancel(&session, error);
+                        self.failed_revision = Some(self.revision);
+                        return false;
+                    }
+                }
+            }
+            let damage = newest.damage;
+            self.failure_stage = "promote-sources";
+            if state
+                .engine
+                .adopt_recording(&mut newest.recorder, damage)
+                .is_err()
+            {
+                return false;
+            }
+            core::mem::swap(&mut state.cache, &mut newest.cache);
+            core::mem::swap(&mut state.frame, &mut newest.frame);
+            newest.reads.captured = newest.reads.captured.saturating_add(state.reads.captured);
+            newest.reads.completed = newest.reads.completed.saturating_add(state.reads.completed);
+            newest.reads.failed = newest.reads.failed.saturating_add(state.reads.failed);
+            core::mem::swap(&mut state.reads, &mut newest.reads);
+            state.capture_damage = newest.damage;
+            state.capture_cursor = newest.cursor;
+            state.engine.input_ns = newest.input_ns;
+            self.captured_frame = state.cache.frame();
+            self.newest = None;
         }
         let Some(state) = self.state.as_deref_mut() else {
             return false;
@@ -541,6 +776,7 @@ impl<'a> Output<'a> {
         state.capture.demand(self.capture_demand);
         let prepare_capture = self.capture_demand && time >= state.capture.retry_ns;
         let view = state.capture_view();
+        self.failure_stage = "start-device";
         let Ok(session) = state.device.bind(app) else {
             return false;
         };
@@ -565,6 +801,7 @@ impl<'a> Output<'a> {
                     true
                 }
                 Err(error) => {
+                    self.failure_stage = "begin";
                     state.engine.cancel(&session, error);
                     self.failed_revision = Some(self.revision);
                     false
@@ -572,6 +809,16 @@ impl<'a> Output<'a> {
             };
         }
         drop(session);
+        // Only the cold worker removes State from the event loop. Preserve a
+        // metadata/COW seed first; ordinary active frames fork lazily on input.
+        self.seed = Owned::new_with(|| {
+            Recording::seed(
+                &state.cache,
+                &state.frame,
+                (self.device_generation, self.reset_generation),
+            )
+        })
+        .ok();
         let task = Preparation {
             state: self.state.take().unwrap(),
             raw: app.start_context() as *const _ as usize,
@@ -587,6 +834,7 @@ impl<'a> Output<'a> {
                 true
             }
             Err(error) => {
+                self.failure_stage = "create-preparation-worker";
                 self.state = Some(error.task.state);
                 self.failed_revision = Some(self.revision);
                 false
@@ -618,6 +866,11 @@ impl<'a> Output<'a> {
                 .err()
             });
             if let Some(error) = error {
+                self.failure_stage = if task.error.is_some() {
+                    "prepare-worker"
+                } else {
+                    "begin-after-worker"
+                };
                 state.engine.cancel(&session, error);
                 self.failed_revision = Some(self.revision);
             } else {
@@ -672,9 +925,11 @@ impl<'a> Output<'a> {
                     self.awaiting_visible = true;
                 }
                 if state.engine.fault.is_some() {
+                    self.failure_stage = "advance";
                     self.failed_revision = Some(self.revision);
                 }
             } else if let Err(error) = state.engine.poll_presentation(&session) {
+                self.failure_stage = "poll-presentation";
                 state.engine.cancel(&session, error);
                 self.failed_revision = Some(self.revision);
             }
@@ -806,6 +1061,7 @@ impl<'a> Output<'a> {
         self.capture_reset = true;
     }
     pub fn capture_cursor(&mut self, cursor: CaptureCursor) {
+        self.latest_cursor = cursor;
         if let Some(state) = self.state.as_deref_mut() {
             if !state.engine.active() {
                 state.capture_cursor = cursor;
@@ -837,6 +1093,13 @@ impl<'a> Output<'a> {
         if let Some(worker) = &self.preparation {
             worker.stop(time);
         }
+        if let Some(newest) = self.newest.as_deref_mut() {
+            if !newest.release(windows) {
+                return false;
+            }
+        }
+        self.newest = None;
+        self.seed = None;
         if !self.collect(app, false) {
             return false;
         }
@@ -882,6 +1145,11 @@ impl Drop for Output<'_> {
         // owner on an unacknowledged drop, rather than only device storage.
         if let Some(state) = self.state.take() {
             mem::forget(state);
+        }
+        if let Some(newest) = self.newest.take() {
+            if !newest.reads.empty() {
+                mem::forget(newest);
+            }
         }
     }
 }

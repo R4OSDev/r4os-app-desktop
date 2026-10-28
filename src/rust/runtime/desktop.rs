@@ -638,6 +638,14 @@ impl<'a, 'input> Desktop<'a, 'input> {
             width: self.width,
             height: self.height,
             output_captures,
+            native_failures: if host
+                .diagnostic_work()
+                .is_some_and(|work| work.request.op == diagnostics::wire::Op::CaptureStats)
+            {
+                self.outputs.native_failures()
+            } else {
+                (0, [None; 4])
+            },
         };
         let effects = self.diagnostics.poll(
             &mut view,
@@ -673,14 +681,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
     fn capture_observations(&self) -> [Option<outputs::selection::CaptureObservation>; 4] {
         let mut observations = [None; 4];
         if self.outputs.active() {
-            for (slot, choice) in
-                observations
-                    .iter_mut()
-                    .zip(
-                        self.outputs
-                            .composition_choices(self.outputs.desktop_bounds),
-                    )
-            {
+            for (slot, choice) in observations.iter_mut().zip(
+                self.outputs
+                    .composition_choices(self.outputs.desktop_bounds),
+            ) {
                 *slot = Some(outputs::selection::CaptureObservation {
                     state: choice.target.and_then(|t| self.outputs.capture_state(t)),
                     choice,
@@ -887,7 +891,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 }
             }
             rendered
-        } else if count != 0 && self.primary_admission == outputs::primary::Admission::Native {
+        } else if self.primary_admission == outputs::primary::Admission::Native
+            && (count != 0
+                || self
+                    .primary
+                    .output()
+                    .is_some_and(|o| o.pending_ready(time.nanoseconds)))
+        {
             let captured = unsafe {
                 self.frames.native_primary(
                     env.app,
@@ -1645,6 +1655,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         width: self.width,
                         height: self.height,
                         output_captures: [None; 4],
+                        native_failures: (0, [None; 4]),
                     };
                     self.diagnostics.end(
                         &mut view,

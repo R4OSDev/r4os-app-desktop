@@ -78,6 +78,29 @@ impl Frame {
     pub fn commands(&self) -> &[Command] {
         &self.commands
     }
+    pub fn fork(&self) -> Result<Self> {
+        if self.active.is_some() || self.failure.is_some() {
+            return Err(Error::State);
+        }
+        let mut commands = Vec::new();
+        commands
+            .try_reserve_exact(CAPACITY)
+            .map_err(|_| Error::OutOfMemory)?;
+        commands.extend_from_slice(&self.commands);
+        Ok(Self {
+            assets: self.assets.fork()?,
+            commands,
+            mirror: self.mirror,
+            failure: None,
+            active: None,
+            fractional_pixels: self.fractional_pixels,
+            merged_fills: self.merged_fills,
+            view: self.view,
+        })
+    }
+    pub fn exchange_commands(&mut self, previous: &mut Vec<Command>) {
+        core::mem::swap(&mut self.commands, previous);
+    }
     pub fn view(&self) -> Option<geometry::topology::Viewport> {
         self.view
     }

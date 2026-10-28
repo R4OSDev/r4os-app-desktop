@@ -15,12 +15,88 @@ use crate::{
     hosted::{native_images::Reads, replay::Shapes, window_image::Memory, window_set::Set},
     shell::{desktop_view, taskbar_view},
 };
+use alloc::vec::Vec;
+/// Reusing an immutable CPU recording does not assert that any GPU layer is
+/// ready. The transaction owner revalidates its own actual residency later.
+pub struct RecordingReplay {
+    commands: Vec<super::primitive_frame::Command>,
+    reusable: [bool; super::layers::CAPACITY],
+    frame: u64,
+    view: Option<super::output_geometry::topology::Viewport>,
+    complete: bool,
+}
+impl RecordingReplay {
+    pub fn new() -> Result<Self> {
+        let mut commands = Vec::new();
+        commands
+            .try_reserve_exact(super::primitive_frame::CAPACITY)
+            .map_err(|_| Error::OutOfMemory)?;
+        Ok(Self {
+            commands,
+            reusable: [false; super::layers::CAPACITY],
+            frame: 0,
+            view: None,
+            complete: false,
+        })
+    }
+    fn save(&mut self, cache: &Cache, frame: &mut Frame) {
+        self.frame = cache.frame();
+        self.view = cache.view();
+        self.complete = cache.captured() && cache.complete_scene;
+        frame.exchange_commands(&mut self.commands);
+    }
+    fn prepare(&mut self, cache: &Cache, frame: &mut Frame, changed: Option<Rect>) -> Result<()> {
+        self.reusable.fill(false);
+        let Some(changed) = changed else {
+            return Ok(());
+        };
+        if !self.complete
+            || self.commands.is_empty()
+            || self.view.is_none()
+            || self.view != cache.view()
+            || self.frame.checked_add(1) != Some(cache.frame())
+        {
+            return Ok(());
+        }
+        for (i, entry) in cache.entries().iter().enumerate() {
+            self.reusable[i] = entry.initialized
+                && !entry.external
+                && entry.frame == self.frame
+                && super::scene::intersect(entry.capture_bounds, changed).is_none();
+        }
+        for command in &self.commands {
+            if let Some(texture) = command.texture {
+                if !frame
+                    .assets
+                    .contains(command.content, texture, command.source)
+                {
+                    self.reusable[command.layer as usize] = false;
+                }
+            }
+        }
+        for command in &self.commands {
+            if self.reusable[command.layer as usize] {
+                if let Some(texture) = command.texture {
+                    frame.assets.reuse_texture(texture as usize)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn replay(&self) -> super::layers::Replay<'_> {
+        super::layers::Replay {
+            commands: &self.commands,
+            reusable: &self.reusable,
+        }
+    }
+}
 struct Capture<'a, M: Memory> {
     cache: &'a mut Cache,
     frame: &'a mut Frame,
     engine: &'a mut Engine,
     reads: &'a mut Reads,
     windows: &'a mut Set<M, Consumer>,
+    recording_replay: Option<&'a RecordingReplay>,
     finished: bool,
 }
 impl<M: Memory> compositor::Capture for Capture<'_, M> {
@@ -34,7 +110,11 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
         // Only NativeOutput computed this capture's reusable mask. Keep the
         // immutable engine snapshot separate from the mutable cache/frame,
         // and end this borrow before any external read can change the engine.
-        let replay = self.cache.view().map(|_| self.engine.replay());
+        let replay = self.cache.view().map(|_| {
+            self.recording_replay
+                .map(RecordingReplay::replay)
+                .unwrap_or_else(|| self.engine.replay())
+        });
         self.cache
             .paint(key, bounds, damage, Some(self.frame), replay, paint)
     }
@@ -75,6 +155,75 @@ pub unsafe fn capture<M: Memory>(
     icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
     shapes: &mut impl Shapes,
 ) -> Result<Stats> {
+    unsafe {
+        capture_impl(
+            cache,
+            frame,
+            engine,
+            reads,
+            windows,
+            mode,
+            scene,
+            damage,
+            fonts_cache,
+            fonts,
+            icons,
+            shapes,
+            None,
+        )
+    }
+}
+/// # Safety
+/// Same read/immutable-map contract as capture. This owner has never submitted
+/// GPU work; its CPU replay cannot publish a GPU residency or completion.
+pub unsafe fn capture_recording<M: Memory>(
+    cache: &mut Cache,
+    frame: &mut Frame,
+    engine: &mut Engine,
+    reads: &mut Reads,
+    windows: &mut Set<M, Consumer>,
+    mode: Mode,
+    scene: &Scene<'_>,
+    damage: &[Rect],
+    fonts_cache: &mut FontCache,
+    fonts: &mut impl Fonts,
+    icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
+    shapes: &mut impl Shapes,
+    replay: &mut RecordingReplay,
+) -> Result<Stats> {
+    unsafe {
+        capture_impl(
+            cache,
+            frame,
+            engine,
+            reads,
+            windows,
+            mode,
+            scene,
+            damage,
+            fonts_cache,
+            fonts,
+            icons,
+            shapes,
+            Some(replay),
+        )
+    }
+}
+unsafe fn capture_impl<M: Memory>(
+    cache: &mut Cache,
+    frame: &mut Frame,
+    engine: &mut Engine,
+    reads: &mut Reads,
+    windows: &mut Set<M, Consumer>,
+    mode: Mode,
+    scene: &Scene<'_>,
+    damage: &[Rect],
+    fonts_cache: &mut FontCache,
+    fonts: &mut impl Fonts,
+    icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
+    shapes: &mut impl Shapes,
+    mut recording_replay: Option<&mut RecordingReplay>,
+) -> Result<Stats> {
     if engine.active()
         || !reads.empty()
         || !matches!(
@@ -85,13 +234,20 @@ pub unsafe fn capture<M: Memory>(
         return Err(Error::State);
     }
     engine.clear_sources().map_err(|_| Error::State)?;
+    if let Some(replay) = recording_replay.as_deref_mut() {
+        replay.save(cache, frame);
+    }
     frame.set_mirror(false)?;
     cache.start(mode, Some(frame))?;
     let changed = damage.iter().copied().reduce(Rect::merged);
     if matches!(mode, Mode::NativeOutput(_)) {
-        engine
-            .reuse_capture(cache, frame, changed)
-            .map_err(|_| Error::Graphics)?;
+        if let Some(replay) = recording_replay.as_deref_mut() {
+            replay.prepare(cache, frame, changed)?;
+        } else {
+            engine
+                .reuse_capture(cache, frame, changed)
+                .map_err(|_| Error::Graphics)?;
+        }
     }
     let desktop = match mode {
         Mode::Desktop(bounds) | Mode::CpuOutput(bounds) => bounds,
@@ -104,6 +260,7 @@ pub unsafe fn capture<M: Memory>(
         engine,
         reads,
         windows,
+        recording_replay: recording_replay.as_deref(),
         finished: false,
     };
     let stats = unsafe {

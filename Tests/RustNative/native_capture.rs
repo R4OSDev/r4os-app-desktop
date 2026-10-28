@@ -50,6 +50,29 @@ fn captured(
     asset_change: AssetChange,
     paints: &Cell<u32>,
 ) {
+    recorded(
+        cache,
+        frame,
+        engine,
+        mode,
+        damage,
+        right,
+        asset_change,
+        paints,
+        None,
+    )
+}
+fn recorded(
+    cache: &mut Cache,
+    frame: &mut Frame,
+    engine: &mut Engine,
+    mode: Mode,
+    damage: Rect,
+    right: Rect,
+    asset_change: AssetChange,
+    paints: &Cell<u32>,
+    mut replay: Option<&mut RecordingReplay>,
+) {
     let overwritten = if asset_change == AssetChange::Overwrite {
         assert!(!engine.active());
         let old = *frame
@@ -82,6 +105,9 @@ fn captured(
         None
     };
     engine.clear_sources().unwrap();
+    if let Some(replay) = replay.as_deref_mut() {
+        replay.save(cache, frame);
+    }
     frame.set_mirror(false).unwrap();
     cache.start(mode, Some(frame)).unwrap();
     if asset_change != AssetChange::None {
@@ -117,7 +143,11 @@ fn captured(
         }
     }
     if matches!(mode, Mode::NativeOutput(_)) {
-        engine.reuse_capture(cache, frame, Some(damage)).unwrap();
+        if let Some(replay) = replay.as_deref_mut() {
+            replay.prepare(cache, frame, Some(damage)).unwrap();
+        } else {
+            engine.reuse_capture(cache, frame, Some(damage)).unwrap();
+        }
     }
     let mut reads = Reads::default();
     let mut windows = Set::new(NoExternal);
@@ -127,6 +157,7 @@ fn captured(
         engine,
         reads: &mut reads,
         windows: &mut windows,
+        recording_replay: replay.as_deref(),
         finished: false,
     };
     capture
@@ -162,6 +193,98 @@ fn captured(
             .unwrap();
     }
     capture.finished = true;
+}
+
+#[test]
+fn cpu_scene_replay_keeps_unchanged_tiles_without_inventing_gpu_residency() {
+    gpu::with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut recorder = Engine::new().unwrap();
+        let mut replay = RecordingReplay::new().unwrap();
+        let paints = Cell::new(0);
+        let view = super::super::output_geometry::topology::Viewport {
+            pixel_w: 8,
+            pixel_h: 8,
+            ..Default::default()
+        };
+        for (damage, change, expected) in [
+            (FULL, AssetChange::None, 1),
+            (Rect::new(0, 0, 1, 1), AssetChange::Append, 1),
+            (RIGHT, AssetChange::None, 2),
+            (Rect::new(0, 0, 1, 1), AssetChange::Overwrite, 3),
+        ] {
+            recorded(
+                &mut cache,
+                &mut frame,
+                &mut recorder,
+                Mode::NativeOutput(view),
+                damage,
+                RIGHT,
+                change,
+                &paints,
+                Some(&mut replay),
+            );
+            assert_eq!(paints.get(), expected);
+            assert_eq!(gpu::stats()[0], 0, "CPU replay never submits GPU work");
+            assert_eq!(
+                recorder.atlas_reused_layers, 0,
+                "no completed GPU reuse receipt exists"
+            );
+            assert!(cache.complete_scene && cache.captured());
+        }
+        assert!(cache.reused_captures != 0);
+        recorded(
+            &mut cache,
+            &mut frame,
+            &mut recorder,
+            Mode::NativeOutput(view),
+            Rect::new(0, 0, 1, 1),
+            RIGHT,
+            AssetChange::None,
+            &paints,
+            Some(&mut replay),
+        );
+        assert_eq!(paints.get(), 3);
+        recorded(
+            &mut cache,
+            &mut frame,
+            &mut recorder,
+            Mode::Desktop(FULL),
+            FULL,
+            RIGHT,
+            AssetChange::None,
+            &paints,
+            Some(&mut replay),
+        );
+        assert_eq!(
+            paints.get(),
+            4,
+            "a previous CPU native replay mask cannot cross Desktop mode"
+        );
+        let mut transaction = Engine::new().unwrap();
+        transaction
+            .adopt_recording(&mut recorder, Some(FULL))
+            .unwrap();
+        gpu::begin(app, device, &mut transaction, &cache, Some(&frame));
+        gpu::pump(
+            app,
+            device,
+            &mut transaction,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        let mut expected = [0x203040; 64];
+        for y in RIGHT.y..RIGHT.bottom() {
+            for x in RIGHT.x..RIGHT.right() {
+                expected[(y * 8 + x) as usize] = 0xffffff;
+            }
+        }
+        assert_eq!(gpu::visible(), expected);
+        let session = device.bind(app).unwrap();
+        transaction.close(&session).unwrap();
+    });
 }
 
 #[test]

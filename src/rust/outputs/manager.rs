@@ -199,6 +199,8 @@ pub struct Manager<'a> {
     retry_ns: u64,
     pub reconcile: bool,
     software_targets: [a::GfxOutputTarget; t::CAPACITY],
+    native_failures: [Option<super::selection::NativeFailure>; 4],
+    native_failure_count: u64,
     motion: Option<[u32; 2]>,
     pub cursor: Point,
     closing: bool,
@@ -224,6 +226,8 @@ impl<'a> Manager<'a> {
             retry_ns: 0,
             reconcile: true,
             software_targets: [a::GfxOutputTarget::default(); t::CAPACITY],
+            native_failures: [None; 4],
+            native_failure_count: 0,
             motion: None,
             cursor: Point::default(),
             closing: false,
@@ -300,6 +304,9 @@ impl<'a> Manager<'a> {
             .resource
             .gpu()?
             .capture_state()
+    }
+    pub fn native_failures(&self) -> (u64, [Option<super::selection::NativeFailure>; 4]) {
+        (self.native_failure_count, self.native_failures)
     }
     pub fn color_ready(&mut self, app: &App<'_>, entry: Entry) -> bool {
         if self.software_only(entry.target)
@@ -459,6 +466,13 @@ impl<'a> Manager<'a> {
     }
     pub(crate) fn fail(&mut self, index: usize, now: u64) {
         let slot = &mut self.slots[index];
+        if !slot.failed {
+            if let Some(owner) = slot.resource.gpu() {
+                let at = (self.native_failure_count % self.native_failures.len() as u64) as usize;
+                self.native_failures[at] = Some(owner.failure_observation(slot.target));
+                self.native_failure_count = self.native_failure_count.saturating_add(1);
+            }
+        }
         slot.failed = true;
         if slot.resource.gpu().is_some() {
             let target = slot.target;

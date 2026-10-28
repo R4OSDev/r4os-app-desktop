@@ -161,11 +161,33 @@ pub struct CaptureState {
     pub failed_reads: u64,
     pub reads_empty: bool,
     pub external_receipts: usize,
+    pub prepared_while_busy: u64,
+    pub coalesced_scenes: u64,
+    pub prepared_with_gpu_jobs: u64,
+    pub prepared_during_worker: u64,
+    pub pending_scene: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureObservation {
     pub choice: Choice,
     pub state: Option<CaptureState>,
+}
+/// Copied once at managed native failure, before teardown can erase its cause.
+/// A missing old state means worker ownership, never a zero-work receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeFailure {
+    pub target: Target,
+    pub stage: &'static str,
+    pub gpu_error: Option<gpu::Error>,
+    pub capture_error: Option<crate::render::primitive_assets::Error>,
+    pub frame: Option<u64>,
+    pub latest_frame: Option<u64>,
+    pub worker_pending: bool,
+    pub awaiting_visible: bool,
+    pub latest_captured: bool,
+    pub old_reads_empty: Option<bool>,
+    pub latest_reads_empty: bool,
+    pub gpu_physically_retired: Option<bool>,
 }
 impl Execution {
     fn same_owner(self, other: Self) -> bool {

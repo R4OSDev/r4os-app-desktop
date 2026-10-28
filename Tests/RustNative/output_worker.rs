@@ -238,10 +238,155 @@ fn scene<M: Memory>(
         )
     }
     .unwrap();
-    let state = owner.state.as_deref().unwrap();
-    assert!(state.cache.complete_scene);
-    assert_eq!(state.cache.commands().len(), 1);
-    assert_eq!(state.cache.commands()[0].scissor, Rect::new(0, 0, 8, 8));
+    let cache = owner
+        .newest
+        .as_deref()
+        .filter(|s| s.captured)
+        .map(|s| &s.cache)
+        .or_else(|| owner.state.as_deref().map(|s| &s.cache))
+        .unwrap();
+    assert!(cache.complete_scene);
+    assert_eq!(cache.commands().len(), 1);
+    assert_eq!(cache.commands()[0].scissor, Rect::new(0, 0, 8, 8));
+}
+
+#[test]
+fn newest_scene_replaces_unsent_input_while_real_worker_and_gpu_are_held() {
+    fixture::with(|parent, device| {
+        let parent_raw = parent.start_context();
+        let mut imports = unsafe {
+            core::slice::from_raw_parts(
+                (*parent_raw).imports as *const a::R4XStartImport,
+                parent_raw.import_count as usize,
+            )
+        }
+        .to_vec();
+        let mut sys = Box::new(unsafe { *(imports[0].table as *const a::R4XStartR4Sys) });
+        sys.thread_create_handle = create as *const () as usize;
+        sys.thread_handle_join = join as *const () as usize;
+        sys.monotonic_clock = precise as *const () as usize;
+        imports[0].table = &*sys as *const _ as u64;
+        let mut raw = *parent_raw;
+        raw.imports = imports.as_ptr() as u64;
+        let app = unsafe { App::from_raw(&raw, &EXPECTED, c"OUTLATEST") }.unwrap();
+        let resources = Resources::new(&app).unwrap();
+        let mut storage = pin!(r4os_sdk::graphics::GraphicsStorage::new());
+        let graphics = Graphics::open(storage.as_mut(), &app).unwrap();
+        let mut windows = Set::<_, Consumer>::new(NativeMemory(&graphics));
+        for primary in [false, true] {
+            {
+                let s = device.bind(parent).unwrap();
+                fixture::control(&s, 1, 0);
+                fixture::control(&s, 4, 1);
+                fixture::control(&s, 5, 1);
+                fixture::control(&s, 6, 0);
+                fixture::control(&s, 13, 0);
+                // Input timestamps must precede the real peer's acquire clock.
+                fixture::control(&s, 11, 100);
+            }
+            MODE.store(0, Ordering::Release);
+            ALLOW.store(false, Ordering::Release);
+            let mut owner = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
+                .unwrap_or_else(|_| panic!("latest scene device"));
+            assert!(owner.available(&app, 1, 1, 10));
+            scene(&app, &mut owner, &mut windows, primary, 0x112233);
+            assert!(unsafe { owner.start(&app, &resources, &EXPECTED, 1) });
+            assert!(owner.state.is_none() && owner.preparation.is_some());
+            for (input, background) in [(20, 0x334455), (30, 0x556677)] {
+                assert!(owner.available(&app, 1, 1, input));
+                scene(&app, &mut owner, &mut windows, primary, background);
+                assert!(unsafe { owner.start(&app, &resources, &EXPECTED, 1) });
+                assert!(owner.state.is_none() && owner.newest.as_ref().unwrap().captured);
+            }
+            assert_eq!(
+                (owner.scenes_prepared_while_busy, owner.scenes_coalesced),
+                (2, 1)
+            );
+            assert!(!owner.pending_ready(1));
+            ALLOW.store(true, Ordering::Release);
+            until("real first GPU job", || {
+                let progress = owner.poll(&app, &mut windows, &graphics, 1);
+                assert_ne!(
+                    progress,
+                    Progress::Failed,
+                    "fault={:?} revision={:?} stats={:?}",
+                    owner.state.as_ref().map(|s| s.engine.fault),
+                    owner.failed_revision,
+                    fixture::stats()
+                );
+                owner.state.as_ref().is_some_and(|s| s.engine.active()) && fixture::stats()[10] != 0
+            });
+            let submitted = fixture::stats()[0];
+            assert!(owner.available(&app, 1, 1, 40));
+            owner.capture_cursor(CaptureCursor {
+                x: 4,
+                y: 5,
+                ..Default::default()
+            });
+            scene(&app, &mut owner, &mut windows, primary, 0x778899);
+            assert!(unsafe { owner.start(&app, &resources, &EXPECTED, 1) });
+            assert_eq!(
+                fixture::stats()[0],
+                submitted,
+                "recording does not submit any new GPU work"
+            );
+            assert_eq!(owner.state.as_ref().unwrap().engine.input_ns, 10);
+            assert_eq!(owner.newest.as_ref().unwrap().input_ns, 40);
+            assert_eq!(
+                (owner.scenes_prepared_while_busy, owner.scenes_coalesced),
+                (3, 2)
+            );
+            assert_eq!(owner.scenes_prepared_during_worker, 2);
+            assert_eq!(owner.scenes_prepared_with_gpu_jobs, 1);
+            let capture = owner.capture_state().unwrap();
+            assert!(capture.pending_scene && capture.reads_empty);
+            assert_eq!(
+                (
+                    capture.prepared_with_gpu_jobs,
+                    capture.prepared_during_worker
+                ),
+                (1, 2)
+            );
+            assert_eq!(fixture::visible(), [0; 64]);
+            {
+                let s = device.bind(parent).unwrap();
+                fixture::control(&s, 6, 1);
+            }
+            until("immutable old scene visible", || {
+                assert_ne!(
+                    owner.poll(&app, &mut windows, &graphics, 1),
+                    Progress::Failed
+                );
+                owner.frames_completed == 1
+            });
+            assert_eq!(fixture::visible(), [0x112233; 64]);
+            assert!(owner.pending_ready(1_000_000_000));
+            // No new invalidation/capture: the newest prepared scene must run.
+            assert!(unsafe { owner.start(&app, &resources, &EXPECTED, 1_000_000_000) });
+            until("newest scene visible", || {
+                assert_ne!(
+                    owner.poll(&app, &mut windows, &graphics, 1_000_000_000),
+                    Progress::Failed
+                );
+                owner.frames_completed == 2
+            });
+            assert_eq!(fixture::visible(), [0x778899; 64]);
+            assert_eq!(
+                owner.completed_frame, 4,
+                "the two superseded scenes never become transactions"
+            );
+            let state = owner.state.as_ref().unwrap();
+            assert_eq!(state.engine.input_ns, 40);
+            assert_eq!((state.capture_cursor.x, state.capture_cursor.y), (4, 5));
+            assert!(owner.newest.is_none());
+            until("latest owner close", || {
+                owner.close(&app, &mut windows, &graphics, 1_000_000_000)
+            });
+            assert!(owner.state.is_none() && owner.newest.is_none() && owner.seed.is_none());
+            assert_eq!(&fixture::stats()[9..13], &[0, 0, 0, 0]);
+        }
+        assert!(THREAD.lock().unwrap().is_none());
+    });
 }
 #[test]
 fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
@@ -383,7 +528,12 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
         scene(&app, &mut cancelled, &mut windows, false, 0x882244);
         ALLOW.store(false, Ordering::Release);
         assert!(unsafe { cancelled.start(&app, &resources, &EXPECTED, 1) });
+        assert!(cancelled.available(&app, 1, 1, 0));
+        scene(&app, &mut cancelled, &mut windows, false, 0x445566);
+        assert!(unsafe { cancelled.start(&app, &resources, &EXPECTED, 1) });
+        assert!(cancelled.newest.as_ref().unwrap().captured);
         assert!(!cancelled.close(&app, &mut windows, &graphics, 1));
+        assert!(cancelled.newest.is_none() && cancelled.seed.is_none());
         assert!(cancelled.state.is_none());
         ALLOW.store(true, Ordering::Release);
         MODE.store(1, Ordering::Release);

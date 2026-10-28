@@ -34,6 +34,7 @@ pub struct View<'call, 'input> {
     pub width: i32,
     pub height: i32,
     pub output_captures: [Option<crate::outputs::selection::CaptureObservation>; 4],
+    pub native_failures: (u64, [Option<crate::outputs::selection::NativeFailure>; 4]),
 }
 #[derive(Default)]
 pub struct Effects {
@@ -644,8 +645,15 @@ impl Owner {
                 }
             }
             Op::CaptureStats => {
-                if super::capture_stats::run(env, r.caller, r.item, &v.output_captures, host)
-                    .is_err()
+                if super::capture_stats::run(
+                    env,
+                    r.caller,
+                    r.item,
+                    &v.output_captures,
+                    &v.native_failures,
+                    host,
+                )
+                .is_err()
                 {
                     out.result = a::service_api_result_invalid;
                 }

@@ -240,6 +240,16 @@ impl Frames {
         let mut failures = 0u32;
         for (index, slot) in manager.slots.iter_mut().enumerate() {
             if !slot.dirty() {
+                if let Some(output) = slot.resource.gpu_mut() {
+                    if output.pending_ready(time) {
+                        if unsafe { output.start(app, resources, expected, time) } {
+                            changed = true;
+                            self.current = false;
+                        } else {
+                            failures |= 1 << index;
+                        }
+                    }
+                }
                 continue;
             }
             let Some(bounds) = slot.bounds() else {
@@ -348,7 +358,12 @@ impl Frames {
         time: u64,
     ) -> bool {
         if regions.is_empty() {
-            return false;
+            let started = output.pending_ready(time)
+                && unsafe { output.start(app, resources, expected, time) };
+            if started {
+                self.current = false;
+            }
+            return started;
         }
         let mut fonts = SessionFonts::new(session, app);
         self.icons.begin_frame(time);

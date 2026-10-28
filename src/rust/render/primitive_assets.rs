@@ -1,7 +1,7 @@
 //! Source-sized premultiplied texture pages, with the original bounded atlas
 //! and LRU admission. Pages used by the current frame cannot be evicted.
 use super::{geometry::Rect, primitive_image::View};
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 pub const TEXTURE_CAPACITY: usize = 32;
 pub const ENTRY_CAPACITY: usize = 2048;
@@ -43,9 +43,9 @@ pub struct Entry {
     pub rect: Rect,
     pub content: Content,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Texture {
-    pixels: Vec<u32>,
+    pixels: Option<Arc<Vec<u32>>>,
     pub width: u32,
     pub height: u32,
     pub generation: u64,
@@ -61,7 +61,18 @@ impl Texture {
         Rect::new(0, 0, self.width as i32, self.height as i32)
     }
     pub fn pixels(&self) -> &[u32] {
-        &self.pixels
+        self.pixels.as_deref().map_or(&[], |p| p.as_slice())
+    }
+    fn writable_pixels(&mut self) -> Result<&mut [u32]> {
+        let shared = self.pixels.as_mut().ok_or(Error::State)?;
+        if Arc::get_mut(shared).is_none() {
+            let mut copy = Vec::new();
+            copy.try_reserve_exact(shared.len())
+                .map_err(|_| Error::OutOfMemory)?;
+            copy.extend_from_slice(shared);
+            *shared = Arc::new(copy);
+        }
+        Ok(Arc::get_mut(shared).ok_or(Error::State)?.as_mut_slice())
     }
     fn placement(&self, width: u32, height: u32) -> Option<Rect> {
         let (mut x, mut y) = (self.x, self.y);
@@ -112,6 +123,27 @@ impl Cache {
     pub fn reserved(&self) -> usize {
         self.reserved
     }
+    /// An immutable submitted scene and the one mutable newest recording
+    /// have independent metadata. Pixel pages are shared until a real write;
+    /// eviction and upload acknowledgments cannot change the older snapshot.
+    pub fn fork(&self) -> Result<Self> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(ENTRY_CAPACITY)
+            .map_err(|_| Error::OutOfMemory)?;
+        entries.extend_from_slice(&self.entries);
+        Ok(Self {
+            entries,
+            textures: self.textures.clone(),
+            budget: self.budget,
+            reserved: self.reserved,
+            frame: self.frame,
+            hits: self.hits,
+            misses: self.misses,
+            converted_pixels: self.converted_pixels,
+            evictions: self.evictions,
+        })
+    }
     pub fn budget(&self) -> usize {
         self.budget
     }
@@ -159,14 +191,14 @@ impl Cache {
                 entry.live = false;
             }
         }
-        self.reserved -= self.textures[index].pixels.len() * 4;
+        self.reserved -= self.textures[index].pixels().len() * 4;
         self.textures[index] = Texture::default();
         self.evictions = self.evictions.saturating_add(1);
     }
     fn oldest(&self, first: usize, end: usize, live_only: bool) -> Option<usize> {
         let mut chosen = None;
         for (index, texture) in self.textures.iter().enumerate().take(end).skip(first) {
-            if texture.pinned == self.frame || (live_only && texture.pixels.is_empty()) {
+            if texture.pinned == self.frame || (live_only && texture.pixels().is_empty()) {
                 continue;
             }
             if chosen.is_none_or(|prior: usize| texture.touched < self.textures[prior].touched) {
@@ -183,7 +215,7 @@ impl Cache {
         if bytes > self.budget - self.entries.len() * core::mem::size_of::<Entry>() {
             return Err(Error::OutOfMemory);
         }
-        if !self.textures[index].pixels.is_empty() {
+        if !self.textures[index].pixels().is_empty() {
             self.forget(index);
         }
         while self.reserved > self.budget - bytes {
@@ -199,7 +231,7 @@ impl Cache {
         pixels.resize(bytes / 4, 0);
         self.reserved += bytes;
         self.textures[index] = Texture {
-            pixels,
+            pixels: Some(Arc::new(pixels)),
             width,
             height,
             ..Texture::default()
@@ -263,13 +295,14 @@ impl Cache {
         let texture = &mut self.textures[index];
         let rect = texture.placement(width, height).ok_or(Error::Capacity)?;
         let generation = next_generation(&GENERATION)?;
+        let pitch = texture.width as usize;
+        let pixels = texture.writable_pixels()?;
         let mut opaque = true;
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let pixel = view.raster_pixel(x, y);
                 opaque &= pixel >> 24 == 255;
-                texture.pixels
-                    [(rect.y as usize + y) * texture.width as usize + rect.x as usize + x] = pixel;
+                pixels[(rect.y as usize + y) * pitch + rect.x as usize + x] = pixel;
             }
         }
         if texture.y != rect.y as u32 {
@@ -302,7 +335,7 @@ impl Cache {
     }
     pub fn pin_texture(&mut self, index: usize) -> Result<()> {
         let texture = self.textures.get_mut(index).ok_or(Error::Bounds)?;
-        if self.frame == 0 || texture.pixels.is_empty() {
+        if self.frame == 0 || texture.pixels().is_empty() {
             return Err(Error::State);
         }
         texture.pinned = self.frame;
@@ -328,6 +361,70 @@ mod tests {
         primitive_image::{Format, Identity},
     };
     use super::*;
+    #[test]
+    fn submitted_page_snapshot_survives_latest_scene_write_ack_and_eviction() {
+        let metadata = ENTRY_CAPACITY * core::mem::size_of::<Entry>();
+        let mut submitted = Cache::new(metadata + 512 * 512 * 4).unwrap();
+        submitted.start(1).unwrap();
+        let blue = [0xff123456];
+        let old = submitted
+            .intern(View::new(
+                Format::Argb,
+                1,
+                1,
+                4,
+                PixelBytes::from_words(&blue).bytes(),
+            ))
+            .unwrap();
+        let index = old.texture as usize;
+        let original = submitted.texture(index).pixels().to_vec();
+        let version = submitted.texture(index).generation;
+        let mut latest = submitted.fork().unwrap();
+        assert_eq!(
+            submitted.texture(index).pixels().as_ptr(),
+            latest.texture(index).pixels().as_ptr()
+        );
+        latest.start(2).unwrap();
+        let green = [0xff00ff00];
+        let new = latest
+            .intern(View::new(
+                Format::Argb,
+                1,
+                1,
+                4,
+                PixelBytes::from_words(&green).bytes(),
+            ))
+            .unwrap();
+        assert_eq!(old.texture, new.texture);
+        assert_ne!(
+            submitted.texture(index).pixels().as_ptr(),
+            latest.texture(index).pixels().as_ptr()
+        );
+        assert_eq!(submitted.texture(index).pixels(), original);
+        assert_eq!(submitted.texture(index).generation, version);
+        assert!(new.content.revision > old.content.revision);
+        assert!(submitted.contains(old.content, old.texture, old.rect));
+        assert!(latest.contains(old.content, old.texture, old.rect));
+        latest.uploaded(index, new.content.revision);
+        assert!(latest.texture(index).dirty.is_none());
+        assert!(submitted.texture(index).dirty.is_some());
+        latest.start(3).unwrap();
+        let large = [0xffabcdef; 129 * 129];
+        latest
+            .intern(View::new(
+                Format::Argb,
+                129,
+                129,
+                129 * 4,
+                PixelBytes::from_words(&large).bytes(),
+            ))
+            .unwrap();
+        assert!(!latest.contains(old.content, old.texture, old.rect));
+        assert!(submitted.contains(old.content, old.texture, old.rect));
+        assert_eq!(submitted.texture(index).pixels(), original);
+        assert!(submitted.reserved() <= submitted.budget());
+        assert!(latest.reserved() <= latest.budget());
+    }
     #[test]
     fn original_assets_revision_dpi_pinned_budget_eviction_and_content() {
         let metadata = ENTRY_CAPACITY * core::mem::size_of::<Entry>();
