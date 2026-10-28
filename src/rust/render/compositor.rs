@@ -145,6 +145,16 @@ pub(crate) trait Capture {
         damage: Rect,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool>;
+    fn paint_over_solid(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        _background: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        self.paint(key, bounds, damage, paint)
+    }
     fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()>;
 }
 struct CpuCapture<'o, 'f> {
@@ -178,13 +188,32 @@ fn layer<F: Fonts>(
     font: u32,
     paint: impl FnOnce(&mut Ui<'_, '_, F>) -> Result<()>,
 ) -> Result<()> {
-    capture
-        .paint(key, bounds, damage, |p| {
-            let mut ui = Ui::new(p.reborrow(), cache, fonts);
-            ui.set_font(font);
-            paint(&mut ui)
-        })
-        .map(|_| ())
+    layer_with_background(
+        capture, key, bounds, damage, cache, fonts, font, None, paint,
+    )
+}
+fn layer_with_background<F: Fonts>(
+    capture: &mut impl Capture,
+    key: u32,
+    bounds: Rect,
+    damage: Rect,
+    cache: &mut Cache,
+    fonts: &mut F,
+    font: u32,
+    background: Option<u32>,
+    paint: impl FnOnce(&mut Ui<'_, '_, F>) -> Result<()>,
+) -> Result<()> {
+    let paint = |p: &mut Painter<'_, '_>| {
+        let mut ui = Ui::new(p.reborrow(), cache, fonts);
+        ui.set_font(font);
+        paint(&mut ui)
+    };
+    if let Some(rgb) = background {
+        capture.paint_over_solid(key, bounds, damage, rgb, paint)
+    } else {
+        capture.paint(key, bounds, damage, paint)
+    }
+    .map(|_| ())
 }
 fn visible(stats: &mut Stats, damage: Rect, bounds: Rect) -> bool {
     stats.layers.layers_visited = stats.layers.layers_visited.wrapping_add(1);
@@ -388,17 +417,35 @@ pub(crate) unsafe fn draw(
                 8,
             );
             if cover.visible(&mut stats.layers, d, r) {
-                layer(capture, 2, r, d, cache, fonts, shell.font, |ui| {
-                    ui.text(r.x, r.y, info, s::TITLE_TEXT, shell.config.background)
-                })?;
+                layer_with_background(
+                    capture,
+                    2,
+                    r,
+                    d,
+                    cache,
+                    fonts,
+                    shell.font,
+                    Some(shell.config.background),
+                    |ui| ui.text(r.x, r.y, info, s::TITLE_TEXT, shell.config.background),
+                )?;
             }
             if let Some(wall) = shell.wallpaper {
                 let r = wall.bounds(scene.width, scene.height);
                 if cover.visible(&mut stats.layers, d, r) {
-                    layer(capture, 3, r, d, cache, fonts, shell.font, |ui| {
-                        ui.painter
-                            .xrgb(r.x, r.y, wall.width, wall.height, wall.pixels)
-                    })?;
+                    layer_with_background(
+                        capture,
+                        3,
+                        r,
+                        d,
+                        cache,
+                        fonts,
+                        shell.font,
+                        Some(shell.config.background),
+                        |ui| {
+                            ui.painter
+                                .xrgb(r.x, r.y, wall.width, wall.height, wall.pixels)
+                        },
+                    )?;
                 }
             }
         }
@@ -420,7 +467,7 @@ pub(crate) unsafe fn draw(
                     stats.items_culled = stats.items_culled.wrapping_add(1);
                     continue;
                 }
-                layer(
+                layer_with_background(
                     capture,
                     32 + i as u32,
                     bounds,
@@ -428,6 +475,7 @@ pub(crate) unsafe fn draw(
                     cache,
                     fonts,
                     shell.font,
+                    Some(shell.config.background),
                     |ui| {
                         desktop_view::paint_item(
                             ui,
@@ -729,9 +777,17 @@ pub(crate) unsafe fn draw(
             );
             for &d in regions {
                 if visible(&mut stats, d, r) {
-                    layer(capture, 13, r, d, cache, fonts, shell.font, |ui| {
-                        paint_cursor(&mut ui.painter, input.cursor_x, input.cursor_y)
-                    })?;
+                    layer_with_background(
+                        capture,
+                        13,
+                        r,
+                        d,
+                        cache,
+                        fonts,
+                        shell.font,
+                        Some(shell.config.background),
+                        |ui| paint_cursor(&mut ui.painter, input.cursor_x, input.cursor_y),
+                    )?;
                 }
             }
         }

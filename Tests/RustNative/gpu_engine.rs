@@ -1058,50 +1058,8 @@ fn original_fifo_distinguishes_copy_from_visible_and_retains_both_outputs() {
 
 #[test]
 fn separated_damage_repairs_both_target_ages_and_matches_full_scaled_rotated_pixels() {
-    use crate::capture::readback::Readback;
     use geometry::topology::{Point, Rotation, Viewport};
 
-    fn pixels(app: &App<'_>, device: &mut Device, engine: &Engine) -> [u32; 64] {
-        let mut reader = {
-            let s = device.bind(app).unwrap();
-            let mut value = unsafe { Readback::new(app, &s) }.unwrap();
-            value
-                .prepare(&s, 8, 8, engine.output_format, engine.output_color)
-                .unwrap();
-            value
-                .begin(
-                    &s,
-                    engine.resources.outputs[engine.output_index].resource,
-                    1,
-                    engine.frame,
-                    0,
-                    &[g::R4GfxRect {
-                        x: 0,
-                        y: 0,
-                        width: 8,
-                        height: 8,
-                    }],
-                    1,
-                    1000,
-                )
-                .unwrap();
-            value
-        };
-        for _ in 0..32 {
-            let s = device.bind(app).unwrap();
-            control(&s, 0, 0);
-            reader.poll(&s, 2).unwrap();
-            if !reader.pending() {
-                break;
-            }
-        }
-        let result = reader.pixels().unwrap().try_into().unwrap();
-        reader.acknowledge(true).unwrap();
-        let s = device.bind(app).unwrap();
-        assert_eq!(reader.source().unwrap().slot, 0);
-        reader.close(&s).unwrap();
-        result
-    }
     fn scene(cache: &mut Cache, frame: &mut Frame, view: Viewport, native: bool, colors: [u32; 2]) {
         let bounds = geometry::logical(view).unwrap();
         cache
@@ -1357,4 +1315,47 @@ fn separated_damage_repairs_both_target_ages_and_matches_full_scaled_rotated_pix
             reference.close(&s).unwrap();
         });
     }
+}
+
+pub(crate) fn pixels(app: &App<'_>, device: &mut Device, engine: &Engine) -> [u32; 64] {
+    use crate::capture::readback::Readback;
+    let mut reader = {
+        let s = device.bind(app).unwrap();
+        let mut value = unsafe { Readback::new(app, &s) }.unwrap();
+        value
+            .prepare(&s, 8, 8, engine.output_format, engine.output_color)
+            .unwrap();
+        value
+            .begin(
+                &s,
+                engine.resources.outputs[engine.output_index].resource,
+                1,
+                engine.frame,
+                0,
+                &[g::R4GfxRect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                }],
+                1,
+                1000,
+            )
+            .unwrap();
+        value
+    };
+    for _ in 0..32 {
+        let s = device.bind(app).unwrap();
+        control(&s, 0, 0);
+        reader.poll(&s, 2).unwrap();
+        if !reader.pending() {
+            break;
+        }
+    }
+    let result = reader.pixels().unwrap().try_into().unwrap();
+    reader.acknowledge(true).unwrap();
+    let s = device.bind(app).unwrap();
+    assert_eq!(reader.source().unwrap().slot, 0);
+    reader.close(&s).unwrap();
+    result
 }

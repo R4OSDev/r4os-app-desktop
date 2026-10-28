@@ -170,6 +170,9 @@ pub struct CaptureState {
     pub composed_pixels: u64,
     pub composition_envelope_pixels: u64,
     pub multi_region_frames: u64,
+    pub direct_sdr_frames: u64,
+    pub solid_background_sdr_frames: u64,
+    pub linear_frames: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureObservation {

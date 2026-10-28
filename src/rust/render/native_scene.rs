@@ -104,6 +104,60 @@ struct Capture<'a, M: Memory> {
     recording_replay: Option<&'a RecordingReplay>,
     finished: bool,
 }
+impl<M: Memory> Capture<'_, M> {
+    fn solid_background(&self, bounds: Rect, rgb: u32) -> Option<u32> {
+        // Unit scale has exact integer rectangle edges under all rotations.
+        // Other scales retain the original transparent capture until their
+        // sampling fringe has a separately established backdrop proof.
+        if self.cache.view()?.scale != 120 {
+            return None;
+        }
+        let first = self.cache.commands().first()?;
+        let base = &self.cache.entries()[first.entry as usize];
+        if base.key != 1
+            || base.external
+            || base.bounds != self.cache.screen()
+            || first.scissor != self.cache.screen()
+        {
+            return None;
+        }
+        let clipped = super::scene::intersect(base.capture_bounds, bounds)?;
+        if self.cache.commands()[1..].iter().any(|c| {
+            self.cache.entries()[c.entry as usize]
+                .capture_bounds
+                .intersects(clipped)
+        }) {
+            return None;
+        }
+        // The current captured background must really be one full solid
+        // fill, including recordings reused by CPU. The recorder normally
+        // folds an initial clear of the same rectangle into that fill.
+        // A wallpaper, text or unrecognized background command rejects it.
+        let commands = self.frame.commands();
+        let full = Rect::new(0, 0, base.bounds.w, base.bounds.h);
+        let valid = |c: &super::primitive_frame::Command| {
+            c.layer == first.entry
+                && c.texture.is_none()
+                && !c.over
+                && c.grid.enabled == 0
+                && c.target == full
+                && c.scissor == full
+        };
+        let initial = commands.first()?;
+        let fill_index = usize::from(valid(initial) && initial.color == 0);
+        let fill = commands.get(fill_index)?;
+        if !valid(fill)
+            || fill.color != (0xff000000 | (rgb & 0xffffff))
+            || !fill.opaque
+            || commands
+                .get(fill_index + 1)
+                .is_some_and(|c| c.layer == first.entry)
+        {
+            return None;
+        }
+        Some(rgb & 0xffffff)
+    }
+}
 impl<M: Memory> compositor::Capture for Capture<'_, M> {
     fn paint(
         &mut self,
@@ -122,6 +176,30 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
         });
         self.cache
             .paint(key, bounds, damage, Some(self.frame), replay, paint)
+    }
+    fn paint_over_solid(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        background: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        let background = self.solid_background(bounds, background);
+        let replay = self.cache.view().map(|_| {
+            self.recording_replay
+                .map(RecordingReplay::replay)
+                .unwrap_or_else(|| self.engine.replay())
+        });
+        self.cache.paint_over_solid(
+            key,
+            bounds,
+            damage,
+            Some(self.frame),
+            replay,
+            background,
+            paint,
+        )
     }
     fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()> {
         self.reads.capture(

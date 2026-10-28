@@ -413,3 +413,96 @@ ExFiles/Reports/Benchmarks/8525c025-d292-4fd2-b0e9-b5e055d1cc25/.
 Eines von151Modulen geaendert,150gleich; Kernel417/SDK105/Contract54 gleich.
 141kanonischeModule/1057Testeintraege/483Docs. PublicFullSlim51 und
 Recovery65 bleiben getrennte Releasearbeiten.
+
+0.87.64 / Desktop182: opake Shellflaechen ueber belegtem Hintergrund
+----------------------------------------------------------------
+SPEED-004: Infozeile, Icons, Wallpaper und Softwarecursor koennen ihre
+Aufnahme ueber dem aktuellen soliden Desktop-Hintergrund vervollstaendigen.
+Zugelassen sind nur Skala120, ein erster vollstaendig solider Hintergrund
+mit genau der angeforderten Farbe und keine davorliegende Flaeche, deren
+Aufnahmegrenzen den betroffenen Ausschnitt ueberlappen. Die Reihenfolge
+von Info, Wallpaper, Icons, Fenstern und Popups bleibt dadurch wirksam.
+Erst die fertige Aufzeichnung mit ausschliesslich opaken Folgeprimitiven
+darf ihren initialen transparenten Clear durch diese Hintergrundfarbe
+ersetzen. Unbekannte/teiltransparente Inhalte, spaetere Clears, ungeklaerte
+Hintergruende, Ueberlappungen und andere Skalen behalten den linearen Pfad.
+Vier ganzzahlige Drehungen bleiben moeglich. Die CPU-Ausgabe verwendet
+weiterhin die urspruengliche Malfolge. Es wird kein Hintergrundbitmap kopiert.
+
+Die Hintergrundidentitaet ist Teil des Aufnahme-Caches. Ein Wechsel von
+Farbe oder Zulaessigkeit verhindert die alte Wiederverwendung und erzwingt
+eine komplette neue Layeraufnahme, auch bei einem unzutreffend kleinen
+Damagehinweis. Unveraenderte passende Aufnahmen bleiben wiederverwendbar.
+allows_direct_sdr, Sampling, Alpha-, Transfer- und COLOR_V1-Vertraege bleiben
+unveraendert. Der direkte Pfad verlangt weiterhin fuer alle beteiligten
+Layer einen Opakheitsnachweis; es gibt keine allgemeine Freigabe beliebiger
+Fensterszenen. Der verworfene Versuch mit direktem Alpha-OVER bleibt als
+unqualifizierter Entwicklungsversuch dokumentiert und wurde nicht ausgeliefert.
+
+Der vorhandene explizite Besitzerbericht ergaenzt direct_sdr_frames,
+solid_background_sdr_frames und linear_frames. Sie zaehlen nur tatsaechlich
+abgeschlossene GPU-Kompositionen mit nichtleerer Reparatur; der zweite
+Zaehler verlangt eine reparierte Region mit einer vorab ergaenzten Shell-
+aufnahme. Kein Sampler, kein zusaetzlicher normaler RPC und keine Zeitmessung.
+
+Lokale Qualifikation:34 Desktopfaelle,3 gemeinsame Geometriefaelle und1
+Uhrfall mit461 aktuellen Eingabehashes; normaler Desktop182-Build.
+176 neue exakte Pixelvergleiche durch NativeCapture und den originalen
+GPU-/Readbackbesitzer gegen jeweils voll invalidierte lineare Referenzen:
+4Drehungen x4Anfangsskalen x11Zustaende, echte Glyphen und opake Iconlaeufe,
+transparente Luecken, Hintergrundwechsel, neue untere Ueberlappung trotz
+altem Damagehinweis, Alpha/Clear-Ablehnung sowie Geometrie- und Skalenwechsel
+auf demselben Cache. Vorhandene138 Bildvergleiche und CPU-Szenenhashes
+bleiben erhalten. Geeignete Zweilayerszenen brauchen2statt3Draws, weil der
+Encode entfaellt. Das belegt weniger Arbeit, keinen gemessenen Zeitfaktor.
+
+KVM4: Q1 SMP/CPUWINIMAGE und alle originalen BASIC-/GB-/SNES60s-Vertraege
+bestanden. Q1 Desktop scheiterte beim oeffentlichen CaptureStats nach dem
+Freigeben der Bildleihen; WINSVC-Neuanmeldung war bereits erfolgreich.
+Kernel417 kann dort bei belegtem FrameExecution-Schutz unavailable liefern;
+roher Rueckgabewert und konkreter Besitzer wurden nicht exportiert.
+OBS-08764-KVM-CAPTURE-STATS1 bleibt offen fuer66. Die gezielte unveraenderte
+Q2-Desktoppruefung bestand inklusive Screenshot/Close/Reap. Originalfristen
+und Erwartungen wurden nicht geaendert; ein spaeterer Pass erklaert Q1 nicht.
+BOOT417 und fuenf Moduldateien wurden aus den echten Images abgeglichen.
+
+OssiPC:64/417/D182/W24/S92/N337,16 konfiguriert/schedulierbar, Batch23cleanup.
+Paket5407441Byte vollstaendig transportverglichen, VERIFY/STAGE/einCOMMIT;
+normaler frischer Boot nach69.58s belegt
+ueber neue Uhr-Epoche/VER/Installationsjournal; die alte COMMIT-Konsole blieb
+leer. Alle vier Moduldateien frisch voll gelesen und byteverglichen;
+CONFIG503original/R4NV19automatic native-cpu/Boot1920x1080 bleiben erhalten.
+Originaler REPLAY: derselbe Device/Target, sichtbare Frames10->18,
+direkteSDR10->18,2echteBO-Rueckgaben,3Exit0-Reaps und keine nativen Fehler.
+Die Shell-Vorkomposition war beim ersten Snapshot bereits2mal abgeschlossen
+und blieb in diesem Fensterintervall bei2. Die zusaetzliche Erwartung einer
+Steigerung gerade dort scheiterte und bleibt als Abdeckungsluecke erhalten.
+
+Ein separater temporaerer SDR64-Helfer verwendet unveraendert die vorhandenen
+Spectra-Check-/Codec-/Report-/Abbaubausteine: eigenes APPDEF-Fenster
+maximieren und schliessen, drei explizite Besitzerkopien. Nach lokaler
+KVM4Q3-Abnahme genau einmal nativ: direkteSDR32->35, Shell-Vorkomposition4->6,
+Devicegeneration2/Verbindung9/Displaygeneration2 gleich, ein zusaetzlicher
+Exit0-Reap. Keine Konfiguration geaendert, kein Beobachter oder neuer
+Produktionspfad und keine Wiederholung des originalen REPLAY. Die Zaehler
+enthalten Hintergrundarbeit; kein isolierter Zeit-/Eingabelatenznachweis.
+
+Normaler PostGPU-Neustart nach54.402s,
+aktuelles REBOOT.LOG mit Ressourcen0/DMAstop/Driver-/Displayquittung.
+Terminaler FLR ist kein unabhaengiger Hot-Modul-Unload-Nachweis. Recovery17
+bleibt unbenutzt. Unveraenderte Kernel417-CPU16/FPU/Lifecycle/Idle-Belege aus59,
+N337-Original14x2/Ring/Audio aus61 und Spectra92-Besitzerbelege aus62 werden
+mit ihrer urspruenglichen Herkunft weiterverwendet. Physische Sicht/Hoeren/
+Latenz und neue native Dreh-/Skalenprofile: SKIP, niemals PASS.
+
+Genau1finalSTANDARD64: 432e32ac-0ac0-4b6a-b03a-2a9900b312ae, Suite3/metric2,
+30Originalsamples/4echteKVMWorker/6Scores lokal und auf R4OS Server validiert;
+vollstaendiger Original-GET und frischer Referenz-GET stimmen ueberein.
+SHA256 6370737d71ca54244a99933da9d495f2ada06863d7e08a8fb6d94062d809ef16. Unisolierter Vergleich mit63, kein
+Speedup-/Noise-/Regressionsursachenclaim und kein Score-/Upload-Rerun.
+Originale, Kontext, fehlgeschlagene Versuche und rekursive SHA256SUMS:
+ExFiles/Reports/Benchmarks/432e32ac-0ac0-4b6a-b03a-2a9900b312ae/.
+1von151Modulen neu,150gleich; Kernel417/SDK105/Contract54 unveraendert.
+141Module/1057Testeintraege/483Docs; temporaerer Helfer getrennt erhalten.
+Alle18vorherigen Fehler plus Q1CaptureStats bleiben unabhaengig fuer66 offen.
+PublicFullSlim51 und Release-/Recoveryarbeiten65 bleiben getrennt.

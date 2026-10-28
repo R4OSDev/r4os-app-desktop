@@ -134,6 +134,9 @@ pub struct Engine {
     pub composed_pixels: u64,
     pub composition_envelope_pixels: u64,
     pub multi_region_frames: u64,
+    pub direct_sdr_frames: u64,
+    pub solid_background_sdr_frames: u64,
+    pub linear_frames: u64,
 }
 impl Engine {
     pub const ADMISSION_LIMIT: usize = 64;
@@ -206,6 +209,9 @@ impl Engine {
             composed_pixels: 0,
             composition_envelope_pixels: 0,
             multi_region_frames: 0,
+            direct_sdr_frames: 0,
+            solid_background_sdr_frames: 0,
+            linear_frames: 0,
         })
     }
     pub fn active(&self) -> bool {
@@ -753,6 +759,20 @@ impl Engine {
                 );
                 if self.encode_regions.len() > 1 {
                     self.multi_region_frames = self.multi_region_frames.saturating_add(1);
+                }
+                if !self.encode_regions.is_empty() {
+                    if self.direct_sdr {
+                        self.direct_sdr_frames = self.direct_sdr_frames.saturating_add(1);
+                        if cache.commands().iter().any(|c| {
+                            cache.entries()[c.entry as usize].background_applied
+                                && self.encode_regions.intersects(c.scissor)
+                        }) {
+                            self.solid_background_sdr_frames =
+                                self.solid_background_sdr_frames.saturating_add(1);
+                        }
+                    } else {
+                        self.linear_frames = self.linear_frames.saturating_add(1);
+                    }
                 }
                 if recording.is_some() {
                     for (i, entry) in cache.entries().iter().enumerate() {

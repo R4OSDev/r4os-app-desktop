@@ -431,3 +431,236 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
         engine.close(&session).unwrap();
     });
 }
+
+#[test]
+fn solid_shell_backdrop_keeps_original_pixels_and_revalidates_replay_dependencies() {
+    use super::super::output_geometry::{
+        self as geometry,
+        topology::{Rotation, Viewport},
+    };
+    fn scene(
+        cache: &mut Cache,
+        frame: &mut Frame,
+        engine: &mut Engine,
+        replay: &mut RecordingReplay,
+        view: Viewport,
+        turn: usize,
+        optimized: bool,
+        paints: &Cell<u32>,
+    ) {
+        engine.clear_sources().unwrap();
+        replay.save(cache, frame);
+        frame.set_mirror(false).unwrap();
+        cache.start(Mode::NativeOutput(view), Some(frame)).unwrap();
+        let bounds = geometry::logical(view).unwrap();
+        // At turns2/3 an old CPU hint is deliberately outside the icon.
+        // New background color or overlap must independently revoke its seed.
+        let hint = if matches!(turn, 1 | 2 | 3) {
+            Rect::new(0, 0, 1, 1)
+        } else {
+            bounds
+        };
+        replay.prepare(cache, frame, Some(hint.into())).unwrap();
+        let mut reads = Reads::default();
+        let mut windows = Set::new(NoExternal);
+        let mut c = Capture {
+            cache,
+            frame,
+            engine,
+            reads: &mut reads,
+            windows: &mut windows,
+            recording_replay: Some(replay),
+            finished: false,
+        };
+        let background = if turn >= 2 { 0x7821af } else { 0x123456 };
+        c.paint(1, bounds, bounds, |p| {
+            p.fill(bounds, background)?;
+            if turn == 8 {
+                p.fill(Rect::new(1, 1, 2, 2), 0x40a077)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let overlay = Rect::new(if turn == 7 { 0 } else { 1 }, 1, bounds.w - 2, bounds.h - 2);
+        if turn == 3 {
+            let under = Rect::new(overlay.x, overlay.y, 1, 1);
+            c.paint(9, under, bounds, |p| p.fill(under, 0x40a077))
+                .unwrap();
+        }
+        let paint = |p: &mut Painter<'_, '_>| {
+            paints.set(paints.get() + 1);
+            // Same opaque ICO runs and actual foreground/background glyph
+            // format used by the shell, with genuinely transparent gaps.
+            p.fill(Rect::new(overlay.x, overlay.y + 1, 1, 1), 0xfedcba)?;
+            let rows = [1u64, 2];
+            let mut glyph = View::new(Format::Glyph, 2, 2, 0, &[]);
+            glyph.rows = &rows;
+            glyph.foreground = 0xffffff;
+            glyph.background = 0x225599;
+            glyph.identity.revision = 1;
+            let cell = Rect::new(overlay.x + 1, overlay.y, 2, 2);
+            p.picture(Picture {
+                view: glyph,
+                viewport: cell,
+                clip: overlay,
+                source_x: 0,
+                source_y: 0,
+                guest_w: 2,
+                guest_h: 2,
+            })?;
+            if matches!(turn, 4 | 5) {
+                let white = [if turn == 4 { 0x80ffffff } else { 0u32 }];
+                let pixel = Rect::new(overlay.x, overlay.bottom() - 1, 1, 1);
+                p.picture(Picture {
+                    view: View::new(
+                        Format::Argb,
+                        1,
+                        1,
+                        4,
+                        PixelBytes::from_words(&white).bytes(),
+                    ),
+                    viewport: pixel,
+                    clip: pixel,
+                    source_x: 0,
+                    source_y: 0,
+                    guest_w: 1,
+                    guest_h: 1,
+                })?;
+            }
+            if turn == 6 {
+                p.clear(Rect::new(overlay.x + 1, overlay.y, 1, 1))?;
+            }
+            Ok(())
+        };
+        let before = paints.get();
+        if optimized {
+            c.paint_over_solid(32, overlay, bounds, background, paint)
+                .unwrap();
+        } else {
+            c.paint(32, overlay, bounds, paint).unwrap();
+        }
+        if turn == 1 {
+            assert_eq!(paints.get(), before, "unchanged shell paint really reused");
+        }
+        if matches!(turn, 2 | 3) && optimized && view.scale == 120 {
+            assert_eq!(
+                paints.get(),
+                before + 1,
+                "current backdrop color/geometry overrides stale reusable hint"
+            );
+        }
+        c.cache.finish(Some(c.frame)).unwrap();
+        c.cache.complete_scene = true;
+        // Full composition independently checks every backdrop pixel. The
+        // deliberately stale CPU hint above is not a GPU damage oracle.
+        c.engine.composition_damage(view, None).unwrap();
+        c.finished = true;
+    }
+    for rotation in [
+        Rotation::Normal,
+        Rotation::Clockwise90,
+        Rotation::Clockwise180,
+        Rotation::Clockwise270,
+    ] {
+        for scale in [60, 120, 150, 180] {
+            gpu::with(|app, device| {
+                let mut engine = Engine::new().unwrap();
+                engine.destination = crate::render::gpu::engine::Destination::Readback;
+                let mut reference = Engine::new().unwrap();
+                reference.destination = crate::render::gpu::engine::Destination::Readback;
+                let mut cache = Cache::new(1024 * 1024).unwrap();
+                let mut ref_cache = Cache::new(1024 * 1024).unwrap();
+                let mut frame = Frame::new().unwrap();
+                let mut ref_frame = Frame::new().unwrap();
+                let mut replay = RecordingReplay::new().unwrap();
+                let mut ref_replay = RecordingReplay::new().unwrap();
+                let paints = Cell::new(0);
+                let ref_paints = Cell::new(0);
+                for turn in 0..11 {
+                    let view = Viewport {
+                        pixel_w: 8,
+                        pixel_h: 8,
+                        scale: if turn == 10 {
+                            if scale == 120 { 150 } else { 120 }
+                        } else {
+                            scale
+                        },
+                        rotation,
+                        ..Default::default()
+                    };
+                    scene(
+                        &mut cache,
+                        &mut frame,
+                        &mut engine,
+                        &mut replay,
+                        view,
+                        turn,
+                        true,
+                        &paints,
+                    );
+                    scene(
+                        &mut ref_cache,
+                        &mut ref_frame,
+                        &mut reference,
+                        &mut ref_replay,
+                        view,
+                        turn,
+                        false,
+                        &ref_paints,
+                    );
+                    reference.invalidate();
+                    gpu::begin(app, device, &mut reference, &ref_cache, Some(&ref_frame));
+                    gpu::pump(
+                        app,
+                        device,
+                        &mut reference,
+                        &mut ref_cache,
+                        Some(&mut ref_frame),
+                        Progress::Copied,
+                    );
+                    let expected = gpu::pixels(app, device, &reference);
+                    let direct = view.scale == 120 && !matches!(turn, 3 | 4 | 5 | 6 | 8);
+                    let entry = cache.entries().iter().find(|e| e.key == 32).unwrap();
+                    assert_eq!(entry.background_applied, direct, "turn={turn}, {view:?}");
+                    let jobs = engine.render_jobs - engine.primitive_jobs;
+                    gpu::begin(app, device, &mut engine, &cache, Some(&frame));
+                    assert_eq!(
+                        engine
+                            .resources
+                            .workings
+                            .iter()
+                            .all(|w| w.resource.slot == 0),
+                        direct
+                    );
+                    gpu::pump(
+                        app,
+                        device,
+                        &mut engine,
+                        &mut cache,
+                        Some(&mut frame),
+                        Progress::Copied,
+                    );
+                    assert_eq!(
+                        gpu::pixels(app, device, &engine),
+                        expected,
+                        "turn={turn}, {view:?}"
+                    );
+                    assert_eq!(
+                        engine.render_jobs - engine.primitive_jobs - jobs,
+                        (if turn == 3 { 3 } else { 2 }) + u64::from(!direct),
+                        "same ordered layers; encode removed only with actual opaque proof"
+                    );
+                }
+                assert_eq!(
+                    engine.solid_background_sdr_frames,
+                    if scale == 120 { 5 } else { 1 }
+                );
+                assert_eq!(engine.direct_sdr_frames, engine.solid_background_sdr_frames);
+                assert_eq!(engine.linear_frames, if scale == 120 { 6 } else { 10 });
+                let s = device.bind(app).unwrap();
+                engine.close(&s).unwrap();
+                reference.close(&s).unwrap();
+            });
+        }
+    }
+}

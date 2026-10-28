@@ -46,6 +46,7 @@ impl Command {
 struct Active {
     layer: u8,
     bounds: Rect,
+    first: usize,
 }
 pub struct Frame {
     pub assets: Cache,
@@ -154,8 +155,39 @@ impl Frame {
         self.active = Some(Active {
             layer,
             bounds: raster,
+            first: self.commands.len(),
         });
         Ok(())
+    }
+    /// Replace only this capture's initial transparent clear. The caller has
+    /// proved the exact solid backdrop and absence of intervening layers.
+    /// Every later write must itself be opaque: unknown alpha or another
+    /// clear keeps the original transparent recording and linear composition.
+    pub(crate) fn complete_over_solid(&mut self, rgb: u32) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        if self.mirror || self.failure.is_some() {
+            return false;
+        }
+        let commands = &mut self.commands[active.first..];
+        let full = Rect::new(0, 0, active.bounds.w, active.bounds.h);
+        let Some((first, rest)) = commands.split_first_mut() else {
+            return false;
+        };
+        if first.texture.is_some()
+            || first.over
+            || first.color != 0
+            || first.grid.enabled != 0
+            || first.target != full
+            || first.scissor != full
+            || rest.iter().any(|c| c.layer != active.layer || !c.opaque)
+        {
+            return false;
+        }
+        first.color = 0xff000000 | (rgb & 0xffffff);
+        first.opaque = true;
+        true
     }
     pub fn end(&mut self) -> Result<()> {
         if self.active.take().is_none() {

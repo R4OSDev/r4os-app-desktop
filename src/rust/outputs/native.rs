@@ -376,6 +376,9 @@ impl<'a> Output<'a> {
             composed_pixels: state.engine.composed_pixels,
             composition_envelope_pixels: state.engine.composition_envelope_pixels,
             multi_region_frames: state.engine.multi_region_frames,
+            direct_sdr_frames: state.engine.direct_sdr_frames,
+            solid_background_sdr_frames: state.engine.solid_background_sdr_frames,
+            linear_frames: state.engine.linear_frames,
         })
     }
     pub fn execution_observation(&self) -> super::selection::Execution {

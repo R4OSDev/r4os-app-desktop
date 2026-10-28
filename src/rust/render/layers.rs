@@ -22,6 +22,8 @@ pub struct Entry {
     pub dirty: Option<Rect>,
     pub initialized: bool,
     pub(crate) external: bool,
+    solid_background: Option<u32>,
+    pub(crate) background_applied: bool,
 }
 impl Entry {
     pub fn pixels(&self) -> &[u32] {
@@ -114,6 +116,8 @@ impl Cache {
                 dirty: from.dirty,
                 initialized: from.initialized,
                 external: from.external,
+                solid_background: from.solid_background,
+                background_applied: from.background_applied,
             };
         }
         out.commands.extend_from_slice(&self.commands);
@@ -373,11 +377,31 @@ impl Cache {
         key: u32,
         bounds: Rect,
         damage: Rect,
-        mut recording: Option<&mut Frame>,
+        recording: Option<&mut Frame>,
         replay: Option<Replay<'_>>,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
-        let result = self.paint_inner(key, bounds, damage, recording.as_deref_mut(), replay, paint);
+        self.paint_over_solid(key, bounds, damage, recording, replay, None, paint)
+    }
+    pub(crate) fn paint_over_solid(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        mut recording: Option<&mut Frame>,
+        replay: Option<Replay<'_>>,
+        background: Option<u32>,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        let result = self.paint_inner(
+            key,
+            bounds,
+            damage,
+            recording.as_deref_mut(),
+            replay,
+            background,
+            paint,
+        );
         if let Err(error) = result {
             self.failure = Some(error);
             if let Some(recording) = recording {
@@ -393,6 +417,7 @@ impl Cache {
         damage: Rect,
         mut recording: Option<&mut Frame>,
         replay: Option<Replay<'_>>,
+        background: Option<u32>,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
         if !self.collecting || self.failure.is_some() {
@@ -431,6 +456,7 @@ impl Cache {
             return Err(Error::State);
         }
         if !mirror
+            && entry.solid_background == background
             && replay.as_ref().is_some_and(|r| r.reusable[index])
             && entry.initialized
             && entry.frame == self.frame - 1
@@ -463,7 +489,10 @@ impl Cache {
                 return Ok(false);
             }
         }
-        if entry.bounds != raster || entry.capture_bounds != clipped {
+        if entry.bounds != raster
+            || entry.capture_bounds != clipped
+            || entry.solid_background != background
+        {
             if entry.frame == self.frame {
                 return Err(Error::State);
             }
@@ -516,13 +545,18 @@ impl Cache {
             };
             painter.clear(repaint).and_then(|()| paint(&mut painter))
         };
+        let mut background_applied = false;
         if let Some(recording) = recording.as_deref_mut() {
             if let Err(error) = result {
                 recording.reject(error);
+            } else if let Some(rgb) = background {
+                background_applied = recording.complete_over_solid(rgb);
             }
             recording.end()?;
         }
         result?;
+        entry.solid_background = background;
+        entry.background_applied = background_applied;
         entry.frame = self.frame;
         let generation = entry.generation.checked_add(1).ok_or(Error::Overflow)?;
         if !mirror {
