@@ -1,17 +1,23 @@
-//! Calendar/config reads are admitted once per monotonic second. The kernel
-//! owns the wallclock anchor; this owner retains only presentation and its due.
+//! Visible calendar reads are admitted once per monotonic second. File checks
+//! deliver closed async snapshots; unchanged bytes do not re-enter the parser.
+//! The kernel owns the wallclock anchor; this owner retains presentation/due.
 use super::{configuration::bytes_z, persistence::Store};
 use crate::runtime::library::{required, scalar};
 use core::mem::MaybeUninit;
 use r4os_library_helpers::{Error, raw as c};
 use r4os_sdk::abi as a;
-const PATH: &[u8] = b"C:\\R4OS\\CONFIG\\TIME.R4S";
+pub(crate) const PATH: &[u8] = b"C:\\R4OS\\CONFIG\\TIME.R4S";
 const SECOND: u64 = 1_000_000_000;
+pub(crate) const CONFIG_BYTES: usize = 768;
 pub struct Clock {
     config: c::R4StdTimeHelpersConfig,
     label: [u8; 9],
     next_ns: u64,
     last_ns: u64,
+    visible: bool,
+    config_dirty: bool,
+    last_config: [u8; CONFIG_BYTES],
+    last_config_len: Option<usize>,
 }
 
 #[cfg(test)]
@@ -136,6 +142,139 @@ mod tests {
             assert_eq!(clock.label(), b"02:34 PM");
         });
     }
+    #[test]
+    fn unchanged_file_bytes_do_not_repeat_native_config_parse() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            let bytes = b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=Europe/Berlin\n";
+            let mut calls = 0;
+            for _ in 0..5 {
+                clock
+                    .apply_bytes_with(bytes, |next, source| {
+                        calls += 1;
+                        scalar(unsafe {
+                            c::R4StdTimeHelpersConfig_loadFromBytes(
+                                0,
+                                next,
+                                source.as_ptr(),
+                                source.len() as u64,
+                            )
+                        })
+                        .map(|value| value != 0)
+                    })
+                    .unwrap();
+            }
+            assert_eq!(
+                calls, 1,
+                "unchanged file bytes must not re-enter the native configuration parser"
+            );
+            clock
+                .refresh(0, |_| Ok(false), || Some(state(28, 12, 34)))
+                .unwrap();
+            assert_eq!(clock.label(), b"13:34");
+        });
+    }
+    #[test]
+    fn hidden_clock_does_not_load_or_arm_a_due_and_show_uses_the_live_calendar() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            clock
+                .refresh(0, |_| Ok(false), || Some(state(28, 12, 34)))
+                .unwrap();
+            clock.set_visible(false);
+            for now in [SECOND, 2 * SECOND, 20 * SECOND] {
+                assert!(
+                    !clock
+                        .refresh(
+                            now,
+                            |_| panic!("hidden preferences"),
+                            || panic!("hidden calendar")
+                        )
+                        .unwrap()
+                );
+                assert_eq!(clock.wait_ticks(now, 1000, 500), 500);
+            }
+            clock.set_visible(true);
+            assert!(
+                clock
+                    .refresh(20 * SECOND, |_| Ok(false), || Some(state(29, 0, 1)))
+                    .unwrap()
+            );
+            assert_eq!(clock.label(), b"00:01");
+            // A configuration delivered before the old calendar due must be
+            // applied immediately, without replacing the kernel date anchor.
+            clock
+                .apply_bytes(b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=Europe/Berlin\n")
+                .unwrap();
+            clock
+                .refresh(20 * SECOND + 1, |_| Ok(false), || Some(state(29, 12, 34)))
+                .unwrap();
+            assert_eq!(clock.label(), b"14:34");
+        });
+    }
+    #[test]
+    fn refused_bytes_are_cached_without_overwriting_valid_configuration_and_errors_retry() {
+        crate::standard_fixture::with(|_| {
+            let mut clock = Clock::new().unwrap();
+            clock
+                .apply_bytes(b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=Europe/Berlin\n")
+                .unwrap();
+            let utc = b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=UTC\n";
+            let mut refused = 0;
+            for _ in 0..5 {
+                assert!(
+                    !clock
+                        .apply_bytes_with(b"refused snapshot", |next, _| {
+                            refused += 1;
+                            // Even a decoder that altered its candidate before
+                            // reporting refusal must not overwrite the live value.
+                            scalar(unsafe {
+                                c::R4StdTimeHelpersConfig_loadFromBytes(
+                                    0,
+                                    next,
+                                    utc.as_ptr(),
+                                    utc.len() as u64,
+                                )
+                            })?;
+                            Ok(false)
+                        })
+                        .unwrap()
+                );
+            }
+            assert_eq!(refused, 1);
+            clock
+                .refresh(0, |_| Ok(false), || Some(state(28, 12, 34)))
+                .unwrap();
+            assert_eq!(clock.label(), b"13:34");
+            assert!(
+                clock
+                    .apply_bytes_with(utc, |_, _| Err(Error::InvalidProvider))
+                    .is_err()
+            );
+            let mut retried = 0;
+            assert!(
+                clock
+                    .apply_bytes_with(utc, |next, bytes| {
+                        retried += 1;
+                        scalar(unsafe {
+                            c::R4StdTimeHelpersConfig_loadFromBytes(
+                                0,
+                                next,
+                                bytes.as_ptr(),
+                                bytes.len() as u64,
+                            )
+                        })
+                        .map(|value| value != 0)
+                    })
+                    .unwrap()
+            );
+            assert_eq!(retried, 1);
+            clock
+                .refresh(1, |_| Ok(false), || Some(state(28, 12, 34)))
+                .unwrap();
+            assert_eq!(clock.label(), b"12:34");
+        });
+    }
 }
 fn view<'a>(slot: c::R4LibrariesSlot, bytes: &'a [u8]) -> Result<&'a [u8], Error> {
     let slot = required(slot)?;
@@ -160,16 +299,30 @@ impl Clock {
             label: [b'-', b'-', b':', b'-', b'-', 0, 0, 0, 0],
             next_ns: 0,
             last_ns: 0,
+            visible: true,
+            config_dirty: false,
+            last_config: [0; CONFIG_BYTES],
+            last_config_len: None,
         })
     }
     pub fn label(&self) -> &[u8] {
         bytes_z(&self.label)
     }
+    pub fn set_visible(&mut self, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.next_ns = 0;
+        }
+    }
+    fn remember(&mut self, bytes: &[u8]) {
+        self.last_config[..bytes.len()].copy_from_slice(bytes);
+        self.last_config_len = Some(bytes.len());
+    }
     pub fn load(&mut self, store: &Store<'_, '_>, state: &a::TimeState) -> bool {
         if store.recover(PATH).is_err() {
             return false;
         }
-        let mut bytes = [0; 768];
+        let mut bytes = [0; CONFIG_BYTES];
         match store.read(PATH, &mut bytes) {
             Ok(None) => {
                 let mut bytes = [0; 384];
@@ -185,33 +338,56 @@ impl Clock {
                 view(encoded, &bytes)
                     .ok()
                     .filter(|v| !v.is_empty())
-                    .is_some_and(|v| store.save(PATH, v).is_ok())
+                    .is_some_and(|v| {
+                        if store.save(PATH, v).is_err() {
+                            return false;
+                        }
+                        self.remember(v);
+                        true
+                    })
             }
             Ok(Some(0)) => true,
-            Ok(Some(n)) if n <= bytes.len() => scalar(unsafe {
-                c::R4StdTimeHelpersConfig_loadFromBytes(
-                    0,
-                    &mut self.config,
-                    bytes.as_ptr(),
-                    n as u64,
-                )
-            })
-            .is_ok_and(|v| v != 0),
+            Ok(Some(n)) if n <= bytes.len() => {
+                let mut next = self.config;
+                match scalar(unsafe {
+                    c::R4StdTimeHelpersConfig_loadFromBytes(0, &mut next, bytes.as_ptr(), n as u64)
+                }) {
+                    Ok(valid) => {
+                        self.remember(&bytes[..n]);
+                        if valid != 0 {
+                            self.config = next;
+                        }
+                        valid != 0
+                    }
+                    Err(_) => false,
+                }
+            }
             _ => false,
         }
     }
-    fn reload(&mut self, store: &Store<'_, '_>) -> Result<bool, Error> {
-        let mut next = self.config;
-        let mut bytes = [0; 768];
-        let Ok(Some(n)) = store.read(PATH, &mut bytes) else {
+    pub(crate) fn apply_bytes(&mut self, bytes: &[u8]) -> Result<bool, Error> {
+        self.apply_bytes_with(bytes, |next, bytes| {
+            scalar(unsafe {
+                c::R4StdTimeHelpersConfig_loadFromBytes(0, next, bytes.as_ptr(), bytes.len() as u64)
+            })
+            .map(|value| value != 0)
+        })
+    }
+    fn apply_bytes_with(
+        &mut self,
+        bytes: &[u8],
+        decode: impl FnOnce(&mut c::R4StdTimeHelpersConfig, &[u8]) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
+        if bytes.is_empty() || bytes.len() > CONFIG_BYTES {
             return Ok(false);
-        };
-        if n == 0
-            || n > bytes.len()
-            || scalar(unsafe {
-                c::R4StdTimeHelpersConfig_loadFromBytes(0, &mut next, bytes.as_ptr(), n as u64)
-            })? == 0
-        {
+        }
+        if self.last_config_len == Some(bytes.len()) && self.last_config[..bytes.len()] == *bytes {
+            return Ok(false);
+        }
+        let mut next = self.config;
+        let valid = decode(&mut next, bytes)?;
+        self.remember(bytes);
+        if !valid {
             return Ok(false);
         }
         let current_zone =
@@ -225,23 +401,22 @@ impl Clock {
             return Ok(false);
         }
         self.config = next;
+        self.config_dirty = true;
         Ok(true)
     }
-    pub fn update(
-        &mut self,
-        store: &Store<'_, '_>,
-        app: &r4os_sdk::App<'_>,
-        now_ns: u64,
-    ) -> Result<bool, Error> {
+    pub fn update(&mut self, app: &r4os_sdk::App<'_>, now_ns: u64) -> Result<bool, Error> {
         self.refresh(
             now_ns,
-            |clock| clock.reload(store),
+            |_| Ok(false),
             || r4os_sdk::time::Clock::new(app).state().ok(),
         )
     }
     /// Include the calendar due in the ordinary activity wait. Read the live
     /// tick scale at the caller; a timer-frequency change cannot delay refresh.
     pub fn wait_ticks(&self, now_ns: u64, hz: u32, maximum: u64) -> u64 {
+        if !self.visible {
+            return maximum;
+        }
         let delta = self.next_ns.saturating_sub(now_ns);
         let ticks = (u128::from(delta) * u128::from(hz)).div_ceil(u128::from(SECOND));
         ticks.max(1).min(u128::from(maximum)) as u64
@@ -252,20 +427,24 @@ impl Clock {
         reload: impl FnOnce(&mut Self) -> Result<bool, Error>,
         calendar: impl FnOnce() -> Option<a::TimeState>,
     ) -> Result<bool, Error> {
+        if !self.visible {
+            return Ok(false);
+        }
         if now_ns < self.last_ns {
             self.next_ns = 0;
         }
         self.last_ns = now_ns;
-        if now_ns < self.next_ns {
+        if now_ns < self.next_ns && !self.config_dirty {
             return Ok(false);
         }
         self.next_ns = now_ns.saturating_add(SECOND);
         let reloaded = reload(self)?;
+        let reconfigured = core::mem::replace(&mut self.config_dirty, false);
         let Some(state) = calendar().filter(|state| state.valid != 0) else {
             let unknown = [b'-', b'-', b':', b'-', b'-', 0, 0, 0, 0];
             let changed = self.label != unknown;
             self.label = unknown;
-            return Ok(changed || reloaded);
+            return Ok(changed || reloaded || reconfigured);
         };
         let offset = scalar(unsafe {
             c::R4StdTimeHelpersConfig_offsetMinutesForState(
@@ -294,7 +473,7 @@ impl Clock {
         };
         let value = view(formatted, &next)?;
         if value.is_empty() || value == self.label() {
-            return Ok(reloaded);
+            return Ok(reloaded || reconfigured);
         }
         let mut label = [0; 9];
         if value.len() >= label.len() {

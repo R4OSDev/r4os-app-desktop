@@ -5,6 +5,7 @@ pub(crate) mod audio_io;
 pub mod bootstrap;
 pub mod desktop;
 pub mod environment;
+pub(crate) mod file_checks;
 pub mod library;
 mod mode_io;
 pub mod owned;

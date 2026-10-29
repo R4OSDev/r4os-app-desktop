@@ -154,9 +154,12 @@ impl<'input> State<'input> {
         if let Ok(quick) = env.store.load_quick() {
             self.quick = quick;
         }
-        if let Ok(state) = r4os_sdk::time::Clock::new(env.app).state() {
-            if !self.clock.load(&env.store, &state) {
-                env.app.write("Time config unreadable; file retained\n");
+        self.clock.set_visible(self.config.taskbar_clock);
+        if self.config.taskbar_clock {
+            if let Ok(state) = r4os_sdk::time::Clock::new(env.app).state() {
+                if !self.clock.load(&env.store, &state) {
+                    env.app.write("Time config unreadable; file retained\n");
+                }
             }
         }
         self.reload_wallpaper(env);

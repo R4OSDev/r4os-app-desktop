@@ -30,6 +30,19 @@ impl Fonts for Builtin {
     }
 }
 struct NoFileIcons;
+#[test]
+fn clock_refresh_and_taskbar_paint_share_fullscreen_coverage() {
+    let mut win = Window::new(Kind::Manager, Rect::new(0, 0, 640, 480));
+    assert!(visible(core::slice::from_ref(&win), 0, 640, 480));
+    win.set_fullscreen(true, Rect::new(0, 0, 640, 480), Rect::new(0, 0, 640, 448));
+    assert!(!visible(core::slice::from_ref(&win), 0, 640, 480));
+    win.minimize();
+    assert!(visible(core::slice::from_ref(&win), 0, 640, 480));
+    win.close();
+    assert!(visible(core::slice::from_ref(&win), 0, 640, 480));
+    assert!(visible(&[], usize::MAX, 1280, 720));
+    assert!(!visible(&[], 0, 0, 720));
+}
 impl Icons for NoFileIcons {
     fn quick<F: Fonts>(&mut self, _: &mut Ui<'_, '_, F>, _: &[u8], _: i32, _: i32) -> Result<bool> {
         Ok(false)

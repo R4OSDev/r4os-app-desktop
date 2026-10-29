@@ -108,6 +108,7 @@ struct Desktop<'a, 'input> {
     expected: &'static StartupInfo<'static>,
     shell: Owned<Shell<'input>>,
     audio_io: super::audio_io::AudioIo<'a>,
+    file_checks: super::file_checks::Owner<'a>,
     hosted: Owned<hosted::State<'input>>,
     frames: Owned<Frames>,
     outputs: Owned<Manager<'a>>,
@@ -180,6 +181,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             shell,
             audio_io: super::audio_io::AudioIo::new(services, env.resources, owner)
                 .map_err(|_| "audio requests")?,
+            file_checks: super::file_checks::Owner::new(owner.instance_id)
+                .map_err(|_| "file checks")?,
             hosted,
             frames,
             outputs,
@@ -273,6 +276,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 .is_ok();
         }
         self.shell.load(env, self.width, self.height);
+        self.file_checks.initialize(
+            &env.system.files(),
+            self.shell.config.taskbar_clock && !self.hosted.terminal_mode,
+            time.nanoseconds,
+        );
         self.associations.load(&env.store);
         let _ = self.outputs.preferences.reload_layout(&env.store);
         let _ = self.outputs.reload_colors(&env.store);
@@ -532,21 +540,32 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if self.status.refresh(env, session, time.tick, time.hz) {
             self.bar();
         }
+        let clock_visible = self.shell.config.taskbar_clock
+            && !self.hosted.terminal_mode
+            && shell::taskbar_view::visible(
+                self.hosted.model.windows.windows(),
+                self.hosted.model.windows.active(),
+                self.width,
+                self.height,
+            );
+        let installed = self
+            .file_checks
+            .refresh(
+                env.resources,
+                &env.system.files(),
+                &mut self.shell.clock,
+                clock_visible,
+                time.nanoseconds,
+            )
+            .unwrap_or(self.shell.audio.ui.installed);
         if self
             .shell
             .clock
-            .update(&env.store, env.app, time.nanoseconds)
+            .update(env.app, time.nanoseconds)
             .unwrap_or(false)
         {
             self.bar();
         }
-        let installed = if self.shell.audio.poll_due(time.tick) {
-            FilePath::parse(b"C:\\R4OS\\SERVICES\\AUDSVC.R4X")
-                .ok()
-                .is_some_and(|path| matches!(env.system.files().info(&path), Ok(Some(_))))
-        } else {
-            self.shell.audio.ui.installed
-        };
         if self
             .shell
             .audio
@@ -1734,6 +1753,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.layout.busy()
             || self.modes.busy()
             || self.audio_io.busy()
+            || self.file_checks.busy()
             || self.hosted.pending.iter().any(|p| p.queued() != 0)
         {
             delay = 1;
@@ -1830,6 +1850,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             };
             let modes = host.drain_modes();
             let audio = self.audio_io.drain();
+            let files = self.file_checks.drain();
             let capture = self.capture.drain(now);
             let controls = self
                 .control
@@ -1885,6 +1906,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             if capture
                 && modes
                 && audio
+                && files
                 && diagnostic
                 && primary
                 && controls
@@ -2032,6 +2054,7 @@ impl bootstrap::Body for Coordinator {
                 // painting the hidden Desktop over its transcript.
                 desktop.shell.audio.stop();
                 let _ = desktop.audio_io.drain();
+                let _ = desktop.file_checks.drain();
                 desktop.capture.poll();
                 unsafe {
                     desktop.layout.flush(

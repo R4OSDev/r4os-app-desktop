@@ -25,6 +25,11 @@ pub const CLOCK_W: i32 = 88;
 pub const CLOCK_RIGHT_MARGIN: i32 = 8;
 pub const LAYOUT_W: i32 = 34;
 pub const LAYOUT_GAP: i32 = 6;
+/// The refresh owner and compositor use the same global taskbar coverage.
+pub fn visible(windows: &[Window], active: usize, width: i32, height: i32) -> bool {
+    let bar = Rect::new(0, height - s::TASKBAR_H, width, s::TASKBAR_H);
+    !bar.is_empty() && !crate::windows::window::fullscreen_covers(windows, active, bar)
+}
 pub trait Icons {
     fn quick<F: Fonts>(
         &mut self,

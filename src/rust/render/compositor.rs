@@ -32,11 +32,7 @@ use crate::{
         tray::{Identity, Registry},
         volume,
     },
-    windows::{
-        controller::Controller,
-        view as window_chrome,
-        window::{Window, fullscreen_covers},
-    },
+    windows::{controller::Controller, view as window_chrome, window::Window},
 };
 #[derive(Clone, Copy)]
 pub struct Wallpaper<'a> {
@@ -540,7 +536,7 @@ pub(crate) unsafe fn draw(
             }
         }
         let taskbar = Rect::new(0, scene.height - s::TASKBAR_H, scene.width, s::TASKBAR_H);
-        if !fullscreen_covers(windows, active, taskbar) {
+        if taskbar_view::visible(windows, active, scene.width, scene.height) {
             for &d in regions {
                 if d.intersects(taskbar) {
                     layer(capture, 5, taskbar, d, cache, fonts, shell.font, |ui| {
