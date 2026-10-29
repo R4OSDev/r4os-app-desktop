@@ -6,8 +6,20 @@ use super::{
     ui::Ui,
 };
 use alloc::vec::Vec;
-use core::mem::MaybeUninit;
 use r4os_sdk::{App, data::raw as c, path::FilePath, storage::System};
+#[cfg(test)]
+std::thread_local! {
+    static PIXEL_BRIDGE_CALLS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+}
+// Count the actual native pixel boundary only in the existing host fixture.
+// Product expansion is just the original expression, with no observer.
+macro_rules! pixel_bridge {
+    ($call:expr) => {{
+        #[cfg(test)]
+        PIXEL_BRIDGE_CALLS.with(|count| count.set(count.get() + 1));
+        $call
+    }};
+}
 mod misses;
 pub const PATH_MAX: usize = 127;
 pub const SIZE_MAX: usize = 32;
@@ -211,27 +223,12 @@ impl Cache {
                 return None;
             }
             let bytes = &self.input[..n];
-            let mut choice = MaybeUninit::uninit();
-            if !present(unsafe {
-                c::R4SdkDataIco_chooseBest(0, bytes.as_ptr(), n as u64, size, choice.as_mut_ptr())
-            }) {
-                return None;
-            }
-            let mut image = MaybeUninit::uninit();
-            if !present(unsafe {
-                c::R4SdkDataIco_parseBmpImage(
-                    0,
-                    bytes.as_ptr(),
-                    n as u64,
-                    choice.as_ptr(),
-                    image.as_mut_ptr(),
-                )
-            }) {
-                return None;
-            }
-            let width = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_width(image.as_ptr()) })?;
-            let height = scalar(unsafe { c::R4SdkDataIcoBitmapImage_get_height(image.as_ptr()) })?;
-            if width == 0 || height == 0 || width > u32::MAX as u64 || height > u32::MAX as u64 {
+            let image = r4os_sdk::data::Icon::open(bytes)
+                .ok()?
+                .best_bitmap(size)
+                .ok()?;
+            let (width, height) = image.dimensions().ok()?;
+            if width == 0 || height == 0 {
                 return None;
             }
             let index = if let Some(i) = self.entries.iter().position(|e| !e.used) {
@@ -248,36 +245,19 @@ impl Cache {
             e.size = size;
             e.pixels.fill(0);
             e.alpha.fill(0);
-            let w = (size as u64).min(width);
-            let h = (size as u64).min(height);
-            let ox = (size as u64 - w) / 2;
-            let oy = (size as u64 - h) / 2;
-            for py in 0..h {
-                for px in 0..w {
-                    let mut pixel = MaybeUninit::uninit();
-                    if !present(unsafe {
-                        c::R4SdkDataIco_pixelAt(
-                            0,
-                            bytes.as_ptr(),
-                            n as u64,
-                            image.as_ptr(),
-                            (px * width / w) as u32,
-                            (py * height / h) as u32,
-                            pixel.as_mut_ptr(),
-                        )
-                    }) {
-                        continue;
-                    }
-                    if let (Some(rgb), Some(alpha)) = (
-                        scalar(unsafe { c::R4SdkDataIcoPixel_get_rgb(pixel.as_ptr()) }),
-                        scalar(unsafe { c::R4SdkDataIcoPixel_get_alpha(pixel.as_ptr()) }),
-                    ) {
-                        let dst = ((oy + py) * SIZE_MAX as u64 + ox + px) as usize;
-                        e.pixels[dst] = rgb as u32;
-                        e.alpha[dst] = alpha as u8;
-                    }
-                }
-            }
+            let w = u32::from(size).min(width);
+            let h = u32::from(size).min(height);
+            let ox = ((u32::from(size) - w) / 2) as usize;
+            let oy = ((u32::from(size) - h) / 2) as usize;
+            let destination = oy * SIZE_MAX + ox;
+            pixel_bridge!(image.copy_scaled_pixels(
+                &mut e.pixels[destination..],
+                &mut e.alpha[destination..],
+                w,
+                h,
+                SIZE_MAX,
+            ))
+            .ok()?;
             e.used = true;
             e.loaded_ns = self.now_ns;
             Some(index)
@@ -464,6 +444,26 @@ mod tests {
         fn container(&mut self, path: &[u8], out: &mut [u8]) -> Option<usize> {
             self.file(path, out)
         }
+    }
+    #[test]
+    fn complete_32px_icon_uses_one_native_pixel_transfer() {
+        let mut cache = Cache::new().unwrap();
+        let mut source = AssetSource {
+            bytes: include_bytes!(
+                "../../../../../Distribution/Injection/R4OS/Media/Icons/Application.ico"
+            ),
+            reads: 0,
+        };
+        PIXEL_BRIDGE_CALLS.with(|count| count.set(0));
+        let icon = cache.load(&mut source, b"C:\\APP.ICO", 32, false).unwrap();
+        assert_eq!(icon.size, 32);
+        assert!(icon.alpha.iter().any(|&alpha| alpha != 0));
+        assert_eq!(source.reads, 1);
+        assert_eq!(
+            PIXEL_BRIDGE_CALLS.with(|count| count.get()),
+            1,
+            "one native pixel transfer instead of per-pixel transport and field getters"
+        );
     }
     #[test]
     fn d091_current_icon_source_reads_and_real_asset_paint_work() {
