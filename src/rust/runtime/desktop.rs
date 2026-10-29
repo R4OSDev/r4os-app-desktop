@@ -1654,7 +1654,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             .registry()
                             .hit(value.x, value.y)
                             .unwrap_or_default();
-                        let action = self.router.pointer(
+                        let actions = self.router.pointer(
                             &mut self.input,
                             &mut self.shell,
                             &mut self.hosted,
@@ -1699,7 +1699,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         {
                             self.hosted.flush_geometry(index, host, time.tick, time.hz);
                         }
-                        self.action(action, env, session, host, programs, time);
+                        if let Some(wheel) = actions.wheel {
+                            self.action(wheel.action(), env, session, host, programs, time);
+                        }
+                        if let Some(secondary) = actions.secondary {
+                            self.action(secondary.action(), env, session, host, programs, time);
+                        }
+                        self.action(actions.primary, env, session, host, programs, time);
                     }
                 }
             }

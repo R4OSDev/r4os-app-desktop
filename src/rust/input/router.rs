@@ -26,6 +26,53 @@ struct ItemDrag {
     start: Point,
     active: bool,
 }
+// A snapshot can carry wheel, right release and one primary shell action.
+// Keep extra effects compact; the general Action can contain a large Launch.
+#[derive(Clone, Copy)]
+pub enum PointerEffect {
+    VolumeStep(i32),
+    Tray {
+        identity: Identity,
+        kind: u16,
+        wheel: i32,
+        x: i32,
+        y: i32,
+    },
+}
+impl PointerEffect {
+    pub fn action(self) -> Action {
+        match self {
+            Self::VolumeStep(step) => Action::VolumeStep(step),
+            Self::Tray {
+                identity,
+                kind,
+                wheel,
+                x,
+                y,
+            } => Action::Tray {
+                identity,
+                kind,
+                wheel,
+                x,
+                y,
+            },
+        }
+    }
+}
+pub struct PointerActions {
+    pub wheel: Option<PointerEffect>,
+    pub secondary: Option<PointerEffect>,
+    pub primary: Action,
+}
+impl PointerActions {
+    fn none() -> Self {
+        Self {
+            wheel: None,
+            secondary: None,
+            primary: Action::None,
+        }
+    }
+}
 #[derive(Default)]
 pub struct Router {
     item: Option<ItemDrag>,
@@ -114,7 +161,7 @@ impl Router {
         height: i32,
         tick: u64,
         hz: u32,
-    ) -> Action {
+    ) -> PointerActions {
         let previous = if remote {
             input.remote_buttons
         } else {
@@ -131,7 +178,7 @@ impl Router {
             if mouse.wheel != 0 {
                 hosted.scroll_console(0, mouse.wheel.saturating_mul(3), dirty);
             }
-            return Action::None;
+            return PointerActions::none();
         }
         let point = Point {
             x: mouse.x,
@@ -164,272 +211,288 @@ impl Router {
             input.hover = target;
             input.tray_hover = identity;
         }
-        if mouse.wheel != 0 {
-            if target == Target::TaskbarVolume || shell.audio.ui.popup_open {
-                return Action::VolumeStep(if mouse.wheel > 0 { 1 } else { -1 });
-            }
-            if shell.dialog == Dialog::Tasks {
-                shell_damage(shell, dirty, width, height);
-                controller::task_scroll(
-                    shell,
-                    if mouse.wheel > 0 { -3 } else { 3 },
-                    hosted.model.inventory.visible().len(),
-                );
-                return Action::None;
-            }
-            if identity.valid() {
-                return Action::Tray {
-                    identity,
-                    kind: a::tray_event_kind_wheel,
-                    wheel: mouse.wheel,
-                    x: mouse.x,
-                    y: mouse.y,
-                };
-            }
-            let i = Controller::index_for_target(target);
-            if let Some(i) = i {
+        let wheel = if mouse.wheel == 0 {
+            None
+        } else if target == Target::TaskbarVolume || shell.audio.ui.popup_open {
+            Some(PointerEffect::VolumeStep(if mouse.wheel > 0 {
+                1
+            } else {
+                -1
+            }))
+        } else if shell.dialog == Dialog::Tasks {
+            shell_damage(shell, dirty, width, height);
+            controller::task_scroll(
+                shell,
+                if mouse.wheel > 0 { -3 } else { 3 },
+                hosted.model.inventory.visible().len(),
+            );
+            None
+        } else if identity.valid() {
+            Some(PointerEffect::Tray {
+                identity,
+                kind: a::tray_event_kind_wheel,
+                wheel: mouse.wheel,
+                x: mouse.x,
+                y: mouse.y,
+            })
+        } else {
+            if let Some(i) = Controller::index_for_target(target) {
                 hosted.scroll_console(i, mouse.wheel.saturating_mul(3), dirty);
             }
-            return Action::None;
-        }
-        if mouse.buttons & 2 != 0 && previous & 2 == 0 {
-            if identity.valid() {
-                input.right_tray = identity;
-            } else {
-                shell_damage(shell, dirty, width, height);
-                let was_time = shell.time_menu;
-                shell.close_top();
-                if !was_time && target == Target::TaskbarClock {
-                    shell.time_menu = true;
-                } else if let Some(index) = Controller::index_for_target(target) {
-                    hosted.focus(index, session, app, tick, dirty);
-                    shell.system_menu = Some(SystemMenu {
-                        x: mouse.x.clamp(0, (width - 150).max(0)),
-                        y: mouse.y.clamp(0, (height - 108).max(0)),
-                        index,
+            None
+        };
+        let mut secondary = None;
+        let primary = (|| {
+            if mouse.buttons & 2 != 0 && previous & 2 == 0 {
+                if identity.valid() {
+                    input.right_tray = identity;
+                } else {
+                    shell_damage(shell, dirty, width, height);
+                    let was_time = shell.time_menu;
+                    shell.close_top();
+                    if !was_time && target == Target::TaskbarClock {
+                        shell.time_menu = true;
+                    } else if let Some(index) = Controller::index_for_target(target) {
+                        hosted.focus(index, session, app, tick, dirty);
+                        shell.system_menu = Some(SystemMenu {
+                            x: mouse.x.clamp(0, (width - 150).max(0)),
+                            y: mouse.y.clamp(0, (height - 108).max(0)),
+                            index,
+                        });
+                    }
+                    shell_damage(shell, dirty, width, height);
+                }
+            }
+            if mouse.buttons & 2 == 0 && previous & 2 != 0 {
+                let old = core::mem::take(&mut input.right_tray);
+                if old.valid() && old.same(identity) {
+                    secondary = Some(PointerEffect::Tray {
+                        identity,
+                        kind: a::tray_event_kind_context,
+                        wheel: 0,
+                        x: mouse.x,
+                        y: mouse.y,
                     });
                 }
-                shell_damage(shell, dirty, width, height);
             }
-        }
-        if mouse.buttons & 2 == 0 && previous & 2 != 0 {
-            let old = input.right_tray;
-            input.right_tray = Identity::default();
-            if old.valid() && old.same(identity) {
-                return Action::Tray {
-                    identity,
-                    kind: a::tray_event_kind_context,
-                    wheel: 0,
-                    x: mouse.x,
-                    y: mouse.y,
-                };
-            }
-        }
-        if mouse.buttons & 1 != 0 {
-            if previous & 1 == 0 {
-                input.double_click = input.down_target == target
-                    && tick.saturating_sub(input.down_tick) <= u64::from(hz).div_ceil(4);
-                input.down_target = target;
-                input.down_tick = tick;
-                input.pressed = target;
-                input.tray_pressed = identity;
-                target_damage(target, hosted, shell, dirty, width, height);
-                if target == Target::VolumePopupSlider {
-                    shell.audio.dragging = true;
+            if mouse.buttons & 1 != 0 {
+                if previous & 1 == 0 {
+                    input.double_click = input.down_target == target
+                        && tick.saturating_sub(input.down_tick) <= u64::from(hz).div_ceil(4);
+                    input.down_target = target;
+                    input.down_tick = tick;
+                    input.pressed = target;
+                    input.tray_pressed = identity;
+                    target_damage(target, hosted, shell, dirty, width, height);
+                    if target == Target::VolumePopupSlider {
+                        shell.audio.dragging = true;
+                        return Action::VolumePointer {
+                            x: mouse.x,
+                            commit: false,
+                        };
+                    }
+                    if let Some(index) = Controller::index_for_target(target) {
+                        if target == Controller::window_target(index) {
+                            let change = hosted.model.windows.pointer_down(index, mouse.x, mouse.y);
+                            if let Some(i) = change.client_pointer_down {
+                                hosted.gui_mouse(
+                                    app,
+                                    session,
+                                    i,
+                                    a::GuiEventKind::mouse_down,
+                                    mouse.x,
+                                    mouse.y,
+                                    mouse.buttons,
+                                    tick,
+                                );
+                            }
+                            hosted.changes(&change, session, app, tick, dirty);
+                        }
+                    } else if (150..=181).contains(&(target as u16)) && !shell.blocked() {
+                        let i = target as usize - 150;
+                        if let Some(item) = shell.folder.items.entries().get(i) {
+                            self.item = Some(ItemDrag {
+                                index: i,
+                                mouse: point,
+                                start: Point {
+                                    x: item.x,
+                                    y: item.y,
+                                },
+                                active: false,
+                            });
+                            if let Some(old) =
+                                shell.folder.items.entries().get(shell.folder.selected)
+                            {
+                                dirty.invalidate(item_rect(old));
+                            }
+                            shell.folder.selected = i;
+                        }
+                    }
+                } else if shell.audio.dragging {
                     return Action::VolumePointer {
                         x: mouse.x,
                         commit: false,
                     };
-                }
-                if let Some(index) = Controller::index_for_target(target) {
-                    if target == Controller::window_target(index) {
-                        let change = hosted.model.windows.pointer_down(index, mouse.x, mouse.y);
-                        if let Some(i) = change.client_pointer_down {
-                            hosted.gui_mouse(
-                                app,
-                                session,
-                                i,
-                                a::GuiEventKind::mouse_down,
-                                mouse.x,
-                                mouse.y,
-                                mouse.buttons,
-                                tick,
-                            );
+                } else if let Some(mut drag) = self.item {
+                    let dx = mouse.x.saturating_sub(drag.mouse.x);
+                    let dy = mouse.y.saturating_sub(drag.mouse.y);
+                    drag.active |= dx.unsigned_abs() >= 4 || dy.unsigned_abs() >= 4;
+                    if drag.active {
+                        if let Some(item) = shell.folder.items.get_mut(drag.index) {
+                            dirty.invalidate(item_rect(item));
+                            item.x = drag
+                                .start
+                                .x
+                                .saturating_add(dx)
+                                .clamp(0, (width - desktop_items::ICON_W).max(0));
+                            item.y = drag
+                                .start
+                                .y
+                                .saturating_add(dy)
+                                .clamp(0, (height - s::TASKBAR_H - desktop_items::ICON_H).max(0));
+                            dirty.invalidate(item_rect(item));
+                            shell.item_drag = Some(drag.index);
                         }
-                        hosted.changes(&change, session, app, tick, dirty);
                     }
-                } else if (150..=181).contains(&(target as u16)) && !shell.blocked() {
-                    let i = target as usize - 150;
-                    if let Some(item) = shell.folder.items.entries().get(i) {
-                        self.item = Some(ItemDrag {
-                            index: i,
-                            mouse: point,
-                            start: Point {
-                                x: item.x,
-                                y: item.y,
-                            },
-                            active: false,
+                    self.item = Some(drag);
+                } else if let Some(i) = hosted.model.windows.pointer_window() {
+                    let (_, area) = layout::output(
+                        outputs,
+                        hosted.model.windows.windows()[i].geometry(),
+                        width,
+                        height,
+                    );
+                    let change = hosted
+                        .model
+                        .windows
+                        .pointer_motion(mouse.x, mouse.y, area, |r| {
+                            Some(output_geometry::rebase_window(
+                                &outputs.layout,
+                                r,
+                                Point::default(),
+                                area,
+                                s::TITLE_H as u32,
+                            ))
                         });
-                        if let Some(old) = shell.folder.items.entries().get(shell.folder.selected) {
-                            dirty.invalidate(item_rect(old));
+                    hosted.changes(&change, session, app, tick, dirty);
+                }
+            } else if previous & 1 != 0 {
+                let pressed = core::mem::replace(&mut input.pressed, Target::None);
+                let tray = core::mem::take(&mut input.tray_pressed);
+                target_damage(pressed, hosted, shell, dirty, width, height);
+                if shell.audio.dragging {
+                    shell.audio.dragging = false;
+                    return Action::VolumePointer {
+                        x: mouse.x,
+                        commit: true,
+                    };
+                }
+                if let Some(drag) = self.item.take() {
+                    if drag.active {
+                        // Apply the final release coordinate even without motion.
+                        if let Some(item) = shell.folder.items.get_mut(drag.index) {
+                            dirty.invalidate(item_rect(item));
+                            item.x = drag
+                                .start
+                                .x
+                                .saturating_add(mouse.x.saturating_sub(drag.mouse.x));
+                            item.y = drag
+                                .start
+                                .y
+                                .saturating_add(mouse.y.saturating_sub(drag.mouse.y));
                         }
-                        shell.folder.selected = i;
+                        shell
+                            .folder
+                            .items
+                            .snap(drag.index, width, height, s::TASKBAR_H);
+                        shell.item_drag = None;
+                        if let Some(item) = shell.folder.items.entries().get(drag.index) {
+                            dirty.invalidate(item_rect(item));
+                        }
+                        return Action::LayoutChanged;
                     }
                 }
-            } else if shell.audio.dragging {
-                return Action::VolumePointer {
-                    x: mouse.x,
-                    commit: false,
-                };
-            } else if let Some(mut drag) = self.item {
-                let dx = mouse.x.saturating_sub(drag.mouse.x);
-                let dy = mouse.y.saturating_sub(drag.mouse.y);
-                drag.active |= dx.unsigned_abs() >= 4 || dy.unsigned_abs() >= 4;
-                if drag.active {
-                    if let Some(item) = shell.folder.items.get_mut(drag.index) {
-                        dirty.invalidate(item_rect(item));
-                        item.x = drag
-                            .start
-                            .x
-                            .saturating_add(dx)
-                            .clamp(0, (width - desktop_items::ICON_W).max(0));
-                        item.y = drag
-                            .start
-                            .y
-                            .saturating_add(dy)
-                            .clamp(0, (height - s::TASKBAR_H - desktop_items::ICON_H).max(0));
-                        dirty.invalidate(item_rect(item));
-                        shell.item_drag = Some(drag.index);
-                    }
-                }
-                self.item = Some(drag);
-            } else if let Some(i) = hosted.model.windows.pointer_window() {
-                let (_, area) = layout::output(
-                    outputs,
-                    hosted.model.windows.windows()[i].geometry(),
-                    width,
-                    height,
-                );
-                let change = hosted
-                    .model
-                    .windows
-                    .pointer_motion(mouse.x, mouse.y, area, |r| {
-                        Some(output_geometry::rebase_window(
-                            &outputs.layout,
-                            r,
-                            Point::default(),
-                            area,
-                            s::TITLE_H as u32,
-                        ))
-                    });
-                hosted.changes(&change, session, app, tick, dirty);
-            }
-        } else if previous & 1 != 0 {
-            let pressed = core::mem::replace(&mut input.pressed, Target::None);
-            let tray = core::mem::take(&mut input.tray_pressed);
-            target_damage(pressed, hosted, shell, dirty, width, height);
-            if shell.audio.dragging {
-                shell.audio.dragging = false;
-                return Action::VolumePointer {
-                    x: mouse.x,
-                    commit: true,
-                };
-            }
-            if let Some(drag) = self.item.take() {
-                if drag.active {
-                    // Apply the final release coordinate even without motion.
-                    if let Some(item) = shell.folder.items.get_mut(drag.index) {
-                        dirty.invalidate(item_rect(item));
-                        item.x = drag
-                            .start
-                            .x
-                            .saturating_add(mouse.x.saturating_sub(drag.mouse.x));
-                        item.y = drag
-                            .start
-                            .y
-                            .saturating_add(mouse.y.saturating_sub(drag.mouse.y));
-                    }
-                    shell
-                        .folder
-                        .items
-                        .snap(drag.index, width, height, s::TASKBAR_H);
-                    shell.item_drag = None;
-                    if let Some(item) = shell.folder.items.entries().get(drag.index) {
-                        dirty.invalidate(item_rect(item));
-                    }
-                    return Action::LayoutChanged;
-                }
-            }
-            if let Some(i) = hosted.model.windows.pointer_window() {
-                let (_, area) = layout::output(
-                    outputs,
-                    hosted.model.windows.windows()[i].geometry(),
-                    width,
-                    height,
-                );
-                let change = hosted
-                    .model
-                    .windows
-                    .pointer_release(mouse.x, mouse.y, area, |r| {
-                        Some(output_geometry::rebase_window(
-                            &outputs.layout,
-                            r,
-                            Point::default(),
-                            area,
-                            s::TITLE_H as u32,
-                        ))
-                    });
-                hosted.changes(&change, session, app, tick, dirty);
-                return Action::None;
-            }
-            if tray.valid() && tray.same(identity) {
-                return Action::Tray {
-                    identity,
-                    kind: if input.double_click {
-                        a::tray_event_kind_double
-                    } else {
-                        a::tray_event_kind_primary
-                    },
-                    wheel: 0,
-                    x: mouse.x,
-                    y: mouse.y,
-                };
-            }
-            if let Some(i) = Controller::index_for_target(pressed) {
-                hosted.gui_mouse(
-                    app,
-                    session,
-                    i,
-                    a::GuiEventKind::mouse_up,
-                    mouse.x,
-                    mouse.y,
-                    mouse.buttons,
-                    tick,
-                );
-            }
-            if pressed == target {
-                if (150..=181).contains(&(target as u16)) && !input.double_click {
+                if let Some(i) = hosted.model.windows.pointer_window() {
+                    let (_, area) = layout::output(
+                        outputs,
+                        hosted.model.windows.windows()[i].geometry(),
+                        width,
+                        height,
+                    );
+                    let change =
+                        hosted
+                            .model
+                            .windows
+                            .pointer_release(mouse.x, mouse.y, area, |r| {
+                                Some(output_geometry::rebase_window(
+                                    &outputs.layout,
+                                    r,
+                                    Point::default(),
+                                    area,
+                                    s::TITLE_H as u32,
+                                ))
+                            });
+                    hosted.changes(&change, session, app, tick, dirty);
                     return Action::None;
                 }
-                shell_damage(shell, dirty, width, height);
-                let action = controller::activate(shell, target);
-                shell_damage(shell, dirty, width, height);
-                return action;
+                if tray.valid() && tray.same(identity) {
+                    return Action::Tray {
+                        identity,
+                        kind: if input.double_click {
+                            a::tray_event_kind_double
+                        } else {
+                            a::tray_event_kind_primary
+                        },
+                        wheel: 0,
+                        x: mouse.x,
+                        y: mouse.y,
+                    };
+                }
+                if let Some(i) = Controller::index_for_target(pressed) {
+                    hosted.gui_mouse(
+                        app,
+                        session,
+                        i,
+                        a::GuiEventKind::mouse_up,
+                        mouse.x,
+                        mouse.y,
+                        mouse.buttons,
+                        tick,
+                    );
+                }
+                if pressed == target {
+                    if (150..=181).contains(&(target as u16)) && !input.double_click {
+                        return Action::None;
+                    }
+                    shell_damage(shell, dirty, width, height);
+                    let action = controller::activate(shell, target);
+                    shell_damage(shell, dirty, width, height);
+                    return action;
+                }
+            } else if !shell.blocked() {
+                if let Some(i) = hosted.active_gui() {
+                    hosted.gui_mouse(
+                        app,
+                        session,
+                        i,
+                        a::GuiEventKind::mouse_move,
+                        mouse.x,
+                        mouse.y,
+                        mouse.buttons,
+                        tick,
+                    );
+                }
             }
-        } else if !shell.blocked() {
-            if let Some(i) = hosted.active_gui() {
-                hosted.gui_mouse(
-                    app,
-                    session,
-                    i,
-                    a::GuiEventKind::mouse_move,
-                    mouse.x,
-                    mouse.y,
-                    mouse.buttons,
-                    tick,
-                );
-            }
+            Action::None
+        })();
+        PointerActions {
+            wheel,
+            secondary,
+            primary,
         }
-        Action::None
     }
 }
+
+#[cfg(test)]
+#[path = "../../../Tests/RustNative/pointer_router.rs"]
+mod tests;
