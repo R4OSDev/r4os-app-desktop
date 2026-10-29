@@ -5,6 +5,7 @@ pub mod console_snapshot;
 pub mod frame_reader;
 pub mod frame_snapshot;
 pub mod gui;
+pub mod gui_pending;
 pub mod input;
 pub mod launch;
 pub mod launch_request;

@@ -164,7 +164,7 @@ impl<'input> State<'input> {
         &mut self,
         change: &Changes,
         session: &mut Session<'_, '_>,
-        app: &App<'_>,
+        _app: &App<'_>,
         tick: u64,
         dirty: &mut Dirty,
     ) {
@@ -188,7 +188,14 @@ impl<'input> State<'input> {
         if change.full_damage {
             dirty.invalidate(self.bounds);
         }
-        model::announce(&self.model.windows, change, session, app, tick);
+        model::announce(
+            &self.model.windows,
+            &self.model.clients,
+            &mut self.model.gui_pending,
+            change,
+            session,
+            tick,
+        );
         self.focus_dirty |= change.focus_mirror.is_some();
         for i in 0..4 {
             if change.geometry & (1 << i) != 0 {
@@ -779,6 +786,15 @@ impl<'input> State<'input> {
             return;
         }
         let handle = client.handle();
+        if self.model.windows.windows()[index].kind() == Kind::App {
+            self.model.gui_pending[index].cancel_for(
+                &mut super::gui_pending::Native(session),
+                handle,
+                index as i32,
+                a::gui_input_reset_reason_window_closed,
+                tick,
+            );
+        }
         Host::new(session).cancel_pointer_for_close(handle, index, tick);
         let _ = programs.request_close(handle);
         self.model
@@ -793,7 +809,12 @@ impl<'input> State<'input> {
             ..Default::default()
         };
         if self.model.windows.windows()[index].kind() == Kind::App {
-            Host::new(session).push(handle.instance_id, &event, true, || app.sleep(1));
+            self.model.gui_pending[index].send(
+                &mut super::gui_pending::Native(session),
+                handle,
+                index as i32,
+                event,
+            );
         }
         dirty.invalidate(self.model.windows.windows()[index].frame_surface().rect);
     }

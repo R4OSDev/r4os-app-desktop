@@ -1,6 +1,9 @@
 //! Delivery to the currently focused exact client. Console producer queues
 //! retain rejected suffixes; GUI metadata and events use short session loans.
-use super::{gui::Host, runtime::State};
+use super::{
+    gui_pending::{Native, Receipt},
+    runtime::State,
+};
 use crate::{
     input::{keys, physical},
     render::geometry::Dirty,
@@ -136,9 +139,28 @@ impl State<'_> {
             .flush(|handle, events| crate::input::native::push_console(app, handle, events));
         accepted
     }
+    fn queue_gui(
+        &mut self,
+        session: &mut Session<'_, '_>,
+        i: usize,
+        event: &a::GuiEvent,
+    ) -> Receipt {
+        let owner = self.model.clients.slots()[i].handle();
+        if owner.instance_id != self.model.windows.windows()[i].instance_id() {
+            return Receipt::Cancelled;
+        }
+        self.model.gui_pending[i].send(&mut Native(session), owner, i as i32, *event)
+    }
+    pub fn flush_gui(&mut self, session: &mut Session<'_, '_>) -> bool {
+        let mut changed = false;
+        for pending in &mut self.model.gui_pending {
+            changed |= pending.flush(&mut Native(session));
+        }
+        changed
+    }
     pub fn gui_key(
         &mut self,
-        app: &App<'_>,
+        _app: &App<'_>,
         session: &mut Session<'_, '_>,
         value: u32,
         tick: u64,
@@ -149,8 +171,9 @@ impl State<'_> {
         if !keys::is_app_key(value) {
             return false;
         }
-        Host::new(session).push(
-            self.model.windows.windows()[i].instance_id(),
+        self.queue_gui(
+            session,
+            i,
             &a::GuiEvent {
                 kind: a::GuiEventKind::key_down.0,
                 window_id: i as i32,
@@ -158,13 +181,12 @@ impl State<'_> {
                 tick,
                 ..a::GuiEvent::default()
             },
-            true,
-            || app.sleep(0),
-        )
+        );
+        true
     }
     pub fn gui_physical(
         &mut self,
-        app: &App<'_>,
+        _app: &App<'_>,
         session: &mut Session<'_, '_>,
         input: a::PhysicalKeyEvent,
     ) -> bool {
@@ -174,16 +196,12 @@ impl State<'_> {
         let Some(event) = physical::to_gui_event(input, i as i32) else {
             return false;
         };
-        Host::new(session).push(
-            self.model.windows.windows()[i].instance_id(),
-            &event,
-            true,
-            || app.sleep(0),
-        )
+        self.queue_gui(session, i, &event);
+        true
     }
     pub fn gui_mouse(
         &mut self,
-        app: &App<'_>,
+        _app: &App<'_>,
         session: &mut Session<'_, '_>,
         i: usize,
         kind: a::GuiEventKind,
@@ -204,8 +222,9 @@ impl State<'_> {
         {
             return false;
         }
-        Host::new(session).push(
-            win.instance_id(),
+        self.queue_gui(
+            session,
+            i,
             &a::GuiEvent {
                 kind: kind.0,
                 window_id: i as i32,
@@ -215,8 +234,7 @@ impl State<'_> {
                 tick,
                 ..a::GuiEvent::default()
             },
-            kind != a::GuiEventKind::mouse_move,
-            || app.sleep(0),
-        )
+        );
+        true
     }
 }

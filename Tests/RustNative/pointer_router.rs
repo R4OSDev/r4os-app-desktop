@@ -3,9 +3,34 @@
 use super::*;
 use std::sync::Mutex;
 static GUI_EVENTS: Mutex<Vec<a::GuiEvent>> = Mutex::new(Vec::new());
+static GUI_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 unsafe extern "C" fn gui_push(instance: u32, event: *const a::GuiEvent) -> i32 {
     assert_eq!(instance, 12);
     GUI_EVENTS.lock().unwrap().push(unsafe { *event });
+    0
+}
+unsafe extern "C" fn gui_host_input(
+    request: *const a::GuiHostInputRequest,
+    out: *mut a::GuiPointerWindowIdentity,
+) -> i32 {
+    let request = unsafe { *request };
+    if request.window.owner.instance_id != 12 || request.window.owner.generation != 55 {
+        return a::gui_host_input_error_stale;
+    }
+    let identity = a::GuiPointerWindowIdentity {
+        epoch: 91,
+        ..request.window
+    };
+    if request.operation != a::gui_host_input_operation_query && request.window.epoch != 91 {
+        return a::gui_host_input_error_stale;
+    }
+    if request.operation == a::gui_host_input_operation_post {
+        if GUI_BLOCKED.load(std::sync::atomic::Ordering::Relaxed) {
+            return a::gui_host_input_error_busy;
+        }
+        unsafe { gui_push(12, &request.event) };
+    }
+    unsafe { *out = identity };
     0
 }
 use r4os_sdk::{
@@ -19,6 +44,7 @@ fn with_router(
         let sys = a::R4XStartR4Sys::default();
         let mut desk = a::R4XStartR4Desk::default();
         desk.gui_push_event = gui_push as *const () as _;
+        desk.gui_host_input = gui_host_input as *const () as _;
         let draw = a::R4XStartR4Draw::default();
         let headers = [
             (
@@ -457,6 +483,17 @@ fn one_wheel_packet_preserves_both_tray_button_releases_exactly_once() {
 #[test]
 fn wheel_down_and_up_reach_the_original_native_gui_delivery() {
     with_router(|app, session, shell, hosted, outputs| {
+        let owner = a::ProgramProcessHandle {
+            instance_id: 12,
+            generation: 55,
+            reserved: 0,
+        };
+        assert!(hosted.model.clients.slot_mut(2).unwrap().bind(
+            owner,
+            crate::hosted::client::Origin::Diagnostic,
+            &[],
+            &mut crate::hosted::frame_reader::SessionReader::new(session)
+        ));
         for remote in [false, true] {
             GUI_EVENTS.lock().unwrap().clear();
             let mut router = Router::default();
@@ -526,5 +563,55 @@ fn wheel_down_and_up_reach_the_original_native_gui_delivery() {
                 (a::GuiEventKind::mouse_up.0, 12, 13, 0)
             );
         }
+    });
+}
+
+#[test]
+fn an_owned_logical_key_stays_gui_owned_when_the_actual_native_admission_is_busy() {
+    with_router(|app, session, _, hosted, _| {
+        let owner = a::ProgramProcessHandle {
+            instance_id: 12,
+            generation: 55,
+            reserved: 0,
+        };
+        assert!(hosted.model.clients.slot_mut(2).unwrap().bind(
+            owner,
+            crate::hosted::client::Origin::Diagnostic,
+            &[],
+            &mut crate::hosted::frame_reader::SessionReader::new(session)
+        ));
+        hosted
+            .model
+            .windows
+            .window_mut(2)
+            .unwrap()
+            .bind_app(12, c"GUI");
+        hosted.model.windows.focus_or_restore(2);
+        GUI_EVENTS.lock().unwrap().clear();
+        GUI_BLOCKED.store(true, std::sync::atomic::Ordering::Relaxed);
+        let handled = hosted.gui_key(
+            app,
+            session,
+            r4os_sdk::gui::raw::R4SdkGuiKey_escape as u32,
+            100,
+        );
+        GUI_BLOCKED.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            handled,
+            "busy admission is still GUI ownership; no shell fallback"
+        );
+        assert!(GUI_EVENTS.lock().unwrap().is_empty());
+        assert!(hosted.model.gui_pending[2].busy());
+        assert!(hosted.flush_gui(session));
+        let received = GUI_EVENTS.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(
+            (received[0].kind, received[0].key, received[0].tick),
+            (
+                a::GuiEventKind::key_down.0,
+                r4os_sdk::gui::raw::R4SdkGuiKey_escape as u32,
+                100
+            )
+        );
     });
 }

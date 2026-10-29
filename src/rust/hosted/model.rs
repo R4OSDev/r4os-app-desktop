@@ -51,6 +51,7 @@ impl Default for Report {
 pub struct Model {
     pub windows: Controller,
     pub clients: Clients,
+    pub gui_pending: [super::gui_pending::Pending; SLOT_COUNT],
     pub inventory: Inventory,
     // Main-task launch generations; no provider receives this reservation map.
     launches: [u64; SLOT_COUNT],
@@ -96,7 +97,7 @@ impl Model {
         handle: a::ProgramProcessHandle,
         index: usize,
         session: &mut Session<'_, '_>,
-        app: &App<'_>,
+        _app: &App<'_>,
         now: u64,
         work: Rect,
         dirty: &mut Dirty,
@@ -128,9 +129,23 @@ impl Model {
         if let Ok(revision) = Host::new(session).revision(handle.instance_id) {
             win.set_gui_revision(revision)
         }
-        resize(handle.instance_id, index, win, session, app, now);
+        resize(
+            handle,
+            index,
+            win,
+            session,
+            now,
+            &mut self.gui_pending[index],
+        );
         let change = self.windows.focus_or_restore(index);
-        announce(&self.windows, &change, session, app, now);
+        announce(
+            &self.windows,
+            &self.clients,
+            &mut self.gui_pending,
+            &change,
+            session,
+            now,
+        );
         dirty.invalidate(self.windows.windows()[index].frame_surface().rect);
         true
     }
@@ -140,7 +155,7 @@ impl Model {
     /// Diagnostic children remain explicitly owned by their controller.
     pub unsafe fn synchronize(
         &mut self,
-        app: &App<'_>,
+        _app: &App<'_>,
         resources: &Resources<'_>,
         programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
@@ -197,6 +212,7 @@ impl Model {
                     if !retired {
                         continue;
                     }
+                    self.gui_pending[index].forget();
                     report.retired[index] = Some(Completion { handle, exit_code });
                     if report_error {
                         report.report_error |= 1 << index;
@@ -204,7 +220,14 @@ impl Model {
                     window.bind_instance(0);
                     dirty.invalidate(before);
                     if let Some(change) = self.windows.close_unbound(index) {
-                        announce(&self.windows, &change, session, app, now);
+                        announce(
+                            &self.windows,
+                            &self.clients,
+                            &mut self.gui_pending,
+                            &change,
+                            session,
+                            now,
+                        );
                         report.focus_mirror = change.focus_mirror;
                     }
                     report.changed = true;
@@ -288,15 +311,22 @@ impl Model {
                     .set_gui_revision(revision);
             }
             resize(
-                self.windows.windows()[index].instance_id(),
+                handle,
                 index,
                 &self.windows.windows()[index],
                 session,
-                app,
                 now,
+                &mut self.gui_pending[index],
             );
             let change = self.windows.focus_or_restore(index);
-            announce(&self.windows, &change, session, app, now);
+            announce(
+                &self.windows,
+                &self.clients,
+                &mut self.gui_pending,
+                &change,
+                session,
+                now,
+            );
             report.focus_mirror = Some(index);
             report.adopted |= 1 << index;
             report.changed = true;
@@ -319,7 +349,7 @@ impl Model {
     }
     pub fn refresh_frames(
         &mut self,
-        app: &App<'_>,
+        _app: &App<'_>,
         session: &mut Session<'_, '_>,
         work_areas: &[Rect; SLOT_COUNT],
         dirty: &mut Dirty,
@@ -350,7 +380,14 @@ impl Model {
                         report.metadata |= 1 << index;
                     }
                     if change.geometry {
-                        resize(window.instance_id(), index, window, session, app, now);
+                        resize(
+                            client.handle(),
+                            index,
+                            window,
+                            session,
+                            now,
+                            &mut self.gui_pending[index],
+                        );
                     }
                     report.changed = true;
                 }
@@ -420,12 +457,12 @@ fn metadata(
     }
 }
 fn resize(
-    instance: u32,
+    owner: a::ProgramProcessHandle,
     index: usize,
     window: &crate::windows::window::Window,
     session: &mut Session<'_, '_>,
-    app: &App<'_>,
     now: u64,
+    pending: &mut super::gui_pending::Pending,
 ) {
     let client = window.client_surface().rect;
     let event = a::GuiEvent {
@@ -436,13 +473,19 @@ fn resize(
         tick: now,
         ..a::GuiEvent::default()
     };
-    Host::new(session).push(instance, &event, true, || app.sleep(1));
+    pending.send(
+        &mut super::gui_pending::Native(session),
+        owner,
+        index as i32,
+        event,
+    );
 }
 pub fn announce(
     windows: &Controller,
+    clients: &Clients,
+    pending: &mut [super::gui_pending::Pending; SLOT_COUNT],
     change: &Changes,
     session: &mut Session<'_, '_>,
-    app: &App<'_>,
     now: u64,
 ) {
     for (index, window) in windows.windows().iter().enumerate() {
@@ -453,8 +496,24 @@ pub fn announce(
         if (change.geometry | change.minimized | change.maximized | change.restored) & mask != 0 {
             let _ = Host::new(session).publish_info(window.instance_id(), &window.gui_info(index));
         }
+        if change.minimized & mask != 0 {
+            pending[index].cancel_for(
+                &mut super::gui_pending::Native(session),
+                clients.slots()[index].handle(),
+                index as i32,
+                a::gui_input_reset_reason_focus_lost,
+                now,
+            );
+        }
         if change.resized & mask != 0 {
-            resize(window.instance_id(), index, window, session, app, now);
+            resize(
+                clients.slots()[index].handle(),
+                index,
+                window,
+                session,
+                now,
+                &mut pending[index],
+            );
         }
     }
     for (index, kind) in [
@@ -476,7 +535,22 @@ pub fn announce(
             tick: now,
             ..a::GuiEvent::default()
         };
-        Host::new(session).push(window.instance_id(), &event, true, || app.sleep(1));
+        let owner = clients.slots()[index].handle();
+        if kind == a::GuiEventKind::focus_lost {
+            pending[index].cancel_for(
+                &mut super::gui_pending::Native(session),
+                owner,
+                index as i32,
+                a::gui_input_reset_reason_focus_lost,
+                now,
+            );
+        }
+        pending[index].send(
+            &mut super::gui_pending::Native(session),
+            owner,
+            index as i32,
+            event,
+        );
     }
 }
 

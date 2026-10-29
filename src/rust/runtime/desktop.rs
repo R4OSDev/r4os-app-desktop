@@ -1891,6 +1891,13 @@ impl bootstrap::Body for Coordinator {
         standard: &Standard<'_>,
         colors: &ColorV1Client<'_>,
     ) -> i32 {
+        if !app.desktop_api().is_some_and(|table| {
+            table.size as usize >= core::mem::size_of::<a::R4XStartR4Desk>()
+                && table.gui_host_input != 0
+        }) {
+            app.write("Desktop: exact GUI host input API unavailable\n");
+            return 2;
+        }
         let env = match Environment::new(app, graphics, resources, standard, colors) {
             Ok(v) => v,
             Err(_) => {
@@ -2048,6 +2055,7 @@ impl bootstrap::Body for Coordinator {
                 }
             }
             let active = desktop.poll_input(&env, session, host, &programs, time);
+            let gui_progress = desktop.hosted.flush_gui(session);
             let full = desktop
                 .hosted
                 .model
@@ -2074,7 +2082,7 @@ impl bootstrap::Body for Coordinator {
                 env.boot_ready();
                 announced = true;
             }
-            desktop.wait(&env, session, time, active || rendered);
+            desktop.wait(&env, session, time, active || rendered || gui_progress);
         }
         while test_owner.active() {
             test_owner.stop(&programs);

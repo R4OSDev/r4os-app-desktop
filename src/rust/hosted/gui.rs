@@ -163,31 +163,18 @@ impl<'loan, 'app, 'storage> Host<'loan, 'app, 'storage> {
         };
         (result >= 0 && (size.w > 0 || size.h > 0)).then_some(size)
     }
-    pub fn push(
+    pub fn input(
         &mut self,
-        instance: u32,
-        event: &a::GuiEvent,
-        ordering_sensitive: bool,
-        mut yield_task: impl FnMut(),
-    ) -> bool {
-        let attempts = if ordering_sensitive { 4 } else { 1 };
-        for attempt in 0..attempts {
-            let result = unsafe {
-                code(c::R4SdkGuiDesktopContext_guiPushEvent(
-                    0,
-                    self.session.native_desktop(),
-                    instance,
-                    event,
-                ))
-            };
-            if result == 0 {
-                return true;
-            }
-            if result != -3 || attempt + 1 == attempts {
-                return false;
-            }
-            yield_task();
+        request: &a::GuiHostInputRequest,
+        out: &mut a::GuiPointerWindowIdentity,
+    ) -> i32 {
+        unsafe {
+            code(c::R4SdkGuiDesktopContext_guiHostInput(
+                0,
+                self.session.native_desktop(),
+                request,
+                out,
+            ))
         }
-        false
     }
 }
