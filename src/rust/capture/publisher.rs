@@ -7,7 +7,7 @@ use crate::{
         cursor,
         geometry::{Dirty, MAX_DAMAGE_REGIONS, Rect},
         runtime::Frames,
-        scene::intersect,
+        scene::{CpuScene, intersect},
     },
 };
 use r4os_sdk::{App, abi as a};
@@ -226,9 +226,9 @@ impl Publisher {
         {
             return false;
         }
-        let code = frames
-            .capture_shadow(image.pixels, width, height, |canvas| {
-                if image.cursor.separate && image.cursor.visible {
+        let code = if image.cursor.separate && image.cursor.visible {
+            frames
+                .capture_shadow(image.pixels, width, height, |canvas| {
                     let overlay = cursor::Overlay::apply(canvas, image.cursor.x, image.cursor.y);
                     publish(
                         app,
@@ -238,18 +238,26 @@ impl Publisher {
                         &[image.damage],
                         image.cursor,
                     )
-                } else {
-                    publish(
-                        app,
-                        canvas.pixels(),
-                        width,
-                        height,
-                        &[image.damage],
-                        image.cursor,
-                    )
-                }
-            })
-            .unwrap_or(a::remote_frame_error_unavailable);
+                })
+                .unwrap_or(a::remote_frame_error_unavailable)
+        } else if CpuScene::required_bytes(width, height).map(|bytes| bytes / 4)
+            != Some(image.pixels.len())
+        {
+            a::remote_frame_error_unavailable
+        } else {
+            // Readback publication still invalidates a prior CPU scene. The
+            // immutable source loan lasts through the synchronous kernel copy;
+            // no mutable shadow or resize is needed without an actual overlay.
+            frames.current = false;
+            publish(
+                app,
+                image.pixels,
+                width,
+                height,
+                &[image.damage],
+                image.cursor,
+            )
+        };
         self.result(code);
         code >= 0
     }

@@ -758,6 +758,282 @@ fn original_dependency_pool_and_64_step_250us_admission_oracles() {
     });
 }
 
+/// Feed the actual completed GPU readback loan through Publisher and the SDK
+/// table. The sink copies synchronously, like the verified kernel owner; no
+/// source pointer survives the call. These checks run before Capture::acknowledge.
+fn publication_cases(image: &crate::capture::remote::Image<'_>) {
+    use crate::{
+        capture::{
+            publisher::Publisher,
+            remote::{Cursor, Image},
+        },
+        render::runtime::Frames,
+    };
+    use alloc::vec::Vec;
+    #[derive(Default)]
+    struct Published {
+        calls: u32,
+        pointer: usize,
+        pixels: Vec<u32>,
+        info: Option<a::RemoteFrameInfo>,
+        regions: Vec<a::DisplayDamageRect>,
+        result: i32,
+    }
+    static PUBLISHED: Mutex<Published> = Mutex::new(Published {
+        calls: 0,
+        pointer: 0,
+        pixels: Vec::new(),
+        info: None,
+        regions: Vec::new(),
+        result: 0,
+    });
+    unsafe extern "C" fn publish(
+        info: *const a::RemoteFrameInfo,
+        pixels: *const u32,
+        count: u32,
+        regions: *const a::DisplayDamageRect,
+        region_count: u32,
+    ) -> i32 {
+        let mut p = PUBLISHED.lock().unwrap();
+        p.calls += 1;
+        p.pointer = pixels as usize;
+        p.info = Some(unsafe { info.read() });
+        p.pixels = unsafe { core::slice::from_raw_parts(pixels, count as usize) }.to_vec();
+        p.regions = unsafe { core::slice::from_raw_parts(regions, region_count as usize) }.to_vec();
+        p.result
+    }
+    let desk = a::R4XStartR4Desk {
+        remote_frame_publish_regions: publish as *const () as usize,
+        ..Default::default()
+    };
+    let imports = [a::R4XStartImport {
+        group_id: 2,
+        min_version: 1,
+        resolved_version: 1,
+        flags: a::r4xstart_import_flag_group_interface,
+        module_name: c"R4DESK".as_ptr() as u64,
+        symbol_name: c"Query".as_ptr() as u64,
+        table: &desk as *const _ as u64,
+        ..Default::default()
+    }];
+    let specs = [ImportSpec {
+        module_name: b"R4DESK",
+        symbol_name: b"Query",
+        minimum: 1,
+        optional: false,
+        group_id: 2,
+        magic: desk.magic,
+        version: desk.abi_version,
+        size: desk.size,
+    }];
+    let raw = a::R4XStartContext {
+        app_class: a::R4XStartAppClass::gui.0,
+        instance_id: 88,
+        flags: a::r4xstart_flag_imports_valid,
+        imports: imports.as_ptr() as u64,
+        import_count: 1,
+        ..Default::default()
+    };
+    let app = unsafe {
+        App::from_raw(
+            &raw,
+            &StartupInfo {
+                app_class: a::R4XStartAppClass::gui,
+                required_groups: 4,
+                imports: &specs,
+            },
+            c"CAPTUREFIX",
+        )
+    }
+    .unwrap();
+    let view = |cursor| Image {
+        width: image.width,
+        height: image.height,
+        pixels: image.pixels,
+        damage: image.damage,
+        epoch: image.epoch,
+        frame: image.frame,
+        cursor,
+    };
+    let seed = || {
+        let mut frames = Frames::new().unwrap();
+        frames.capture_shadow(&[0x13579b; 4], 2, 2, |_| ()).unwrap();
+        frames.generation = 77;
+        frames.current = true;
+        frames
+    };
+    let original = image.pixels.to_vec();
+    assert_eq!((image.width, image.height), (8, 8));
+    for (separate, visible) in [(false, false), (false, true), (true, false)] {
+        *PUBLISHED.lock().unwrap() = Published::default();
+        let mut frames = seed();
+        let mut publisher = Publisher {
+            consumers: 1,
+            ..Default::default()
+        };
+        let cursor = Cursor {
+            separate,
+            visible,
+            ..image.cursor
+        };
+        assert!(publisher.image(&app, &mut frames, view(cursor), 8, 8));
+        let p = PUBLISHED.lock().unwrap();
+        assert_eq!(p.calls, 1);
+        assert_eq!(
+            p.pointer,
+            image.pixels.as_ptr() as usize,
+            "capture without a visible separate overlay must publish the completed loan directly"
+        );
+        assert_eq!(p.pixels, original);
+        assert_eq!(image.pixels, original);
+        assert!(
+            !frames.current,
+            "readback publication must still invalidate the CPU scene"
+        );
+        assert_eq!(frames.generation, 77);
+        frames.current = true;
+        let (saved, width, height, generation) = frames.pixels().unwrap();
+        assert_eq!((width, height, generation), (2, 2, 77));
+        assert_eq!(saved, [0x13579b; 4], "no resize or full-frame shadow copy");
+        let info = p.info.as_ref().unwrap();
+        assert_eq!((info.width, info.height), (8, 8));
+        assert_eq!(
+            (info.cursor_x, info.cursor_y),
+            (image.cursor.x, image.cursor.y)
+        );
+        assert_eq!(
+            info.cursor_flags,
+            if visible {
+                a::remote_frame_cursor_flag_visible
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            info.flags,
+            a::remote_frame_flag_ready
+                | a::remote_frame_flag_dirty_valid
+                | a::remote_frame_flag_cursor_valid
+        );
+        assert_eq!(p.regions.len(), 1);
+        let r = &p.regions[0];
+        assert_eq!(
+            (r.x, r.y, r.w, r.h),
+            (
+                image.damage.x,
+                image.damage.y,
+                image.damage.w as u32,
+                image.damage.h as u32
+            )
+        );
+    }
+    // Independent clipped 8x8 arrow oracle at (2,3), from the existing arrow
+    // contract. Never use Overlay/pixel/bit_set to manufacture expected pixels.
+    *PUBLISHED.lock().unwrap() = Published::default();
+    let mut frames = seed();
+    let mut publisher = Publisher {
+        consumers: 1,
+        ..Default::default()
+    };
+    assert!(publisher.image(&app, &mut frames, view(image.cursor), 8, 8));
+    let mut expected = original.clone();
+    for (x, y, color) in [
+        (2, 3, 0),
+        (2, 4, 0),
+        (3, 4, 0),
+        (2, 5, 0),
+        (3, 5, 0xffffff),
+        (4, 5, 0),
+        (2, 6, 0),
+        (3, 6, 0xffffff),
+        (4, 6, 0xffffff),
+        (5, 6, 0),
+        (2, 7, 0),
+        (3, 7, 0xffffff),
+        (4, 7, 0xffffff),
+        (5, 7, 0xffffff),
+        (6, 7, 0),
+    ] {
+        expected[y * 8 + x] = color;
+    }
+    {
+        let p = PUBLISHED.lock().unwrap();
+        assert_ne!(p.pointer, image.pixels.as_ptr() as usize);
+        assert_eq!(p.pixels, expected);
+    }
+    assert_eq!(
+        image.pixels, original,
+        "read-only GPU map was never overlaid"
+    );
+    assert!(!frames.current);
+    frames.current = true;
+    let (restored, w, h, generation) = frames.pixels().unwrap();
+    assert_eq!((w, h, generation), (8, 8, 77));
+    assert_eq!(
+        restored, original,
+        "private overlay restores its backing pixels"
+    );
+    // Unavailable consumes damage, other publication errors retain it for
+    // retry; a valid attempt invalidates the CPU scene even on failure.
+    for result in [
+        a::remote_frame_error_invalid,
+        a::remote_frame_error_unavailable,
+    ] {
+        *PUBLISHED.lock().unwrap() = Published {
+            result,
+            ..Default::default()
+        };
+        let mut frames = seed();
+        publisher.cursor_damage.invalidate(Rect::new(1, 1, 1, 1));
+        assert!(!publisher.image(&app, &mut frames, view(Cursor::default()), 8, 8));
+        assert!(!frames.current);
+        assert_eq!(PUBLISHED.lock().unwrap().calls, 1);
+        assert_eq!(
+            publisher.cursor_damage.regions().is_empty(),
+            result == a::remote_frame_error_unavailable
+        );
+        if result == a::remote_frame_error_invalid {
+            PUBLISHED.lock().unwrap().result = 0;
+            assert!(publisher.image(&app, &mut frames, view(Cursor::default()), 8, 8));
+            assert_eq!(PUBLISHED.lock().unwrap().calls, 2);
+            assert!(publisher.cursor_damage.regions().is_empty());
+        }
+    }
+    // Shape rejection happens before any shadow/invalidation or API call,
+    // but retains the existing unavailable/damage disposition.
+    *PUBLISHED.lock().unwrap() = Published::default();
+    let mut frames = seed();
+    publisher.cursor_damage.invalidate(Rect::new(1, 1, 1, 1));
+    let mut malformed = view(Cursor::default());
+    malformed.pixels = &image.pixels[..63];
+    assert!(!publisher.image(&app, &mut frames, malformed, 8, 8));
+    assert!(frames.current);
+    assert_eq!(PUBLISHED.lock().unwrap().calls, 0);
+    assert!(publisher.cursor_damage.regions().is_empty());
+    let mut empty = view(Cursor::default());
+    empty.width = 0;
+    empty.height = 0;
+    empty.pixels = &[];
+    publisher.cursor_damage.invalidate(Rect::new(1, 1, 1, 1));
+    assert!(!publisher.image(&app, &mut frames, empty, 0, 0));
+    assert!(frames.current);
+    assert!(publisher.cursor_damage.regions().is_empty());
+    assert_eq!(PUBLISHED.lock().unwrap().calls, 0);
+    for (consumers, suppressed, width) in [(0, false, 8), (1, true, 8), (1, false, 9)] {
+        let mut frames = seed();
+        let mut publisher = Publisher {
+            consumers,
+            suppressed,
+            ..Default::default()
+        };
+        publisher.cursor_damage.invalidate(Rect::new(1, 1, 1, 1));
+        assert!(!publisher.image(&app, &mut frames, view(Cursor::default()), width, 8));
+        assert!(frames.current);
+        assert!(!publisher.cursor_damage.regions().is_empty());
+        assert_eq!(PUBLISHED.lock().unwrap().calls, 0);
+    }
+}
+
 #[test]
 fn original_offscreen_and_shared_readback_epoch_damage_deadline_oracles() {
     use crate::capture::readback::{Phase as ReadPhase, Readback};
@@ -955,6 +1231,7 @@ fn original_offscreen_and_shared_readback_epoch_damage_deadline_oracles() {
             ),
             (2, 3, true, true)
         );
+        publication_cases(&image);
         remote.acknowledge(true).unwrap();
         assert!(remote.take_redraw(2));
         {
