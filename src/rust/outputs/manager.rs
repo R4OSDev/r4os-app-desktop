@@ -976,7 +976,10 @@ impl<'a> Manager<'a> {
                 .map_or(d, |o| o.capture_wait_ticks(now, hz, d))
         })
     }
-    pub fn pointer(&mut self, sample: a::MouseMotion, old: Point) -> Point {
+    pub fn rebase_pointer(&mut self, totals: Option<[u32; 2]>) {
+        self.motion = totals;
+    }
+    pub fn pointer(&mut self, sample: a::MouseMotion, old: Point, fallback: Rect) -> Point {
         let totals = [sample.motion_x, sample.motion_y];
         let previous = self.motion.replace(totals);
         let Some(previous) = previous else {
@@ -991,7 +994,19 @@ impl<'a> Manager<'a> {
                 .y
                 .saturating_add(totals[1].wrapping_sub(previous[1]) as i32),
         };
-        self.cursor = self.layout.nearest(candidate).map_or(old, |(_, p)| p);
+        self.cursor = self.layout.nearest(candidate).map_or_else(
+            || Point {
+                x: candidate.x.clamp(
+                    fallback.x,
+                    fallback.right().saturating_sub(1).max(fallback.x),
+                ),
+                y: candidate.y.clamp(
+                    fallback.y,
+                    fallback.bottom().saturating_sub(1).max(fallback.y),
+                ),
+            },
+            |(_, p)| p,
+        );
         self.cursor
     }
     pub fn close<M: Memory>(

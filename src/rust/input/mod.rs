@@ -5,5 +5,6 @@ pub mod keys;
 pub mod native;
 pub mod physical;
 pub mod platform;
+pub mod pointer_capture;
 pub mod router;
 pub mod runtime;

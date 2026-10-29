@@ -19,6 +19,53 @@ impl<'loan, 'app, 'storage> Host<'loan, 'app, 'storage> {
     pub fn new(session: &'loan mut Session<'app, 'storage>) -> Self {
         Self { session }
     }
+    /// Stop exact captured input and enqueue its ordered terminal notice before
+    /// the close flag/message can make the receiver return from its UI loop.
+    pub fn cancel_pointer_for_close(
+        &mut self,
+        owner: a::ProgramProcessHandle,
+        index: usize,
+        tick: u64,
+    ) {
+        let mut info = a::GuiPointerCaptureInfo::default();
+        let snapshot = a::GuiPointerHostRequest {
+            operation: a::gui_pointer_host_snapshot,
+            ..Default::default()
+        };
+        let rc = unsafe {
+            code(c::R4SdkGuiDesktopContext_guiPointerCaptureHost(
+                0,
+                self.session.native_desktop(),
+                &snapshot,
+                &mut info,
+            ))
+        };
+        if rc != 0
+            || ![a::gui_pointer_state_pending, a::gui_pointer_state_active].contains(&info.state)
+            || !super::process::same(info.capture.window.owner, owner)
+            || info.capture.window.window_id != index as i32
+        {
+            return;
+        }
+        let request = a::GuiPointerHostRequest {
+            operation: a::gui_pointer_host_cancel,
+            reason: a::gui_pointer_reason_window_closed,
+            capture: info.capture,
+            event: a::GuiEvent {
+                tick,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _ = unsafe {
+            c::R4SdkGuiDesktopContext_guiPointerCaptureHost(
+                0,
+                self.session.native_desktop(),
+                &request,
+                &mut info,
+            )
+        };
+    }
     pub fn associate(&mut self, handle: &a::ProgramProcessHandle, index: usize) -> i32 {
         if !super::process::valid(*handle) || index >= 4 {
             return a::program_handle_error_stale;

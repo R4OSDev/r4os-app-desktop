@@ -7,7 +7,7 @@ use crate::diagnostics::wire as diagnostic;
 use alloc::vec::Vec;
 use r4os_contract as a;
 use r4os_sdk::{
-    resources::{Resources, Timeout},
+    resources::{Observation, Resources, Timeout, Wait},
     services::{Call, Connection, Services},
     storage::Error as SdkError,
 };
@@ -42,6 +42,7 @@ pub struct Host<'a> {
     mode_io: super::mode_io::ModeIo<'a>,
     retiring: bool,
     connection: Option<Connection<'a>>,
+    pointer_broker: Option<Observation<'a>>,
     owner: a::ProgramProcessHandle,
     claimed: bool,
     request: Vec<u8>,
@@ -79,6 +80,7 @@ impl<'a> Host<'a> {
             mode_io: super::mode_io::ModeIo::new()?,
             retiring: false,
             connection: None,
+            pointer_broker: None,
             owner,
             claimed: false,
             request,
@@ -100,6 +102,42 @@ impl<'a> Host<'a> {
     }
     pub fn endpoint(&self) -> u32 {
         self.connection.as_ref().map_or(0, Connection::handle)
+    }
+    /// A native completion binding follows the exact provider generation,
+    /// including stop/start entirely between two successful broker RPCs.
+    /// It is lazy: ordinary Desktop work does not poll or allocate this guard.
+    pub fn pointer_broker_live(&mut self) -> bool {
+        if !self.claimed {
+            return false;
+        }
+        if self.pointer_broker.is_none() {
+            let id = self
+                .connection
+                .as_ref()
+                .map_or(0, |connection| connection.info.instance_id);
+            let observation = self
+                .resources
+                .open_process(id)
+                .and_then(|process| self.resources.observe_process(&process.handle(), false));
+            match observation {
+                Ok(value) => self.pointer_broker = Some(value),
+                Err(_) => {
+                    self.invalidate();
+                    return false;
+                }
+            }
+        }
+        let live = matches!(
+            self.pointer_broker
+                .as_ref()
+                .unwrap()
+                .wait_ready(Timeout::Poll),
+            Ok(Wait::WouldBlock | Wait::TimedOut)
+        );
+        if !live {
+            self.invalidate();
+        }
+        live
     }
     pub fn claim(&mut self) -> Result<a::TrayDesktopExchange> {
         if self.retiring {
@@ -533,6 +571,10 @@ impl<'a> Host<'a> {
         // Endpoint Close releases only that reference, not an in-flight RPC.
         // Keep its bounded native request/buffers through independent Close ACK;
         // a late reply after this transition is discarded, never applied.
+        if let Some(broker) = self.pointer_broker.as_mut() {
+            broker.close()?;
+        }
+        self.pointer_broker = None;
         let connection_result = if let Some(connection) = self.connection.as_mut() {
             connection.close().map_err(Error::from)
         } else {

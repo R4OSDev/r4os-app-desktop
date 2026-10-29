@@ -779,6 +779,7 @@ impl<'input> State<'input> {
             return;
         }
         let handle = client.handle();
+        Host::new(session).cancel_pointer_for_close(handle, index, tick);
         let _ = programs.request_close(handle);
         self.model
             .windows

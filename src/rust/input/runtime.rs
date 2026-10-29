@@ -18,9 +18,17 @@ use r4os_sdk::{
 #[derive(Clone, Copy)]
 pub enum Sample {
     Activity,
-    Key { key: u32, modifiers: u8 },
+    Key {
+        key: u32,
+        modifiers: u8,
+    },
     Physical(a::PhysicalKeyEvent),
-    Mouse { value: a::Mouse, remote: bool },
+    Mouse {
+        value: a::Mouse,
+        remote: bool,
+        motion: Option<[u32; 2]>,
+        remote_kind: u32,
+    },
 }
 pub enum Poll {
     Empty,
@@ -40,6 +48,7 @@ pub struct Stats {
 #[derive(Default)]
 pub struct State {
     pub cursor: Point,
+    pub pointer_capture: super::pointer_capture::Capture,
     pub hover: Target,
     pub pressed: Target,
     pub tray_hover: Identity,
@@ -124,6 +133,8 @@ impl State {
                 self.stats.remote_mouse = self.stats.remote_mouse.wrapping_add(1);
                 Poll::Event(Sample::Mouse {
                     remote: true,
+                    motion: None,
+                    remote_kind: value.kind,
                     value: a::Mouse {
                         x: value.x,
                         y: value.y,
@@ -162,7 +173,12 @@ impl State {
             _ => Poll::Empty,
         }
     }
-    pub fn mouse(&mut self, session: &mut Session<'_, '_>, outputs: &mut Manager<'_>) -> Poll {
+    pub fn mouse(
+        &mut self,
+        session: &mut Session<'_, '_>,
+        outputs: &mut Manager<'_>,
+        bounds: Rect,
+    ) -> Poll {
         let mut value = empty_mouse();
         let mut sample = a::MouseMotion {
             version: 1,
@@ -171,14 +187,18 @@ impl State {
             motion_x: 0,
             motion_y: 0,
         };
-        if outputs.active() && Input::new(session).motion(&mut sample) == 0 {
+        let mut motion = None;
+        if Input::new(session).motion(&mut sample) == 0 {
+            // Always establish a requested restore fence, even in an otherwise
+            // unchanged packet. This is the normal single consuming read.
+            let point = outputs.pointer(sample, self.cursor, bounds);
             if !self
                 .mouse
                 .changed(sample.mouse, Some([sample.motion_x, sample.motion_y]))
             {
                 return Poll::Empty;
             }
-            let point = outputs.pointer(sample, self.cursor);
+            motion = Some([sample.motion_x, sample.motion_y]);
             value = sample.mouse;
             value.x = point.x;
             value.y = point.y;
@@ -190,6 +210,8 @@ impl State {
         Poll::Event(Sample::Mouse {
             value,
             remote: false,
+            motion,
+            remote_kind: 0,
         })
     }
     pub fn initial(&mut self, session: &mut Session<'_, '_>, bounds: Rect) {
