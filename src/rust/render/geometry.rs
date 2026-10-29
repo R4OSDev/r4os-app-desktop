@@ -134,13 +134,6 @@ impl Regions {
     }
     pub fn add(&mut self, rect: Rect) {
         append_damage_region(&mut self.rects, &mut self.count, rect);
-        // The cheapest overflow pair can intersect a third old region.
-        // At most eight insertions reapply the original overlap closure.
-        let prior = *self;
-        self.count = 0;
-        for &value in prior.as_slice() {
-            append_damage_region(&mut self.rects, &mut self.count, value);
-        }
     }
     pub fn from_slice(rects: &[Rect]) -> Self {
         let mut value = Self::default();
@@ -181,18 +174,7 @@ pub fn append_damage_region(
     if rect.is_empty() {
         return;
     }
-    let mut merged = rect;
-    let mut index = 0;
-    while index < *count {
-        if !regions[index].intersects(merged) {
-            index += 1;
-            continue;
-        }
-        merged = merged.merged(regions[index]);
-        *count -= 1;
-        regions[index] = regions[*count];
-        index = 0;
-    }
+    let merged = absorb_overlaps(regions, count, rect);
     if *count < regions.len() {
         regions[*count] = merged;
         *count += 1;
@@ -218,9 +200,32 @@ pub fn append_damage_region(
         if i == best_b {
             continue;
         }
-        regions[*count] = candidate;
+        // The cheapest pair's new bounds can intersect another survivor.
+        // Reapply the same closure while inserting at most eight candidates;
+        // no further capacity merge, recursion or allocation is needed.
+        let merged = absorb_overlaps(regions, count, candidate);
+        regions[*count] = merged;
         *count += 1;
     }
+}
+
+fn absorb_overlaps(
+    regions: &mut [Rect; MAX_DAMAGE_REGIONS],
+    count: &mut usize,
+    mut merged: Rect,
+) -> Rect {
+    let mut index = 0;
+    while index < *count {
+        if !regions[index].intersects(merged) {
+            index += 1;
+            continue;
+        }
+        merged = merged.merged(regions[index]);
+        *count -= 1;
+        regions[index] = regions[*count];
+        index = 0;
+    }
+    merged
 }
 
 #[derive(Clone, Debug, Default)]
@@ -443,6 +448,92 @@ mod tests {
                     .iter()
                     .all(|other| !region.intersects(*other))
             );
+        }
+    }
+
+    fn verify_damage_independently(input: &[Rect], output: &[Rect]) {
+        // Plain wide-integer interval and pixel checks deliberately avoid the
+        // product intersects/contains/merged/area helpers under examination.
+        let edges = |r: Rect| {
+            (
+                i64::from(r.x),
+                i64::from(r.y),
+                i64::from(r.x) + i64::from(r.w),
+                i64::from(r.y) + i64::from(r.h),
+            )
+        };
+        let min_x = input.iter().map(|r| i64::from(r.x)).min().unwrap();
+        let min_y = input.iter().map(|r| i64::from(r.y)).min().unwrap();
+        let max_x = input.iter().map(|r| edges(*r).2).max().unwrap();
+        let max_y = input.iter().map(|r| edges(*r).3).max().unwrap();
+        assert!(!output.is_empty() && output.len() <= 8);
+        let mut summed_area = 0u64;
+        for (i, r) in output.iter().enumerate() {
+            let a = edges(*r);
+            assert!(
+                r.w > 0 && r.h > 0 && a.0 >= min_x && a.1 >= min_y && a.2 <= max_x && a.3 <= max_y
+            );
+            summed_area += ((a.2 - a.0) * (a.3 - a.1)) as u64;
+            for other in &output[i + 1..] {
+                let b = edges(*other);
+                assert!(
+                    !(a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3),
+                    "overlapping damage {r:?} and {other:?}"
+                );
+            }
+        }
+        let inside = |r: &Rect, x: i64, y: i64| {
+            let e = edges(*r);
+            x >= e.0 && y >= e.1 && x < e.2 && y < e.3
+        };
+        let (mut input_pixels, mut output_pixels) = (0u64, 0u64);
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let source = input.iter().any(|r| inside(r, x, y));
+                let target = output.iter().any(|r| inside(r, x, y));
+                assert!(!source || target, "lost input pixel {x},{y}");
+                input_pixels += u64::from(source);
+                output_pixels += u64::from(target);
+            }
+        }
+        assert!(output_pixels >= input_pixels);
+        assert_eq!(output_pixels, summed_area);
+        assert!(
+            output_pixels < ((max_x - min_x) * (max_y - min_y)) as u64,
+            "scattered input was replaced by one bounding/fullscreen redraw"
+        );
+    }
+
+    #[test]
+    fn capacity_pair_merge_recloses_overlaps_for_dirty_and_regions() {
+        let original = [
+            Rect::new(48, 12, 2, 3),
+            Rect::new(69, 44, 7, 2),
+            Rect::new(12, 23, 2, 8),
+            Rect::new(23, 45, 5, 2),
+            Rect::new(37, 48, 6, 3),
+            Rect::new(46, 56, 5, 1),
+            Rect::new(27, 2, 3, 1),
+            Rect::new(10, 71, 4, 4),
+            Rect::new(40, 36, 4, 7),
+            Rect::new(58, 69, 8, 5),
+        ];
+        for (dx, dy) in [(0, 0), (-64, -50)] {
+            let input = original.map(|r| Rect::new(r.x + dx, r.y + dy, r.w, r.h));
+            let mut dirty = Dirty::default();
+            let mut carried = Regions::default();
+            for r in input {
+                dirty.invalidate(r);
+                carried.add(r);
+            }
+            verify_damage_independently(&input, carried.as_slice());
+            verify_damage_independently(&input, dirty.regions());
+            assert_eq!(dirty.regions(), carried.as_slice());
+            assert_eq!(dirty.bounds(), Some(Rect::new(10 + dx, 2 + dy, 66, 73)));
+            let mut delivered = [Rect::ZERO; MAX_DAMAGE_REGIONS];
+            let n = dirty.take_regions(&mut delivered);
+            verify_damage_independently(&input, &delivered[..n]);
+            assert!(!dirty.active() && dirty.bounds().is_none() && dirty.regions().is_empty());
         }
     }
 }

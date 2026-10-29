@@ -33,13 +33,28 @@ struct Probe {
     fail_clock: u32,
     begins: u32,
     presents: u32,
+    shape: Option<Shape>,
 }
+#[derive(Clone, Copy)]
+struct Shape {
+    width: u32,
+    height: u32,
+    bounds: Rect,
+    regions: u32,
+}
+const DEFAULT_SHAPE: Shape = Shape {
+    width: 32,
+    height: 32,
+    bounds: Rect::new(0, 0, 32, 32),
+    regions: 1,
+};
 static CASE: Mutex<()> = Mutex::new(());
 static PROBE: Mutex<Probe> = Mutex::new(Probe {
     clocks: 0,
     fail_clock: 0,
     begins: 0,
     presents: 0,
+    shape: None,
 });
 unsafe extern "C" fn precise(out: *mut a::MonotonicClockInfo) -> i32 {
     let mut p = PROBE.lock().unwrap();
@@ -59,8 +74,13 @@ unsafe extern "C" fn precise(out: *mut a::MonotonicClockInfo) -> i32 {
     1
 }
 unsafe extern "C" fn begin(x: i32, y: i32, w: u32, h: u32) -> i32 {
-    assert_eq!((x, y, w, h), (0, 0, 32, 32));
-    PROBE.lock().unwrap().begins += 1;
+    let mut p = PROBE.lock().unwrap();
+    let e = p.shape.unwrap_or(DEFAULT_SHAPE);
+    assert_eq!(
+        (x, y, w, h),
+        (e.bounds.x, e.bounds.y, e.bounds.w as u32, e.bounds.h as u32)
+    );
+    p.begins += 1;
     0
 }
 unsafe extern "C" fn present(
@@ -72,14 +92,49 @@ unsafe extern "C" fn present(
     out: *mut a::DisplayPresentResult,
 ) -> i32 {
     let r = unsafe { &*request };
+    let e = PROBE.lock().unwrap().shape.unwrap_or(DEFAULT_SHAPE);
     assert_eq!(
         (r.source_width, r.source_height, r.source_stride_pixels),
-        (32, 32, 32)
+        (e.width, e.height, e.width)
     );
     assert_eq!(r.input_tick, 77);
-    assert_eq!((count, damage_count), (1024, 1));
-    let d = unsafe { &*damage };
-    assert_eq!((d.x, d.y, d.w, d.h), (0, 0, 32, 32));
+    assert_eq!((count, damage_count), (e.width * e.height, e.regions));
+    let regions = unsafe { core::slice::from_raw_parts(damage, damage_count as usize) };
+    // Keep the original exact full32x32 oracle for the four timing cases;
+    // larger Damage cases must also carry exactly the expected wire bounds.
+    let left = regions.iter().map(|r| i64::from(r.x)).min().unwrap();
+    let top = regions.iter().map(|r| i64::from(r.y)).min().unwrap();
+    let right = regions
+        .iter()
+        .map(|r| i64::from(r.x) + i64::from(r.w))
+        .max()
+        .unwrap();
+    let bottom = regions
+        .iter()
+        .map(|r| i64::from(r.y) + i64::from(r.h))
+        .max()
+        .unwrap();
+    assert_eq!(
+        (left, top, right - left, bottom - top),
+        (
+            i64::from(e.bounds.x),
+            i64::from(e.bounds.y),
+            i64::from(e.bounds.w),
+            i64::from(e.bounds.h)
+        )
+    );
+    for (i, a) in regions.iter().enumerate() {
+        assert!(a.w > 0 && a.h > 0);
+        for b in &regions[i + 1..] {
+            assert!(
+                !(i64::from(a.x) < i64::from(b.x) + i64::from(b.w)
+                    && i64::from(b.x) < i64::from(a.x) + i64::from(a.w)
+                    && i64::from(a.y) < i64::from(b.y) + i64::from(b.h)
+                    && i64::from(b.y) < i64::from(a.y) + i64::from(a.h)),
+                "overlap reached native present"
+            );
+        }
+    }
     assert!(
         unsafe { core::slice::from_raw_parts(pixels, count as usize) }
             .iter()
@@ -193,6 +248,23 @@ fn frame(
     graphics: &Graphics<'_, '_>,
     trace: bool,
 ) -> Result<Frame> {
+    frame_damage(
+        owner,
+        app,
+        session,
+        graphics,
+        trace,
+        &[Rect::new(0, 0, 32, 32)],
+    )
+}
+fn frame_damage(
+    owner: &mut Frames,
+    app: &App<'_>,
+    session: &mut Session<'_, '_>,
+    graphics: &Graphics<'_, '_>,
+    trace: bool,
+    regions: &[Rect],
+) -> Result<Frame> {
     use compositor::{Hosted, Interaction, Overlay, Shell};
     let controller = Controller::default();
     let clients = Clients::default();
@@ -203,9 +275,10 @@ fn frame(
     let quick = Bar::defaults();
     let menu = Menu::defaults();
     let tray = Registry::new().unwrap();
+    let e = PROBE.lock().unwrap().shape.unwrap_or(DEFAULT_SHAPE);
     let mut scene = Scene {
-        width: 32,
-        height: 32,
+        width: e.width as i32,
+        height: e.height as i32,
         path: Path::PrimaryCpu,
         disabled: true,
         hosted: Hosted {
@@ -259,7 +332,7 @@ fn frame(
             &OriginalColors,
             &mut windows,
             &mut scene,
-            &[Rect::new(0, 0, 32, 32)],
+            regions,
             77,
             trace,
         )
@@ -358,5 +431,56 @@ fn mandatory_cache_clock_and_requested_completion_clock_keep_their_errors() {
         assert!(frame(&mut owner, app, session, graphics, true).is_err());
         let p = PROBE.lock().unwrap();
         assert_eq!((p.clocks, p.begins, p.presents), (3, 1, 1));
+    });
+}
+
+#[test]
+fn dirty_capacity_merge_reaches_cpu_present_and_the_next_frame() {
+    with(|app, session, graphics| {
+        let mut owner = Frames::new().unwrap();
+        let mut dirty = Dirty::default();
+        for r in [
+            Rect::new(48, 12, 2, 3),
+            Rect::new(69, 44, 7, 2),
+            Rect::new(12, 23, 2, 8),
+            Rect::new(23, 45, 5, 2),
+            Rect::new(37, 48, 6, 3),
+            Rect::new(46, 56, 5, 1),
+            Rect::new(27, 2, 3, 1),
+            Rect::new(10, 71, 4, 4),
+            Rect::new(40, 36, 4, 7),
+            Rect::new(58, 69, 8, 5),
+        ] {
+            dirty.invalidate(r);
+        }
+        let mut regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
+        let n = dirty.take_regions(&mut regions);
+        PROBE.lock().unwrap().shape = Some(Shape {
+            width: 96,
+            height: 96,
+            bounds: Rect::new(10, 2, 66, 73),
+            regions: n as u32,
+        });
+        let first = frame_damage(&mut owner, app, session, graphics, false, &regions[..n]);
+        assert!(
+            first.is_ok(),
+            "actual CPU compositor rejected delivered Dirty damage: {:?}",
+            first.as_ref().err()
+        );
+        assert!(first.unwrap().presentation.presented);
+        PROBE.lock().unwrap().shape = None;
+        let next = frame(&mut owner, app, session, graphics, false).unwrap();
+        assert!(next.presentation.presented && next.timing.is_none());
+        assert_eq!(next.generation, 2);
+        assert_eq!(
+            (
+                owner.stats.redraws,
+                owner.stats.presents,
+                owner.stats.present_errors
+            ),
+            (2, 2, 0)
+        );
+        let p = PROBE.lock().unwrap();
+        assert_eq!((p.clocks, p.begins, p.presents), (2, 2, 2));
     });
 }
