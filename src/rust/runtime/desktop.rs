@@ -30,7 +30,7 @@ use crate::{
         power::Owner as Power,
     },
     render::{
-        display::Display,
+        display::{Display, Presentation},
         geometry::{Dirty, MAX_DAMAGE_REGIONS, Rect},
         gpu::receipt::Consumer,
         output_geometry,
@@ -67,6 +67,30 @@ use r4os_sdk::{
     services::Services,
 };
 type Result<T> = core::result::Result<T, &'static str>;
+/// Only a completely accepted CPU frame can release the clean-cursor barrier.
+/// Rejected regions remain owned by this display coordinator; returning false
+/// uses its existing activity wait instead of claiming productive rendering.
+pub(crate) fn complete_cpu_frame(
+    cursor: &mut Cursor,
+    dirty: &mut Dirty,
+    regions: &[Rect],
+    presentation: &Presentation,
+) -> bool {
+    let accepted = presentation.accepted();
+    cursor.presented(accepted);
+    if !accepted {
+        for region in regions {
+            dirty.invalidate(*region);
+        }
+    }
+    accepted
+}
+/// An output revision owns a new coordinate space. Its full repaint replaces
+/// damage retained for the previous target, including now off-screen regions.
+pub(crate) fn reset_output_damage(dirty: &mut Dirty, bounds: Rect) {
+    *dirty = Dirty::default();
+    dirty.invalidate(bounds);
+}
 #[path = "console_check.rs"]
 mod console_check;
 #[path = "desktop_launch.rs"]
@@ -370,7 +394,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         self.publisher
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
-        self.full();
+        reset_output_damage(&mut self.dirty, self.hosted.bounds);
     }
     fn refresh(
         &mut self,
@@ -960,8 +984,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 )
             }
             .map_err(|_| "software frame")?;
-            self.cursor.presented(result.presentation.presented);
-            if result.presentation.presented && result.presentation.copied {
+            let accepted = complete_cpu_frame(
+                &mut self.cursor,
+                &mut self.dirty,
+                &regions[..count],
+                &result.presentation,
+            );
+            if accepted {
                 if let (Some(timing), Some((frame, client, generation, _))) = (
                     result.timing,
                     trace_input.filter(|(_, _, _, i)| {
@@ -1009,7 +1038,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let _ = self
                 .publisher
                 .primary(env.app, &mut self.frames, &regions[..count], pointer);
-            true
+            accepted
         } else {
             if self.publisher.cursor_damage.active() {
                 let _ = self

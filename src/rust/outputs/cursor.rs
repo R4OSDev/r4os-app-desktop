@@ -405,8 +405,17 @@ impl Controller {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    pub(crate) fn pending_clean_controller() -> Controller {
+        let mut model = Model::default();
+        let mut cursor = Controller::default();
+        assert!(!cursor.poll(&mut model, 1, 10, 20, true));
+        model.finish();
+        assert!(cursor.poll(&mut model, 3, 12, 21, true));
+        assert!(cursor.clean_pending && !cursor.clean_ready && model.released);
+        cursor
+    }
     struct Model {
         supported: bool,
         status: a::DisplayCursorStatus,

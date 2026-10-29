@@ -195,12 +195,14 @@ impl Frames {
         } else {
             None
         };
+        // This is validity of the composed CPU pixels, not output acceptance.
+        // The coordinator retains rejected damage and retries the exact view.
         self.current = true;
         self.stats.redraws = self.stats.redraws.saturating_add(1);
         if regions.len() == 1 && regions[0] == Rect::new(0, 0, self.width, self.height) {
             self.stats.full = self.stats.full.saturating_add(1);
         }
-        if presentation.presented {
+        if presentation.accepted() {
             self.stats.presents = self.stats.presents.saturating_add(1);
         } else {
             self.stats.present_errors = self.stats.present_errors.saturating_add(1);
@@ -208,7 +210,11 @@ impl Frames {
         // Original Desktop diagnostic: count discontinuous nonzero CPU
         // presentation generations. This is neither elapsed time nor proof
         // that an output was physically visible.
-        let generation = presentation.result.present_generation;
+        let generation = if presentation.accepted() {
+            presentation.result.present_generation
+        } else {
+            0
+        };
         if generation != 0 {
             if self.stats.present_generation_last != 0
                 && generation != self.stats.present_generation_last.wrapping_add(1)

@@ -13,6 +13,11 @@ pub struct Presentation {
     pub presented: bool,
     pub result: a::DisplayPresentResult,
 }
+impl Presentation {
+    pub fn accepted(&self) -> bool {
+        self.copied && self.presented
+    }
+}
 fn code(slot: c::R4SdkGuiSlot) -> i32 {
     if slot.status < 0 {
         slot.status
@@ -96,7 +101,6 @@ impl Display<'_, '_, '_> {
             return failed();
         }
         let mut wire = [a::DisplayDamageRect::default(); MAX_DAMAGE_REGIONS];
-        let mut damage = Rect::ZERO;
         for (i, region) in regions.iter().enumerate() {
             let Some(region) = scene.clip_rect(*region) else {
                 return failed();
@@ -107,7 +111,6 @@ impl Display<'_, '_, '_> {
                 w: region.w as u32,
                 h: region.h as u32,
             };
-            damage = damage.merged(region);
         }
         let request = a::DisplayPresentRequest {
             flags: if input_tick != 0 {
@@ -142,35 +145,11 @@ impl Display<'_, '_, '_> {
                 result,
             };
         }
-        // The original output fallback is still a supported backend option;
-        // canonical copies and physical visibility are never conflated.
-        let first = damage.y as usize * bounds.w as usize + damage.x as usize;
-        let count = (damage.h as usize - 1) * bounds.w as usize + damage.w as usize;
-        let source = &scene.pixels()[first..first + count];
-        let copy = unsafe {
-            code(c::R4SdkGuiDrawContext_displayBlitXrgb32Stride(
-                0,
-                self.0.native_draw(),
-                damage.x,
-                damage.y,
-                damage.w as u32,
-                damage.h as u32,
-                bounds.w as u32,
-                source.as_ptr(),
-                source.len() as u64,
-            ))
-        };
-        let present = unsafe {
-            code(c::R4SdkGuiDrawContext_displayPresent(
-                0,
-                self.0.native_draw(),
-            ))
-        };
-        Presentation {
-            canonical: false,
-            copied: copy >= 0,
-            presented: present >= 0,
-            result,
-        }
+        // The current canonical provider already selects accelerated/native/
+        // bootfb CPU copies under the exact write admission. Legacy blit calls
+        // that same provider; its separate Present only resets surface mode.
+        // Repeating an error there loses generation/regions without repairing
+        // failed admission. Keep it rejected for the runtime's damage retry.
+        Presentation { result, ..failed() }
     }
 }
