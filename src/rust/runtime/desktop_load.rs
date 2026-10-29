@@ -143,6 +143,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             match done.load.result.take() {
                 Some(Ok(loaded)) => {
                     assert!(valid(loaded.handle));
+                    if let Some(origin) = done.origin {
+                        self.launches
+                            .retain_evidence(programs, origin, loaded.handle);
+                    }
                     process = Some(loaded.handle);
                     if cancelled {
                         // Join returned the actual child. Its exact generation
@@ -202,7 +206,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             if !draining {
                 if let Some(origin) = done.origin {
-                    self.launches.complete(origin, process, window, code, raw);
+                    self.launches
+                        .complete(programs, origin, process, window, code, raw);
                 } else if let Some(error) = error {
                     self.launch_error(error);
                 }

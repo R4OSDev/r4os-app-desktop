@@ -5,6 +5,8 @@ pub const EXCHANGE: u16 = 4739;
 pub const COMPLETE: u16 = 4740;
 pub const WAIT_FRAME: u32 = 1;
 pub const TERMINAL: u32 = 2;
+pub const RETAIN_EVIDENCE: u32 = 4;
+pub const EVIDENCE_UNAVAILABLE: u32 = 8;
 pub const STARTING: u32 = 2;
 pub const PROCESS: u32 = 3;
 pub const WINDOW: u32 = 4;
@@ -103,7 +105,7 @@ pub fn decode(b: &[u8]) -> Option<Message> {
         args: b[272..400].try_into().ok()?,
         title: b[400..448].try_into().ok()?,
     };
-    if m.phase > 5 || m.code > 14 || m.flags & !3 != 0 || m.policy > 2 || m.window > 4 {
+    if m.phase > 5 || m.code > 14 || m.flags & !15 != 0 || m.policy > 2 || m.window > 4 {
         return None;
     }
     for field in [&m.path[..], &m.args[..], &m.title[..]] {

@@ -7,6 +7,7 @@ use crate::runtime::launch_wire as w;
 pub(super) struct Owner {
     receipt: Option<w::Message>,
     acknowledged: bool,
+    evidence: Option<a::ProgramObservationHandle>,
 }
 fn identity(value: a::ProgramProcessHandle) -> w::Identity {
     w::Identity {
@@ -46,8 +47,39 @@ pub(super) fn failure_code(error: &crate::hosted::launch::Failure) -> (u32, i32)
     }
 }
 impl Owner {
+    pub(super) fn retain_evidence(
+        &mut self,
+        programs: &Programs<'_>,
+        work: w::Message,
+        process: a::ProgramProcessHandle,
+    ) {
+        if work.flags & w::RETAIN_EVIDENCE == 0
+            || self.evidence.is_some()
+            || !self.receipt.is_some_and(|old| old.same_key(work))
+        {
+            return;
+        }
+        match programs.retain_evidence(process) {
+            Ok(value) => self.evidence = Some(value),
+            Err(_) => {
+                if let Some(receipt) = &mut self.receipt {
+                    receipt.flags |= w::EVIDENCE_UNAVAILABLE;
+                }
+            }
+        }
+    }
+    fn release_evidence(&mut self, programs: &Programs<'_>) -> bool {
+        if let Some(value) = self.evidence {
+            if programs.release_evidence(value).is_err() {
+                return false;
+            }
+            self.evidence = None;
+        }
+        true
+    }
     pub(super) fn complete(
         &mut self,
+        programs: &Programs<'_>,
         work: w::Message,
         process: Option<a::ProgramProcessHandle>,
         window: Option<usize>,
@@ -57,7 +89,13 @@ impl Owner {
         if !self.receipt.is_some_and(|old| old.same_key(work)) {
             return;
         }
+        if let Some(process) = process {
+            self.retain_evidence(programs, work, process);
+        }
         let mut result = work;
+        result.flags |= self
+            .receipt
+            .map_or(0, |old| old.flags & w::EVIDENCE_UNAVAILABLE);
         result.code = code;
         result.raw = raw;
         if let Some(process) = process {
@@ -87,6 +125,12 @@ impl<'a, 'input> Desktop<'a, 'input> {
         let Some(work) = host.launch_mailbox() else {
             return;
         };
+        let replacing = self.launches.receipt.is_some_and(|old| {
+            old.broker != work.broker || (host.claimed() && !old.same_key(work))
+        });
+        if replacing && !self.launches.release_evidence(programs) {
+            return;
+        }
         if !host.claimed() {
             return;
         }
@@ -126,6 +170,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             Ok(loading::Accepted::Pending) => {}
                             Ok(loading::Accepted::Window(index)) => {
                                 self.launches.complete(
+                                    programs,
                                     work,
                                     Some(self.hosted.model.clients.slots()[index].handle()),
                                     Some(index),
@@ -135,7 +180,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             }
                             Err(error) => {
                                 let (code, raw) = failure_code(&error);
-                                self.launches.complete(work, None, None, code, raw);
+                                self.launches
+                                    .complete(programs, work, None, None, code, raw);
                             }
                         }
                     }
@@ -192,7 +238,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.launches.receipt = Some(result);
         }
         if !self.launches.acknowledged && host.launch_complete(result).is_ok() {
-            self.launches.acknowledged = true;
+            // WINSVC acquired its own creator-bound history reference before
+            // acknowledging. Lost replies retain this temporary reference.
+            self.launches.acknowledged = self.launches.release_evidence(programs);
         }
     }
 }

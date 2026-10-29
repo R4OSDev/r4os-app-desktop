@@ -48,6 +48,24 @@ impl<'app> Programs<'app> {
             app: core::ptr::from_ref(&self.facade).cast_mut(),
         }
     }
+    pub fn retain_evidence(
+        &self,
+        process: a::ProgramProcessHandle,
+    ) -> Result<a::ProgramObservationHandle> {
+        let mut result = a::ProgramObservationHandle::default();
+        exact(unsafe {
+            c::r4_resources_observation_retain(&mut self.resources(), &process, 0, &mut result)
+        })?;
+        Ok(result)
+    }
+    pub fn release_evidence(&self, observation: a::ProgramObservationHandle) -> Result<()> {
+        let code =
+            unsafe { c::r4_resources_observation_release(&mut self.resources(), &observation) };
+        if code == a::program_handle_error_not_found {
+            return Ok(());
+        }
+        exact(code)
+    }
     pub fn class(&self, path: &FilePath, policy: a::LaunchPolicy) -> Result<a::R4XStartAppClass> {
         match unsafe {
             c::r4_resources_program_class(
