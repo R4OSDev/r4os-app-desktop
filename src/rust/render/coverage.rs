@@ -9,11 +9,6 @@ pub enum Path {
     Native,
     Recorded,
 }
-#[derive(Default)]
-pub struct Stats {
-    pub layers_visited: u32,
-    pub layers_culled: u32,
-}
 #[derive(Clone, Copy, Default)]
 pub struct Cover {
     client: Option<Rect>,
@@ -49,10 +44,8 @@ impl Cover {
     pub fn client(self) -> Option<Rect> {
         self.client
     }
-    pub fn visible(self, stats: &mut Stats, damage: Rect, bounds: Rect) -> bool {
-        stats.layers_visited = stats.layers_visited.wrapping_add(1);
+    pub fn visible(self, damage: Rect, bounds: Rect) -> bool {
         let Some(area) = intersect(damage, bounds) else {
-            stats.layers_culled = stats.layers_culled.wrapping_add(1);
             return false;
         };
         if self.client.is_some_and(|cover| {
@@ -61,7 +54,6 @@ impl Cover {
                 && cover.right() >= area.right()
                 && cover.bottom() >= area.bottom()
         }) {
-            stats.layers_culled = stats.layers_culled.wrapping_add(1);
             return false;
         }
         true
@@ -78,10 +70,8 @@ mod tests {
         let screen = Rect::new(0, 0, 160, 120);
         let cover = Cover::new(Path::PrimaryCpu, Some(&window), true, false, client, client);
         assert_eq!(cover.client(), Some(client));
-        let mut stats = Stats::default();
-        assert!(!cover.visible(&mut stats, client, screen));
+        assert!(!cover.visible(client, screen));
         assert!(cover.visible(
-            &mut stats,
             Rect::new(client.x - 1, client.y, client.w + 1, client.h),
             screen
         ));

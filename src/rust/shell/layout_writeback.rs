@@ -18,7 +18,6 @@ struct Save {
     expected: &'static StartupInfo<'static>,
     bytes: Vec<u8>,
     generation: u32,
-    started: u64,
 }
 impl Task for Save {
     fn run(&mut self, _: &Control) -> i32 {
@@ -41,20 +40,10 @@ impl Task for Save {
         }
     }
 }
-#[derive(Default)]
-pub struct Stats {
-    pub started: u64,
-    pub completed: u64,
-    pub errors: u64,
-    pub last_ticks: u64,
-    pub total_ticks: u64,
-    pub max_ticks: u64,
-}
 pub struct Owner<'a> {
     policy: c::R4StdSettingsWriteback,
     generation: u32,
     worker: Option<Worker<'a, Save>>,
-    pub stats: Stats,
     _standard: PhantomData<&'a Standard<'a>>,
 }
 impl<'a> Owner<'a> {
@@ -76,7 +65,6 @@ impl<'a> Owner<'a> {
             policy: unsafe { state.assume_init() },
             generation: 0,
             worker: None,
-            stats: Stats::default(),
             _standard: PhantomData,
         })
     }
@@ -112,7 +100,6 @@ impl<'a> Owner<'a> {
         }
         let outcome = unsafe { outcome.assume_init() };
         if code < 0 {
-            self.stats.errors = self.stats.errors.saturating_add(1);
             if scalar(unsafe { c::R4StdSettingsWritebackFlush_get_first_failure(&outcome) })
                 .is_ok_and(|v| v != 0)
             {
@@ -136,11 +123,6 @@ impl<'a> Owner<'a> {
             return false;
         };
         self.worker = None;
-        let elapsed = tick.saturating_sub(save.started);
-        self.stats.completed = self.stats.completed.saturating_add(1);
-        self.stats.last_ticks = elapsed;
-        self.stats.total_ticks = self.stats.total_ticks.saturating_add(elapsed);
-        self.stats.max_ticks = self.stats.max_ticks.max(elapsed);
         let changed = self.complete(app, tick, code);
         if code >= 0 && save.generation != self.generation {
             let _ =
@@ -189,12 +171,10 @@ impl<'a> Owner<'a> {
             expected,
             bytes,
             generation: self.generation,
-            started: tick,
         };
         match unsafe { Worker::start(resources, save, 128 * 1024) } {
             Ok(worker) => {
                 self.worker = Some(worker);
-                self.stats.started = self.stats.started.saturating_add(1);
                 changed
             }
             Err(_) => self.complete(app, tick, c::R4StdConfig_error_write_failed) || changed,

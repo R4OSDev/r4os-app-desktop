@@ -119,7 +119,7 @@ pub fn run(env: &Environment<'_>, path: &[u8], caller: Identity, deadline: u64) 
                 let changed = owner.cache.changed_bytes;
                 let direct = owner.stats.direct_pixels;
                 let cover = Cover::new(Path::PrimaryCpu, Some(&win), true, false, client, client);
-                let culled = !cover.visible(&mut Default::default(), client, bounds);
+                let culled = !cover.visible(client, bounds);
                 marks[1] = now(env)?;
                 if !omit && !culled {
                     owner

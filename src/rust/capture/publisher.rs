@@ -14,9 +14,6 @@ use r4os_sdk::{App, abi as a};
 #[derive(Default)]
 pub struct Publisher {
     pub consumers: u32,
-    pub published: u64,
-    pub skipped: u64,
-    pub errors: u64,
     pub cursor_damage: Dirty,
     pub suppressed: bool,
 }
@@ -167,14 +164,8 @@ impl Publisher {
         code
     }
     fn result(&mut self, code: i32) {
-        if code >= 0 {
-            self.published = self.published.saturating_add(1);
+        if code >= 0 || code == a::remote_frame_error_unavailable {
             self.cursor_damage = Dirty::default();
-        } else if code == a::remote_frame_error_unavailable {
-            self.skipped = self.skipped.saturating_add(1);
-            self.cursor_damage = Dirty::default();
-        } else {
-            self.errors = self.errors.saturating_add(1);
         }
     }
     pub fn primary(

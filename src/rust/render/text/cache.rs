@@ -64,6 +64,7 @@ impl Default for Glyph {
         }
     }
 }
+#[cfg(test)]
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub layout_hits: u64,
@@ -77,6 +78,7 @@ pub struct Cache {
     layouts: Vec<LayoutEntry>,
     glyphs: Vec<Glyph>,
     revision: u32,
+    #[cfg(test)]
     stats: Stats,
 }
 fn mixed(font: u32, revision: u32) -> u32 {
@@ -98,9 +100,11 @@ impl Cache {
             layouts,
             glyphs,
             revision: 0,
+            #[cfg(test)]
             stats: Stats::default(),
         })
     }
+    #[cfg(test)]
     pub fn stats(&self) -> Stats {
         self.stats
     }
@@ -135,7 +139,10 @@ impl Cache {
         self.layouts.fill(LayoutEntry::default());
         self.glyphs.fill(Glyph::default());
         self.revision = 0;
-        self.stats = Stats::default();
+        #[cfg(test)]
+        {
+            self.stats = Stats::default();
+        }
     }
     pub fn observe_revision(&mut self, revision: u32) {
         let revision = revision.max(1);
@@ -149,7 +156,10 @@ impl Cache {
         self.layouts.fill(LayoutEntry::default());
         self.glyphs.fill(Glyph::default());
         self.revision = revision;
-        self.stats.invalidations = self.stats.invalidations.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.invalidations = self.stats.invalidations.wrapping_add(1);
+        }
     }
     fn font_revision(&mut self, source: &mut impl Fonts, font: u32) -> u32 {
         if font == abi::gui_font_builtin_id {
@@ -162,10 +172,16 @@ impl Cache {
     fn layout(&mut self, source: &mut impl Fonts, font: u32, revision: u32) -> Layout {
         let entry = &mut self.layouts[mixed(font, revision) as usize & (LAYOUTS - 1)];
         if entry.used && entry.font == font && entry.revision == revision {
-            self.stats.layout_hits = self.stats.layout_hits.wrapping_add(1);
+            #[cfg(test)]
+            {
+                self.stats.layout_hits = self.stats.layout_hits.wrapping_add(1);
+            }
             return entry.layout;
         }
-        self.stats.layout_misses = self.stats.layout_misses.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.layout_misses = self.stats.layout_misses.wrapping_add(1);
+        }
         let mut layout = Layout::default();
         if font != abi::gui_font_builtin_id && source.has_glyph_row() {
             let mut info = GuiFontInfo::default();
@@ -202,10 +218,16 @@ impl Cache {
         let entry = &mut self.glyphs[slot];
         if entry.used && entry.font == font && entry.revision == revision && entry.scalar == scalar
         {
-            self.stats.glyph_hits = self.stats.glyph_hits.wrapping_add(1);
+            #[cfg(test)]
+            {
+                self.stats.glyph_hits = self.stats.glyph_hits.wrapping_add(1);
+            }
             return entry;
         }
-        self.stats.glyph_misses = self.stats.glyph_misses.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.glyph_misses = self.stats.glyph_misses.wrapping_add(1);
+        }
         *entry = Glyph {
             used: true,
             font,
@@ -234,7 +256,10 @@ impl Cache {
                 }
             }
         }
-        self.stats.glyph_loads = self.stats.glyph_loads.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.glyph_loads = self.stats.glyph_loads.wrapping_add(1);
+        }
         entry
     }
     /// Paint consumes a glyph view immediately. It cannot retain the cache

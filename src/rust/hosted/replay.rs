@@ -15,7 +15,12 @@ use r4os_contract as a;
 
 #[derive(Default, Debug)]
 pub struct Stats {
+    /// At least one record selected for this exact clip, even if its own
+    /// command validation later skips it. Same work witness as old count!=0.
+    pub any: bool,
+    #[cfg(test)]
     pub commands: u64,
+    #[cfg(test)]
     pub resource_bytes: u64,
 }
 pub trait Shapes {
@@ -90,7 +95,11 @@ pub fn replay(
     let mut stats = Stats::default();
     for index in selection {
         let command = &frame.commands[index];
-        stats.commands = stats.commands.wrapping_add(1);
+        stats.any = true;
+        #[cfg(test)]
+        {
+            stats.commands = stats.commands.wrapping_add(1);
+        }
         if command.version != a::gui_frame_command_version
             || command.size != a::gui_frame_command_size
         {
@@ -101,7 +110,10 @@ pub fn replay(
         {
             continue;
         }
-        stats.resource_bytes = stats.resource_bytes.saturating_add(command.resource_bytes);
+        #[cfg(test)]
+        {
+            stats.resource_bytes = stats.resource_bytes.saturating_add(command.resource_bytes);
+        }
         match command.kind {
             a::gui_frame_command_kind_clear
                 if command.resource_bytes == 0

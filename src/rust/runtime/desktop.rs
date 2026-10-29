@@ -955,7 +955,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     &mut self.windows,
                     &mut scene,
                     &regions[..count],
-                    self.input.event.view().tick,
+                    self.input.last_event_tick,
                 )
             }
             .map_err(|_| "software frame")?;
@@ -1301,20 +1301,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
     fn key(
         &mut self,
         value: u32,
-        flags: u8,
         env: &Environment<'a>,
         session: &mut Session<'_, '_>,
         host: &mut Host<'_>,
         programs: &Programs<'_>,
         time: Time,
     ) {
-        self.input.event.begin(
-            self.input.next_event,
-            input::event::Kind::Keyboard,
-            time.tick,
-        );
-        self.input.next_event = self.input.next_event.wrapping_add(1);
-        self.input.event.set_key(value, flags);
+        self.input.last_event_tick = time.tick;
         if value == key::R4SdkGuiKey_ctrl_c as u32
             && !self.shell.blocked()
             && self.hosted.active_console().is_some()
@@ -1341,7 +1334,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.hosted
                     .console_key(env.app, session, value, &mut self.dirty);
             }
-            self.input.event.consume();
             return;
         }
         self.shell_damage();
@@ -1352,7 +1344,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         ) {
             self.action(action, env, session, host, programs, time);
             self.shell_damage();
-            self.input.event.consume();
             return;
         }
         if !self.shell.blocked()
@@ -1362,7 +1353,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     .console_key(env.app, session, value, &mut self.dirty)
                 || self.hosted.gui_key(env.app, session, value, time.tick))
         {
-            self.input.event.consume();
             return;
         }
         let action = match value as i32 {
@@ -1403,7 +1393,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.input.hover = input::event::Target::None;
         self.input.down_target = input::event::Target::None;
         self.input.double_click = false;
-        self.input.repeat_armed = false;
         self.input.tray_hover = Default::default();
         self.input.tray_pressed = Default::default();
         self.input.right_tray = Default::default();
@@ -1522,9 +1511,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 }
                 match sample {
                     Sample::Activity => {}
-                    Sample::Key { key, modifiers } => {
-                        self.key(key, modifiers, env, session, host, programs, time)
-                    }
+                    Sample::Key { key } => self.key(key, env, session, host, programs, time),
                     Sample::Physical(value) => {
                         if value.kind == a::physical_key_kind_down
                             && value.key == 0x46
@@ -1546,11 +1533,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
                                 }
                             }
                             self.bar();
-                        } else if !self.shell.blocked()
-                            && self.hosted.gui_physical(env.app, session, value)
-                        {
-                            self.input.stats.physical_forwarded =
-                                self.input.stats.physical_forwarded.wrapping_add(1);
+                        } else if !self.shell.blocked() {
+                            self.hosted.gui_physical(env.app, session, value);
                         }
                     }
                     Sample::Mouse {
@@ -1576,21 +1560,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             } else {
                                 self.input.physical_buttons = value.buttons;
                             }
-                            self.input.event.begin(
-                                self.input.next_event,
-                                input::event::Kind::None,
-                                time.tick,
-                            );
-                            self.input.next_event = self.input.next_event.wrapping_add(1);
-                            self.input
-                                .event
-                                .set_target(self.hosted.model.windows.keyboard_focus());
-                            self.input.event.set_pointer(
-                                self.input.cursor.x,
-                                self.input.cursor.y,
-                                0,
-                                1,
-                            );
+                            self.input.last_event_tick = time.tick;
                             if was_relative != self.input.pointer_capture.relative() {
                                 self.restore_capture_cursor();
                                 self.full();
@@ -1613,25 +1583,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             }
                             continue;
                         }
-                        let previous = if remote {
-                            self.input.remote_buttons
-                        } else {
-                            self.input.physical_buttons
-                        };
-                        let down = value.buttons & !previous;
-                        let up = previous & !value.buttons;
-                        self.input.event.begin(
-                            self.input.next_event,
-                            if down != 0 {
-                                input::event::Kind::MouseDown
-                            } else if up != 0 {
-                                input::event::Kind::MouseUp
-                            } else {
-                                input::event::Kind::None
-                            },
-                            time.tick,
-                        );
-                        self.input.next_event = self.input.next_event.wrapping_add(1);
+                        self.input.last_event_tick = time.tick;
                         let before = self.input.cursor;
                         let captured = self.hosted.model.windows.pointer_window();
                         let scene = views::scene(
@@ -1648,7 +1600,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             self.blink,
                         );
                         let target = input::hit::target(&scene, value.x, value.y);
-                        self.input.event.set_target(target);
                         let identity = self
                             .tray
                             .registry()
@@ -1672,12 +1623,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             self.height,
                             time.tick,
                             time.hz,
-                        );
-                        self.input.event.set_pointer(
-                            value.x,
-                            value.y,
-                            down | up,
-                            if self.input.double_click { 2 } else { 1 },
                         );
                         if before != self.input.cursor {
                             self.cursor_queued_tick = time.tick;

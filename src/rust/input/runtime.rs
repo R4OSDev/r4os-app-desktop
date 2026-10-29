@@ -1,7 +1,7 @@
 //! Input sources keep independent sequences and button histories. A stale
 //! physical mouse snapshot cannot overwrite a newer remote pointer position.
 use super::{
-    event::{self, Target},
+    event::Target,
     keys,
     native::Input,
     physical::{self, MouseActivity},
@@ -20,7 +20,6 @@ pub enum Sample {
     Activity,
     Key {
         key: u32,
-        modifiers: u8,
     },
     Physical(a::PhysicalKeyEvent),
     Mouse {
@@ -37,12 +36,6 @@ pub enum Poll {
 }
 #[derive(Default)]
 pub struct Stats {
-    pub remote_events: u32,
-    pub remote_keys: u32,
-    pub remote_mouse: u32,
-    pub physical_events: u64,
-    pub physical_forwarded: u64,
-    pub physical_invalid: u64,
     pub cursor_moves: u64,
 }
 #[derive(Default)]
@@ -55,28 +48,15 @@ pub struct State {
     pub tray_pressed: Identity,
     pub right_tray: Identity,
     pub physical_sequence: u64,
-    pub remote_sequence: u32,
     pub physical_buttons: u8,
     pub remote_buttons: u8,
     pub last_input_ns: u64,
     pub down_tick: u64,
     pub down_target: Target,
     pub double_click: bool,
-    pub repeat_tick: u64,
-    pub repeat_armed: bool,
-    pub event: event::Event,
+    pub last_event_tick: u64,
     pub stats: Stats,
     mouse: MouseActivity,
-    pub next_event: u32,
-}
-pub fn modifiers(key: u32) -> u8 {
-    match key {
-        0x83 => event::CTRL,
-        0x84 => event::SHIFT,
-        0x85 | 0x86 => event::ALT,
-        0x87 => event::ALT | event::SHIFT,
-        _ => 0,
-    }
 }
 fn empty_mouse() -> a::Mouse {
     a::Mouse {
@@ -100,54 +80,32 @@ impl State {
         if value.magic != a::remote_input_magic || value.version != a::remote_input_version {
             return Poll::Ignored;
         }
-        self.stats.remote_events = self.stats.remote_events.wrapping_add(1);
-        self.remote_sequence = value.sequence;
         match value.kind {
             a::remote_input_kind_key_down => {
-                self.stats.remote_keys = self.stats.remote_keys.wrapping_add(1);
                 if !keys::is_app_key(value.key) && value.key != key::R4SdkGuiKey_start_menu as u32 {
                     return Poll::Event(Sample::Activity);
                 }
-                let mut flags = modifiers(value.key);
-                if value.modifiers & a::remote_input_modifier_ctrl != 0 {
-                    flags |= event::CTRL;
-                }
-                if value.modifiers & a::remote_input_modifier_shift != 0 {
-                    flags |= event::SHIFT;
-                }
-                if value.modifiers & a::remote_input_modifier_alt != 0 {
-                    flags |= event::ALT;
-                }
-                Poll::Event(Sample::Key {
-                    key: value.key,
-                    modifiers: flags,
-                })
+                Poll::Event(Sample::Key { key: value.key })
             }
-            a::remote_input_kind_key_up => {
-                self.stats.remote_keys = self.stats.remote_keys.wrapping_add(1);
-                Poll::Event(Sample::Activity)
-            }
+            a::remote_input_kind_key_up => Poll::Event(Sample::Activity),
             a::remote_input_kind_mouse_move
             | a::remote_input_kind_mouse_buttons
-            | a::remote_input_kind_mouse_wheel => {
-                self.stats.remote_mouse = self.stats.remote_mouse.wrapping_add(1);
-                Poll::Event(Sample::Mouse {
-                    remote: true,
-                    motion: None,
-                    remote_kind: value.kind,
-                    value: a::Mouse {
-                        x: value.x,
-                        y: value.y,
-                        dx: value.x.saturating_sub(self.cursor.x),
-                        dy: value.y.saturating_sub(self.cursor.y),
-                        wheel: value.wheel,
-                        buttons: value.buttons as u8,
-                        present: 1,
-                        reserved: 0,
-                        packets: u64::from(value.sequence),
-                    },
-                })
-            }
+            | a::remote_input_kind_mouse_wheel => Poll::Event(Sample::Mouse {
+                remote: true,
+                motion: None,
+                remote_kind: value.kind,
+                value: a::Mouse {
+                    x: value.x,
+                    y: value.y,
+                    dx: value.x.saturating_sub(self.cursor.x),
+                    dy: value.y.saturating_sub(self.cursor.y),
+                    wheel: value.wheel,
+                    buttons: value.buttons as u8,
+                    present: 1,
+                    reserved: 0,
+                    packets: u64::from(value.sequence),
+                },
+            }),
             _ => Poll::Event(Sample::Activity),
         }
     }
@@ -156,9 +114,7 @@ impl State {
         if Input::new(session).physical(&mut input) <= 0 {
             return Poll::Empty;
         }
-        self.stats.physical_events = self.stats.physical_events.wrapping_add(1);
         if !physical::valid(input, self.physical_sequence) {
-            self.stats.physical_invalid = self.stats.physical_invalid.wrapping_add(1);
             return Poll::Ignored;
         }
         self.physical_sequence = input.sequence;
@@ -166,10 +122,7 @@ impl State {
     }
     pub fn keyboard(&mut self, session: &mut Session<'_, '_>) -> Poll {
         match Input::new(session).codepoint() {
-            Ok(value) if value != 0 => Poll::Event(Sample::Key {
-                key: value,
-                modifiers: modifiers(value),
-            }),
+            Ok(value) if value != 0 => Poll::Event(Sample::Key { key: value }),
             _ => Poll::Empty,
         }
     }

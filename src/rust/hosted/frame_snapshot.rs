@@ -229,6 +229,7 @@ impl Buffer {
         true
     }
 }
+#[cfg(test)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Stats {
     pub deltas: u64,
@@ -246,6 +247,7 @@ pub struct Cache {
     staging: Buffer,
     pub pending: bool,
     pub out_of_memory: bool,
+    #[cfg(test)]
     pub stats: Stats,
     _local: PhantomData<*mut ()>,
 }
@@ -257,6 +259,7 @@ impl Default for Cache {
             staging: Buffer::default(),
             pending: false,
             out_of_memory: false,
+            #[cfg(test)]
             stats: Stats::default(),
             _local: PhantomData,
         }
@@ -344,7 +347,10 @@ impl Cache {
             if self.replace(reader, info, generation, limit) {
                 return Refresh::Updated;
             }
-            self.stats.replacement_fallbacks = self.stats.replacement_fallbacks.wrapping_add(1);
+            #[cfg(test)]
+            {
+                self.stats.replacement_fallbacks = self.stats.replacement_fallbacks.wrapping_add(1);
+            }
         } else if valid
             && self.active.valid
             && generation.flags & a::gui_frame_generation_flag_delta != 0
@@ -353,11 +359,17 @@ impl Cache {
             if self.append(reader, info, generation, limit) {
                 return Refresh::Updated;
             }
-            self.stats.delta_fallbacks = self.stats.delta_fallbacks.wrapping_add(1);
+            #[cfg(test)]
+            {
+                self.stats.delta_fallbacks = self.stats.delta_fallbacks.wrapping_add(1);
+            }
         } else if self.active.valid
             && info.committed_generation != self.active.info.committed_generation
         {
-            self.stats.delta_fallbacks = self.stats.delta_fallbacks.wrapping_add(1);
+            #[cfg(test)]
+            {
+                self.stats.delta_fallbacks = self.stats.delta_fallbacks.wrapping_add(1);
+            }
         }
         let (Ok(commands), Ok(resources)) = (
             usize::try_from(info.committed_command_count),
@@ -404,7 +416,10 @@ impl Cache {
         self.staging.damage.clear();
         self.staging.update_index(0);
         self.publish(reader);
-        self.stats.full = self.stats.full.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.full = self.stats.full.wrapping_add(1);
+        }
         Refresh::Updated
     }
     fn publish(&mut self, reader: &mut impl Reader) {
@@ -486,7 +501,10 @@ impl Cache {
         }
         self.staging.update_index(0);
         self.publish(reader);
-        self.stats.replacements = self.stats.replacements.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stats.replacements = self.stats.replacements.wrapping_add(1);
+        }
         true
     }
     fn append(
@@ -575,9 +593,13 @@ impl Cache {
         self.active.valid = true;
         self.pending = false;
         self.out_of_memory = false;
-        self.stats.deltas = self.stats.deltas.wrapping_add(1);
-        self.stats.appended_commands = self.stats.appended_commands.wrapping_add(commands as u64);
-        self.stats.appended_bytes = self.stats.appended_bytes.wrapping_add(resources as u64);
+        #[cfg(test)]
+        {
+            self.stats.deltas = self.stats.deltas.wrapping_add(1);
+            self.stats.appended_commands =
+                self.stats.appended_commands.wrapping_add(commands as u64);
+            self.stats.appended_bytes = self.stats.appended_bytes.wrapping_add(resources as u64);
+        }
         true
     }
 }

@@ -24,15 +24,12 @@ use r4os_sdk::{App, StartupInfo, graphics::Graphics, gui::Session, resources::Re
 pub struct Stats {
     pub redraws: u64,
     pub full: u64,
-    pub mixed: u64,
     pub cursor: u64,
     pub last_damage: u8,
-    pub pixels: u64,
     pub presents: u64,
     pub present_errors: u64,
     pub present_lost_frames: u64,
     present_generation_last: u64,
-    pub copied_bytes: u64,
     pub last_composition_ns: u64,
     pub last_present_ns: u64,
 }
@@ -181,14 +178,7 @@ impl Frames {
         self.stats.redraws = self.stats.redraws.saturating_add(1);
         if regions.len() == 1 && regions[0] == Rect::new(0, 0, self.width, self.height) {
             self.stats.full = self.stats.full.saturating_add(1);
-        } else {
-            self.stats.mixed = self.stats.mixed.saturating_add(1);
         }
-        let area = regions
-            .iter()
-            .map(|r| r.w.max(0) as u64 * r.h.max(0) as u64)
-            .sum::<u64>();
-        self.stats.pixels = self.stats.pixels.saturating_add(area);
         if presentation.presented {
             self.stats.presents = self.stats.presents.saturating_add(1);
         } else {
@@ -205,9 +195,6 @@ impl Frames {
                 self.stats.present_lost_frames = self.stats.present_lost_frames.wrapping_add(1);
             }
             self.stats.present_generation_last = generation;
-        }
-        if presentation.copied {
-            self.stats.copied_bytes = self.stats.copied_bytes.saturating_add(area * 4);
         }
         Ok(Frame {
             completion,

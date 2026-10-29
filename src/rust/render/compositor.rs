@@ -5,7 +5,7 @@
 #[path = "../../../Tests/RustNative/scene_pixels.rs"]
 mod tests;
 use super::{
-    coverage::{self, Cover, Path},
+    coverage::{Cover, Path},
     cursor,
     geometry::{MAX_DAMAGE_REGIONS, Rect, work_area},
     painter::Painter,
@@ -18,10 +18,7 @@ use super::{
 };
 use crate::{
     hosted::{
-        client::Clients,
-        console_snapshot::Snapshot,
-        replay::{self, Shapes},
-        text_surface::Surface,
+        client::Clients, console_snapshot::Snapshot, replay::Shapes, text_surface::Surface,
         window_view,
     },
     input::event::Target,
@@ -123,12 +120,6 @@ pub struct Scene<'a> {
 }
 #[derive(Default)]
 pub struct Stats {
-    pub layers: coverage::Stats,
-    pub windows_visited: u32,
-    pub windows_culled: u32,
-    pub items_visited: u32,
-    pub items_culled: u32,
-    pub gui: replay::Stats,
     pub rendered_windows: u8,
 }
 pub struct Completed {
@@ -214,15 +205,6 @@ fn layer_with_background<F: Fonts>(
         capture.paint(key, bounds, damage, paint)
     }
     .map(|_| ())
-}
-fn visible(stats: &mut Stats, damage: Rect, bounds: Rect) -> bool {
-    stats.layers.layers_visited = stats.layers.layers_visited.wrapping_add(1);
-    if damage.intersects(bounds) {
-        true
-    } else {
-        stats.layers.layers_culled = stats.layers.layers_culled.wrapping_add(1);
-        false
-    }
 }
 fn contains(outer: Rect, inner: Rect) -> bool {
     outer.x <= inner.x
@@ -404,7 +386,7 @@ pub(crate) unsafe fn draw(
                 d,
                 d,
             );
-            if cover.visible(&mut stats.layers, d, desktop) {
+            if cover.visible(d, desktop) {
                 layer(capture, 1, desktop, d, cache, fonts, shell.font, |ui| {
                     ui.fill(desktop, shell.config.background)
                 })?;
@@ -416,7 +398,7 @@ pub(crate) unsafe fn draw(
                 info.len() as i32 * 8,
                 8,
             );
-            if cover.visible(&mut stats.layers, d, r) {
+            if cover.visible(d, r) {
                 layer_with_background(
                     capture,
                     2,
@@ -431,7 +413,7 @@ pub(crate) unsafe fn draw(
             }
             if let Some(wall) = shell.wallpaper {
                 let r = wall.bounds(scene.width, scene.height);
-                if cover.visible(&mut stats.layers, d, r) {
+                if cover.visible(d, r) {
                     layer_with_background(
                         capture,
                         3,
@@ -452,7 +434,7 @@ pub(crate) unsafe fn draw(
         let work = work_area(scene.width, scene.height, s::TASKBAR_H);
         if let Some(index) = input.drag {
             for &d in regions {
-                if visible(&mut stats, d, work) {
+                if d.intersects(work) {
                     layer(capture, 4, work, d, cache, fonts, shell.font, |ui| {
                         desktop_view::grid(ui, scene.width, scene.height, shell.items, index)
                     })?;
@@ -462,9 +444,7 @@ pub(crate) unsafe fn draw(
         for (i, item) in shell.items.entries().iter().enumerate() {
             let bounds = desktop_view::item_rect(item);
             for &d in regions {
-                stats.items_visited = stats.items_visited.wrapping_add(1);
                 if !d.intersects(work) || !d.intersects(bounds) {
-                    stats.items_culled = stats.items_culled.wrapping_add(1);
                     continue;
                 }
                 layer_with_background(
@@ -501,13 +481,11 @@ pub(crate) unsafe fn draw(
             let mut external_regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
             let mut n = 0;
             for &d in regions {
-                stats.windows_visited = stats.windows_visited.wrapping_add(1);
                 if !window.visible()
                     || window.minimized()
                     || !d.intersects(bounds)
                     || covered_by_higher(windows, i, active, d)
                 {
-                    stats.windows_culled = stats.windows_culled.wrapping_add(1);
                     continue;
                 }
                 layer(
@@ -541,10 +519,7 @@ pub(crate) unsafe fn draw(
                                 input.pressed,
                             )
                         }?;
-                        stats.gui.commands = stats.gui.commands.wrapping_add(replay.commands);
-                        stats.gui.resource_bytes =
-                            stats.gui.resource_bytes.wrapping_add(replay.resource_bytes);
-                        if replay.commands != 0 {
+                        if replay.any {
                             stats.rendered_windows |= 1u8 << i;
                         }
                         Ok(())
@@ -567,7 +542,7 @@ pub(crate) unsafe fn draw(
         let taskbar = Rect::new(0, scene.height - s::TASKBAR_H, scene.width, s::TASKBAR_H);
         if !fullscreen_covers(windows, active, taskbar) {
             for &d in regions {
-                if visible(&mut stats, d, taskbar) {
+                if d.intersects(taskbar) {
                     layer(capture, 5, taskbar, d, cache, fonts, shell.font, |ui| {
                         taskbar_view::paint(
                             ui,
@@ -603,7 +578,7 @@ pub(crate) unsafe fn draw(
                 .tooltip_rect(input.tray_hover, scene.width, scene.height, s::TASKBAR_H)
         {
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(capture, 6, r, d, cache, fonts, shell.font, |ui| {
                         status_view::tray_tooltip(
                             ui,
@@ -623,7 +598,7 @@ pub(crate) unsafe fn draw(
                 shell.config.taskbar_clock,
             );
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(capture, 7, r, d, cache, fonts, shell.font, |ui| {
                         status_view::volume_tooltip(
                             ui,
@@ -639,7 +614,7 @@ pub(crate) unsafe fn draw(
         if shell.menu_view.open {
             let r = menu_bounds(scene);
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(capture, 8, r, d, cache, fonts, shell.font, |ui| {
                         menu_view::paint(
                             ui,
@@ -658,7 +633,7 @@ pub(crate) unsafe fn draw(
             if menu.index < windows.len() {
                 let r = Rect::new(menu.x, menu.y, 150, 108);
                 for &d in regions {
-                    if visible(&mut stats, d, r) {
+                    if d.intersects(r) {
                         layer(capture, 9, r, d, cache, fonts, shell.font, |ui| {
                             window_chrome::system_menu(
                                 ui,
@@ -677,7 +652,7 @@ pub(crate) unsafe fn draw(
         if input.time_menu {
             let r = status_view::time_menu_rect(scene.width, scene.height);
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(capture, 10, r, d, cache, fonts, shell.font, |ui| {
                         status_view::time_menu(
                             ui,
@@ -697,7 +672,7 @@ pub(crate) unsafe fn draw(
                 shell.config.taskbar_clock,
             );
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(capture, 11, r, d, cache, fonts, shell.font, |ui| {
                         status_view::volume_popup(
                             ui,
@@ -714,7 +689,7 @@ pub(crate) unsafe fn draw(
         }
         if let Some(r) = overlay_bounds(scene) {
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer(
                         capture,
                         12,
@@ -776,7 +751,7 @@ pub(crate) unsafe fn draw(
                 cursor::HEIGHT as i32,
             );
             for &d in regions {
-                if visible(&mut stats, d, r) {
+                if d.intersects(r) {
                     layer_with_background(
                         capture,
                         13,
