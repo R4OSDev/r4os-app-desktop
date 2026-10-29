@@ -3,6 +3,7 @@
 pub const SIZE: usize = 448;
 pub const EXCHANGE: u16 = 4739;
 pub const COMPLETE: u16 = 4740;
+pub const RECEIVED: u16 = 4741;
 pub const WAIT_FRAME: u32 = 1;
 pub const TERMINAL: u32 = 2;
 pub const RETAIN_EVIDENCE: u32 = 4;

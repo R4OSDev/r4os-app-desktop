@@ -277,15 +277,34 @@ impl<'a> Host<'a> {
     pub fn launch_mailbox(&self) -> Option<launch::Message> {
         self.launch
     }
-    pub fn launch_complete(&mut self, value: launch::Message) -> Result<()> {
-        if !self.claimed || !self.launch.is_some_and(|work| work.same_key(value)) {
+    pub fn take_launch_mailbox(&mut self) -> Option<launch::Message> {
+        let work = self.launch_mailbox();
+        // Each copied exchange reply is offered once. Retain its broker epoch
+        // for independent completions even when no new exchange was needed.
+        if let Some(copied) = &mut self.launch {
+            copied.request = launch::Identity::default();
+        }
+        work
+    }
+    fn launch_reply(&mut self, operation: u16, value: launch::Message) -> Result<()> {
+        if !self.claimed
+            || !self.launch.is_some_and(|work| work.broker == value.broker)
+            || value.desktop.instance != self.owner.instance_id
+            || value.desktop.generation != self.owner.generation
+        {
             return Err(Error::InvalidProvider);
         }
         let mut bytes = [0; launch::SIZE];
         launch::encode(value, &mut bytes);
         self.request.clear();
         self.request.extend_from_slice(&bytes);
-        self.call(launch::COMPLETE, 0)
+        self.call(operation, 0)
+    }
+    pub fn launch_complete(&mut self, value: launch::Message) -> Result<()> {
+        self.launch_reply(launch::COMPLETE, value)
+    }
+    pub fn launch_received(&mut self, value: launch::Message) -> Result<()> {
+        self.launch_reply(launch::RECEIVED, value)
     }
     pub fn diagnostic_work(&self) -> Option<diagnostic::Work> {
         self.work
@@ -509,7 +528,13 @@ impl<'a> Host<'a> {
             // timeout is not a provider-generation or host-claim receipt.
             // Keep pending work/launch identities; never repeat their action.
             let timeout = kind == "timeout"
-                && (operation == launch::EXCHANGE || operation == diagnostic::COMPLETE_OPERATION);
+                && matches!(
+                    operation,
+                    launch::EXCHANGE
+                        | launch::RECEIVED
+                        | launch::COMPLETE
+                        | diagnostic::COMPLETE_OPERATION
+                );
             let rejected_completion = operation == diagnostic::COMPLETE_OPERATION
                 && kind == "remote-failure"
                 && matches!(

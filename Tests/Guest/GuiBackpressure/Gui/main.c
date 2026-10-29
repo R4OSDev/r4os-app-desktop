@@ -14,15 +14,21 @@ static int fill(R4App *a,int32_t id,uint32_t *count){
 }
 int32_t r4_app_main(R4App *a){
  uint64_t arg_length=0;const uint8_t *args=r4_app_args(a,&arg_length);char mode=arg_length?(char)args[0]:'D';
- if(mode!='D'&&mode!='O'&&mode!='F'&&mode!='C'&&mode!='B'&&mode!='K'&&mode!='R'&&mode!='P')return 2;
+ if(mode!='D'&&mode!='O'&&mode!='F'&&mode!='C'&&mode!='B'&&mode!='K'&&mode!='R'&&mode!='P'&&mode!='S'&&mode!='T')return 2;
  R4Window window;if(!r4_window_open(a,0,0,&window)||r4_window_set_title(&window,"GUI backpressure32")<0)return 3;
+ /* Independent launch probe: keep both GUI content AND console output absent
+  * until the first frame. WAIT_FRAME accepts either real content source. */
+ uint64_t started=r4_app_ticks(a);
+ if(mode=='S')r4sys_sleep_ticks(&a->system,(uint64_t)r4_gui_monotonic_hz(a)*3);
  R4PaintContext paint;if(!r4_window_begin_paint(&window,&paint))return 4;
  R4Canvas canvas=r4_paint_canvas(&paint);
  if(r4_canvas_clear(canvas,0x233748)<0||r4_canvas_text(canvas,12,15,"Native queue retention / explicit cancel",0xffffff,0x233748)<0||r4_paint_present(&paint)<0)return 5;
+ uint64_t first=r4_app_ticks(a);
  R4GuiPointerWindowIdentity identity={0};if(r4_window_pointer_identity(&window,&identity)<0)return 6;
  text(a,"Q32 armed mode=");(void)r4sys_write(&a->system,(const uint8_t *)&mode,1);
  field(a," owner=",identity.owner.instance_id);field(a," generation=",identity.owner.generation);
  field(a," window=",(uint32_t)identity.window_id);field(a," epoch=",identity.epoch);text(a,"\n");
+ if(mode=='S'||mode=='T'){field(a,"Q34 start_tick=",started);field(a," first_tick=",first);text(a,"\n");}
  /* Exact host admission is Desktop-only. Public C must retain native errors
   * and leave output untouched, including 64-bit owner/window identity. */
  R4GuiHostInputRequest request={.window=identity,.operation=R4OS_GUI_HOST_INPUT_OPERATION_QUERY};request.window.epoch=0;
@@ -41,7 +47,7 @@ int32_t r4_app_main(R4App *a){
   if(m.kind==R4_MESSAGE_MOUSE){
    if(m.value.mouse.action==R4_MOUSE_DOWN){++down;mouse_held=1;
     if(mode=='P'&&!capture_active&&!full){R4GuiPointerCaptureHandle token={0};if(r4_window_pointer_capture(&window,&identity,R4OS_GUI_POINTER_MODE_DRAG,&token)<0)return 8;}
-    else if(!full&&mode!='R'){
+    else if(!full&&mode!='R'&&mode!='S'&&mode!='T'){
      if(!fill(a,identity.window_id,&filled))return 9;full=1;
      text(a,"Q32 full");field(a," filled=",filled);text(a,"\n");
      r4sys_sleep_ticks(&a->system,(uint64_t)r4_gui_monotonic_hz(a)*2);text(a,"Q32 resumed\n");
@@ -53,7 +59,7 @@ int32_t r4_app_main(R4App *a){
    if(key=='a'||key=='A')++keys;
    if(key==27)++esc;
    if(mode=='R'&&key!='z')++stale;
-   if((mode=='O'||mode=='R')&&key=='z')done=1;
+   if((mode=='O'||mode=='R'||mode=='S'||mode=='T')&&key=='z')done=1;
   }else if(m.kind==R4_MESSAGE_INPUT_RESET){
    ++resets;reason=m.value.input_reset.reason;mouse_held=0;for(uint32_t i=0;i<512;++i)held[i]=0;
    if(mode=='B'&&reason==R4OS_GUI_INPUT_RESET_REASON_DESKTOP_CHANGED)done=1;

@@ -32,6 +32,9 @@ struct Peer {
     next_error: Option<(u16, i32, i32)>,
     work: Option<diagnostic::Work>,
     launch: Option<launch::Message>,
+    launch_replies: Vec<(u16, launch::Message)>,
+    lose_launch_reply: bool,
+    launch_mailboxes: u32,
 }
 static CASE: Mutex<()> = Mutex::new(());
 static STATE: Mutex<Peer> = Mutex::new(Peer {
@@ -48,6 +51,9 @@ static STATE: Mutex<Peer> = Mutex::new(Peer {
     next_error: None,
     work: None,
     launch: None,
+    launch_replies: Vec::new(),
+    lose_launch_reply: false,
+    launch_mailboxes: 0,
 });
 unsafe extern "C" fn open(_: *const u8, out: *mut a::ServiceInfo) -> i32 {
     let mut peer = STATE.lock().unwrap();
@@ -112,6 +118,7 @@ unsafe extern "C" fn call(
     let out = unsafe { core::slice::from_raw_parts_mut(response, capacity as usize) };
     match op {
         launch::EXCHANGE => {
+            STATE.lock().unwrap().launch_mailboxes += 1;
             let size = a::TrayDesktopExchange::SIZE;
             let mut value: a::TrayDesktopExchange = wire::decode(source).unwrap();
             value.desktop_epoch = value.desktop_owner.generation;
@@ -135,6 +142,20 @@ unsafe extern "C" fn call(
                     .try_into()
                     .unwrap(),
             );
+        }
+        launch::RECEIVED | launch::COMPLETE => {
+            let value = launch::decode(source).unwrap();
+            let mut peer = STATE.lock().unwrap();
+            peer.launch_replies.push((op, value));
+            if peer.lose_launch_reply {
+                peer.lose_launch_reply = false;
+                unsafe {
+                    header.write(a::ServiceMessageHeader {
+                        ..Default::default()
+                    })
+                };
+                return a::service_api_result_timeout;
+            }
         }
         diagnostic::COMPLETE_OPERATION => {
             let mut peer = STATE.lock().unwrap();
@@ -216,6 +237,90 @@ fn copied_work() -> diagnostic::Work {
         },
     }
 }
+#[test]
+fn launch_delivery_is_consumed_once_and_independent_replies_keep_their_exact_keys() {
+    with(|services, resources, owner| {
+        *STATE.lock().unwrap() = Peer::default();
+        let mut host = Host::new(services, resources, owner).unwrap();
+        host.initialize().unwrap();
+        let a = launch::Message {
+            broker: launch::Identity {
+                instance: 31,
+                generation: 9,
+            },
+            request: launch::Identity {
+                instance: 4,
+                generation: 8,
+            },
+            desktop: launch::Identity {
+                instance: owner.instance_id,
+                generation: owner.generation,
+            },
+            phase: launch::STARTING,
+            ..Default::default()
+        };
+        STATE.lock().unwrap().launch = Some(a);
+        let request = a::TrayDesktopExchange {
+            desktop_owner: owner,
+            ..Default::default()
+        };
+        host.tray(&request).unwrap();
+        assert_eq!(host.take_launch_mailbox(), Some(a));
+        // No fresh exchange: a completed receipt must never respawn from this copy.
+        assert!(!host.take_launch_mailbox().unwrap().request.valid());
+        assert_eq!(STATE.lock().unwrap().launch_mailboxes, 1);
+        host.launch_received(a).unwrap();
+        let mut b = a;
+        b.request.instance = 5;
+        STATE.lock().unwrap().launch = Some(b);
+        host.tray(&request).unwrap();
+        assert_eq!(host.take_launch_mailbox(), Some(b));
+        let mut result = a;
+        result.phase = launch::WINDOW;
+        result.process = launch::Identity {
+            instance: 90,
+            generation: 99,
+        };
+        result.window = 2;
+        // A has advanced while the newest copied exchange contains B.
+        STATE.lock().unwrap().lose_launch_reply = true;
+        assert!(host.launch_complete(result).is_err());
+        assert!(host.claimed());
+        host.launch_complete(result).unwrap();
+        {
+            let peer = STATE.lock().unwrap();
+            assert_eq!(
+                peer.launch_replies.as_slice(),
+                &[
+                    (launch::RECEIVED, a),
+                    (launch::COMPLETE, result),
+                    (launch::COMPLETE, result)
+                ]
+            );
+        }
+        let calls = STATE.lock().unwrap().launch_replies.len();
+        let mut foreign = result;
+        foreign.broker.generation += 1;
+        assert!(host.launch_complete(foreign).is_err());
+        foreign = result;
+        foreign.desktop.generation += 1;
+        assert!(host.launch_complete(foreign).is_err());
+        assert_eq!(STATE.lock().unwrap().launch_replies.len(), calls);
+        // An empty later exchange preserves the current epoch for A's final result.
+        STATE.lock().unwrap().launch = None;
+        host.tray(&request).unwrap();
+        assert!(!host.take_launch_mailbox().unwrap().request.valid());
+        result.phase = launch::CONTENT;
+        result.content = 3;
+        host.launch_complete(result).unwrap();
+        assert_eq!(
+            STATE.lock().unwrap().launch_replies.last(),
+            Some(&(launch::COMPLETE, result))
+        );
+        assert_eq!(STATE.lock().unwrap().launch_mailboxes, 3);
+    });
+}
+
 #[test]
 fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
     with(|services, resources, owner| {
