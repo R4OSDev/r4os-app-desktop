@@ -956,14 +956,18 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     &mut scene,
                     &regions[..count],
                     self.input.last_event_tick,
+                    trace_input.is_some(),
                 )
             }
             .map_err(|_| "software frame")?;
             self.cursor.presented(result.presentation.presented);
             if result.presentation.presented && result.presentation.copied {
-                if let Some((frame, client, generation, _)) = trace_input.filter(|(_, _, _, i)| {
-                    result.completion.cull.rendered_windows & (1u8 << i) != 0
-                }) {
+                if let (Some(timing), Some((frame, client, generation, _))) = (
+                    result.timing,
+                    trace_input.filter(|(_, _, _, i)| {
+                        result.completion.cull.rendered_windows & (1u8 << i) != 0
+                    }),
+                ) {
                     let ticks = if self.cursor_queued_tick != 0 {
                         r4os_sdk::time::Clock::new(env.app)
                             .ticks()
@@ -978,12 +982,12 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             client,
                             OutputSample {
                                 generation,
-                                completed_ns: result.completed_ns,
-                                frame_wall_ns: result
+                                completed_ns: timing.completed_ns,
+                                frame_wall_ns: timing
                                     .completed_ns
-                                    .saturating_sub(result.started_ns),
-                                compose_wall_ns: self.frames.stats.last_composition_ns,
-                                present_wall_ns: self.frames.stats.last_present_ns,
+                                    .saturating_sub(timing.started_ns),
+                                compose_wall_ns: timing.composition_ns,
+                                present_wall_ns: timing.present_ns,
                                 damage_bounds: regions[..count]
                                     .iter()
                                     .copied()

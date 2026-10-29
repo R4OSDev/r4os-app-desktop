@@ -1,5 +1,8 @@
 //! Main-task frame scheduling. CPU pixels, painter caches and copied counters
 //! have one owner; output receipts and GUI buffer lifetimes stay external.
+#[cfg(test)]
+#[path = "../../../Tests/RustNative/frame_timing.rs"]
+mod tests;
 use super::{
     compositor::{self, Completed, Scene},
     coverage::Path,
@@ -30,15 +33,18 @@ pub struct Stats {
     pub present_errors: u64,
     pub present_lost_frames: u64,
     present_generation_last: u64,
-    pub last_composition_ns: u64,
-    pub last_present_ns: u64,
+}
+pub struct Timing {
+    pub started_ns: u64,
+    pub completed_ns: u64,
+    pub composition_ns: u64,
+    pub present_ns: u64,
 }
 pub struct Frame {
     pub completion: Completed,
     pub presentation: Presentation,
     pub generation: u64,
-    pub started_ns: u64,
-    pub completed_ns: u64,
+    pub timing: Option<Timing>,
 }
 pub struct Frames {
     pixels: Vec<u32>,
@@ -122,11 +128,14 @@ impl Frames {
         scene: &mut Scene<'_>,
         regions: &[Rect],
         input_tick: u64,
+        trace: bool,
     ) -> Result<Frame> {
         self.resize(scene.width, scene.height)?;
         if regions.is_empty() {
             return Err(Error::Invalid);
         }
+        // Icon cache expiry/backoff needs this functional time even without a
+        // trace. Only the two composition/present detail reads are optional.
         let start = crate::runtime::environment::precise(app).ok_or(Error::State)?;
         let mut canvas =
             CpuScene::new(&mut self.pixels, self.width, self.height).ok_or(Error::State)?;
@@ -161,8 +170,11 @@ impl Frames {
                 return Err(e);
             }
         };
-        let composed = crate::runtime::environment::precise(app).ok_or(Error::State)?;
-        self.stats.last_composition_ns = composed.saturating_sub(start);
+        let composed = if trace {
+            Some(crate::runtime::environment::precise(app).ok_or(Error::State)?)
+        } else {
+            None
+        };
         self.generation = self.generation.wrapping_add(1).max(1);
         let display = Display(graphics);
         let bounds = regions
@@ -172,8 +184,17 @@ impl Frames {
             .ok_or(Error::Invalid)?;
         let _ = display.begin(bounds);
         let presentation = display.present(&canvas, regions, self.generation, input_tick);
-        let completed_ns = crate::runtime::environment::precise(app).ok_or(Error::State)?;
-        self.stats.last_present_ns = completed_ns.saturating_sub(composed);
+        let timing = if let Some(composed) = composed {
+            let completed = crate::runtime::environment::precise(app).ok_or(Error::State)?;
+            Some(Timing {
+                started_ns: start,
+                completed_ns: completed,
+                composition_ns: composed.saturating_sub(start),
+                present_ns: completed.saturating_sub(composed),
+            })
+        } else {
+            None
+        };
         self.current = true;
         self.stats.redraws = self.stats.redraws.saturating_add(1);
         if regions.len() == 1 && regions[0] == Rect::new(0, 0, self.width, self.height) {
@@ -200,8 +221,7 @@ impl Frames {
             completion,
             presentation,
             generation: self.generation,
-            started_ns: start,
-            completed_ns,
+            timing,
         })
     }
     /// # Safety
