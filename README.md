@@ -5,6 +5,11 @@ R4DESK is R4OS's independent desktop host, implemented in modular Rust with
 unchanged `/R4OS/SOFTWARE/DESKTOP/R4DESK.R4X` image target. Cargo owns the
 locked crate graph and features. There is one productive application entry.
 
+Version 0.1.197 records the rebuild with matched SDK 0.64.116/Contract
+0.64.60 tools and Libraries 0.64.39. Desktop implementation sources are
+unchanged; the current linked SDK objects change the artifact. Dependency
+qualification is recorded in the workspace Audio/README.txt, section 0.88.58.
+
 The main runtime coordinates concrete owners through short operations and
 borrowed views:
 
@@ -86,6 +91,12 @@ resolves all component, compiler and output paths relative to their owners.
 The manifest explicitly selects speed optimization for the frame workload;
 Rust overflow checks remain enabled. The selected matched Rust tools and necessary technical qualification remain
 explicit; no Studio project/version selection is stored here.
+
+Standalone callers select the complete Libraries source archive. Its Zig
+package filters omit some inputs required by the Rust helper builder. The
+C companion also needs the five pinned Mesa BLAKE3 files described by
+`R4ACO/ThirdParty/Sources.json`; materialize and verify these upstream inputs
+below the selected Libraries root before building.
 
 `./Build.sh rust-native-test` compares the current Rust owners against the
 retained independent original pixel, input, geometry, resource and failure
