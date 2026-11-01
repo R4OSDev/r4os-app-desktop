@@ -30,13 +30,13 @@ fn bytes(size: usize) -> Result<Box<[u8]>> {
 }
 struct Flight<'a> {
     io: OwnedIo<'a>,
-    request: a::WindowModeExchange,
+    request: a::DesktopWindowExchange,
     broker: u32,
     terminal: Option<a::ProgramIoInfo>,
 }
 pub struct Completed {
-    pub request: a::WindowModeExchange,
-    pub reply: a::WindowModeReply,
+    pub request: a::DesktopWindowExchange,
+    pub reply: a::DesktopWindowReply,
 }
 pub struct ModeIo<'a> {
     buffers: Option<IoBuffers>,
@@ -46,9 +46,9 @@ impl<'a> ModeIo<'a> {
     pub fn new() -> Result<Self> {
         Ok(Self {
             buffers: Some(IoBuffers::Service {
-                request: bytes(a::WindowModeExchange::SIZE)?,
+                request: bytes(a::DesktopWindowExchange::SIZE)?,
                 header: boxed(a::ServiceMessageHeader::default())?,
-                response: bytes(a::WindowModeReply::SIZE)?,
+                response: bytes(a::DesktopWindowReply::SIZE)?,
             }),
             flight: None,
         })
@@ -61,7 +61,7 @@ impl<'a> ModeIo<'a> {
         resources: &'a Resources<'a>,
         endpoint: u32,
         broker: u32,
-        request: a::WindowModeExchange,
+        request: a::DesktopWindowExchange,
         timeout: u64,
     ) -> Result<bool> {
         if self.busy() {
@@ -80,7 +80,7 @@ impl<'a> ModeIo<'a> {
         response.fill(0);
         match resources.io_service(
             endpoint,
-            a::window_mode_op_exchange,
+            a::desktop_action_op_exchange,
             body,
             header,
             response,
@@ -119,7 +119,7 @@ impl<'a> ModeIo<'a> {
             };
             if info.request_id != flight.io.id()
                 || info.kind != a::io_kind_service_call
-                || info.owner_instance != flight.request.identity.desktop.instance_id
+                || info.owner_instance != flight.request.mode.identity.desktop.instance_id
             {
                 return Err(Error::InvalidProvider);
             }
@@ -154,26 +154,38 @@ impl<'a> ModeIo<'a> {
         else {
             return Err(Error::InvalidProvider);
         };
-        if info.result as usize != a::WindowModeReply::SIZE
-            || info.processed_bytes != a::WindowModeReply::SIZE as u64
+        if info.result as usize != a::DesktopWindowReply::SIZE
+            || info.processed_bytes != a::DesktopWindowReply::SIZE as u64
             || header.magic != a::service_api_magic
             || header.version != a::service_api_version
-            || header.op != a::window_mode_op_exchange
+            || header.op != a::desktop_action_op_exchange
             || header.request_id == 0
-            || header.client_id != request.identity.desktop.instance_id
+            || header.client_id != request.mode.identity.desktop.instance_id
             || header.reserved0 != 0
             || header.payload_len as usize != response.len()
             || header.status != 0
         {
             return Err(Error::InvalidProvider);
         }
-        let reply: a::WindowModeReply = wire::decode(response).ok_or(Error::InvalidProvider)?;
-        if reply.version != 1
-            || reply.size as usize != a::WindowModeReply::SIZE
-            || (reply.result == 0
-                && (reply.identity.service.instance_id != broker
-                    || reply.identity.service.generation == 0
-                    || reply.identity.service.reserved != 0))
+        let reply: a::DesktopWindowReply = wire::decode(response).ok_or(Error::InvalidProvider)?;
+        if reply.mode.version != 1
+            || reply.mode.size as usize != a::WindowModeReply::SIZE
+            || (reply.mode.result == 0
+                && (reply.mode.identity.service.instance_id != broker
+                    || reply.mode.identity.service.generation == 0
+                    || reply.mode.identity.service.reserved != 0))
+        {
+            return Err(Error::InvalidProvider);
+        }
+        if reply.action.phase > a::desktop_action_phase_unknown
+            || reply.action.result > 0
+            || reply.action.result < a::desktop_action_result_released
+            || reply.action.request.token.version != 1
+            || reply.action.request.token.size as usize != a::DesktopActionToken::SIZE
+            || reply.action.applied.version != 1
+            || reply.action.applied.size as usize != a::DesktopActionState::SIZE
+            || reply.action.current.version != 1
+            || reply.action.current.size as usize != a::DesktopActionState::SIZE
         {
             return Err(Error::InvalidProvider);
         }

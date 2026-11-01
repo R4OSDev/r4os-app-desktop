@@ -487,6 +487,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.outputs,
             host,
             env.app,
+            programs,
             session,
             &mut self.dirty,
             self.width,
@@ -809,6 +810,22 @@ impl<'a, 'input> Desktop<'a, 'input> {
         session: &mut Session<'_, '_>,
         time: Time,
     ) -> Result<bool> {
+        // A route change invalidates old current-view proof even after a view
+        // was composed. Ordinary frames do not sample app generations.
+        self.modes.actions.route(
+            u64::from(self.revision),
+            if self.outputs.active() {
+                2
+            } else if self.primary_admission == outputs::primary::Admission::Native {
+                1
+            } else {
+                0
+            },
+        );
+        let action_frame = self.modes.actions.needs_frame();
+        if action_frame {
+            self.modes.actions.prepare_scene(&self.hosted);
+        }
         self.cursor(env, time);
         let pointer = CaptureCursor {
             x: self.input.cursor.x,
@@ -928,6 +945,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     &regions[..count],
                     time.nanoseconds,
                     self.input.last_input_ns,
+                    action_frame.then_some(&mut self.modes.actions),
                 )
             };
             for (i, slot) in self.outputs.slots.iter_mut().enumerate() {
@@ -980,6 +998,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     &mut scene,
                     &regions[..count],
                     time.nanoseconds,
+                    action_frame.then_some(&mut self.modes.actions),
                 )
             };
             if !captured {
@@ -1010,6 +1029,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 &result.presentation,
             );
             if accepted {
+                if action_frame {
+                    self.modes.actions.software_composed(
+                        result.completion.cull.rendered_windows,
+                        Rect::new(0, 0, self.width, self.height),
+                        &regions[..count],
+                    );
+                }
                 if let (Some(timing), Some((frame, client, generation, _))) = (
                     result.timing,
                     trace_input.filter(|(_, _, _, i)| {

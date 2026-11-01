@@ -1,5 +1,7 @@
 //! Bounded asynchronous WINSVC mode work. One exact transaction is in flight;
 //! received mode intents and retained ACKs remain separate from local geometry.
+use super::actions::Actions;
+use super::process::Programs;
 use super::{process, runtime::State};
 use crate::{
     outputs::manager::Manager,
@@ -20,6 +22,7 @@ pub struct Modes {
     cursor: usize,
     last_tick: Option<u64>,
     pending: bool,
+    pub actions: Actions,
 }
 struct Intent {
     index: usize,
@@ -162,6 +165,7 @@ impl Modes {
         manager: &Manager<'_>,
         host: &mut Host<'_>,
         app: &App<'_>,
+        programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
         dirty: &mut Dirty,
         width: i32,
@@ -184,7 +188,7 @@ impl Modes {
             Ok(Some(done))
                 if hosted.mirror.gate.available() && !hosted.terminal_mode && host.claimed() =>
             {
-                let i = done.request.identity.window_id as usize;
+                let i = done.request.mode.identity.window_id as usize;
                 if i >= 4 {
                     let _ = host.close();
                     self.pending = host.mode_busy();
@@ -192,9 +196,9 @@ impl Modes {
                 }
                 let owner = hosted.model.clients.slots()[i].handle();
                 let win = &hosted.model.windows.windows()[i];
-                match self.finish(
-                    done.request,
-                    done.reply,
+                let valid_mode = match self.finish(
+                    done.request.mode,
+                    done.reply.mode,
                     owner,
                     win.kind() == Kind::App && win.close_requested().is_none(),
                 ) {
@@ -213,11 +217,32 @@ impl Modes {
                         changed |= change.dirty != 0;
                         hosted.changes(&change, session, app, tick, dirty);
                         self.applied(intent);
+                        true
                     }
-                    Ok(None) => {}
+                    Ok(None) => true,
                     Err(()) => {
                         let _ = host.close();
+                        false
                     }
+                };
+                if valid_mode && done.request.mode.flags == 1 {
+                    self.actions.clear(i);
+                } else if valid_mode {
+                    let identity = self.slots[i].exchange.identity;
+                    self.actions.receive(
+                        i,
+                        identity,
+                        done.reply.action,
+                        hosted,
+                        manager,
+                        app,
+                        session,
+                        programs,
+                        dirty,
+                        width,
+                        height,
+                        tick,
+                    );
                 }
             }
             Ok(_) | Err(_) => {}
@@ -247,7 +272,8 @@ impl Modes {
             ) else {
                 continue;
             };
-            match host.mode_start(request, timeout) {
+            let envelope = self.actions.envelope(i, request, hosted);
+            match host.mode_start(envelope, timeout) {
                 Ok(true) => self.sent(i, request, tick, interval),
                 Ok(false) => {}
                 Err(_) => {

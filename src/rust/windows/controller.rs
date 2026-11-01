@@ -344,6 +344,42 @@ impl Controller {
         change.full_damage = true;
         change
     }
+    pub fn resize_client(
+        &mut self,
+        index: usize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        area: Rect,
+    ) -> Option<Changes> {
+        let window = self.windows.get_mut(index)?;
+        if window.kind() != Kind::App {
+            return None;
+        }
+        let before = window.geometry();
+        let changed = window.set_client_rect_in(x, y, width, height, area)?;
+        let mut change = Changes::default();
+        if changed {
+            change.previous_frame = Some(before);
+            change.dirty = 1 << index;
+            change.geometry = 1 << index;
+            change.resized = 1 << index;
+        }
+        if self.pointer_window() == Some(index) {
+            self.pointer = None;
+        }
+        Some(change)
+    }
+    pub fn delegated_restore(&mut self, index: usize) -> Changes {
+        let mut change = self.focus_or_restore(index);
+        if index < SLOT_COUNT {
+            change.geometry |= 1 << index;
+            change.restored |= 1 << index;
+            change.resized |= 1 << index;
+        }
+        change
+    }
     pub fn pointer_down(&mut self, index: usize, x: i32, y: i32) -> Changes {
         let mut change = Changes::default();
         if index >= SLOT_COUNT {

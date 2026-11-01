@@ -145,6 +145,45 @@ impl Window {
         self.normal = rect;
         self.maximized = false;
     }
+    /// Remote normal-window geometry uses the same real frame/chrome and
+    /// minimum size as pointer resizing; the work area is chosen by WM.
+    pub fn set_client_rect_in(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        area: Rect,
+    ) -> Option<bool> {
+        if width <= 0
+            || height <= 0
+            || area.is_empty()
+            || self.fullscreen
+            || self.maximized
+            || self.minimized
+        {
+            return None;
+        }
+        if area.w < self.min_frame_w || area.h < self.min_frame_h {
+            return None;
+        }
+        let width = width
+            .checked_add(16)?
+            .clamp(self.min_frame_w, self.min_frame_w.max(area.w));
+        let height = height
+            .checked_add(TITLE_H + 18)?
+            .clamp(self.min_frame_h, self.min_frame_h.max(area.h));
+        let rect = Rect::new(
+            x.checked_sub(8)?,
+            y.checked_sub(TITLE_H + 10)?,
+            width,
+            height,
+        )
+        .clamp_inside(area);
+        let changed = rect != self.current;
+        self.set_normal(rect);
+        Some(changed)
+    }
     pub fn restore(&mut self) {
         self.visible = true;
         self.minimized = false;

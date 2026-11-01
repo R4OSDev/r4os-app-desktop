@@ -480,6 +480,37 @@ fn resize(
         event,
     );
 }
+/// Requests a producer frame only after the delegated WM receipt is stored
+/// by WINSVC. The ordinary generation-bound GUI suffix owns delivery/retry.
+pub fn request_action_paint(
+    model: &mut Model,
+    index: usize,
+    session: &mut Session<'_, '_>,
+    now: u64,
+) {
+    let Some(window) = model.windows.windows().get(index) else {
+        return;
+    };
+    if window.kind() != Kind::App || window.minimized() {
+        return;
+    }
+    let client = window.client_surface().rect;
+    let event = a::GuiEvent {
+        kind: a::GuiEventKind::resize.0,
+        window_id: index as i32,
+        x: client.x,
+        y: client.y,
+        key: a::gui_resize_action_view_key,
+        tick: now,
+        ..Default::default()
+    };
+    model.gui_pending[index].send(
+        &mut super::gui_pending::Native(session),
+        model.clients.slots()[index].handle(),
+        index as i32,
+        event,
+    );
+}
 pub fn announce(
     windows: &Controller,
     clients: &Clients,

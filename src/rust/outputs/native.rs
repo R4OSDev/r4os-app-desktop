@@ -423,6 +423,25 @@ impl<'a> Output<'a> {
             gpu_physically_retired: state.map(|s| s.engine.jobs.physically_retired()),
         }
     }
+    /// Exact actual scene key, including a captured newest frame not yet
+    /// promoted to the device. Completion is checked separately by the caller.
+    pub fn captured_view_key(
+        &self,
+        target: a::GfxOutputTarget,
+    ) -> Option<crate::outputs::cursor::CleanFrame> {
+        let frame = self
+            .newest
+            .as_ref()
+            .filter(|s| s.captured)
+            .map(|s| s.cache.frame())
+            .unwrap_or(self.captured_frame);
+        (frame != 0).then_some(crate::outputs::cursor::CleanFrame {
+            target,
+            device_address: self.device_address,
+            device_generation: self.device_handle_generation,
+            frame,
+        })
+    }
     pub fn clean_frame(
         &self,
         target: a::GfxOutputTarget,

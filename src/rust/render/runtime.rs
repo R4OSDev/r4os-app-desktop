@@ -247,11 +247,16 @@ impl Frames {
         regions: &[Rect],
         time: u64,
         input_ns: u64,
+        mut proof: Option<&mut crate::hosted::actions::Actions>,
     ) -> bool {
         manager.invalidate(regions);
         let mut changed = false;
         let mut failures = 0u32;
         for (index, slot) in manager.slots.iter_mut().enumerate() {
+            if let (Some(tracker), Some(output)) = (proof.as_deref_mut(), slot.resource.gpu()) {
+                tracker.native_completed(index, slot.target, output.execution_observation());
+            }
+
             if !slot.dirty() {
                 if let Some(output) = slot.resource.gpu_mut() {
                     if output.pending_ready(time) {
@@ -307,7 +312,19 @@ impl Frames {
                         &mut self.shapes,
                     )
                 };
-                if result.is_ok() {
+                if let Ok(stats) = result {
+                    if let (Some(tracker), Some(key)) =
+                        (proof.as_deref_mut(), output.captured_view_key(slot.target))
+                    {
+                        tracker.native_captured(
+                            index,
+                            key,
+                            output.execution_observation(),
+                            stats.rendered_windows,
+                            bounds,
+                            &damage_regions[..count],
+                        );
+                    }
                     unsafe { output.start(app, resources, expected, time) }
                 } else {
                     output.reject(app);
@@ -315,7 +332,7 @@ impl Frames {
                 }
             } else if let Some(output) = slot.resource.software_mut() {
                 scene.path = Path::CpuOutput;
-                unsafe {
+                let result = unsafe {
                     output.render(
                         app,
                         graphics,
@@ -331,8 +348,20 @@ impl Frames {
                         &mut icons,
                         &mut self.shapes,
                     )
+                };
+                match result {
+                    Ok(completed) => {
+                        if let Some(tracker) = proof.as_deref_mut() {
+                            tracker.software_composed(
+                                completed.cull.rendered_windows,
+                                bounds,
+                                &[damage],
+                            );
+                        }
+                        true
+                    }
+                    Err(_) => false,
                 }
-                .is_ok()
             } else {
                 false
             };
@@ -369,6 +398,7 @@ impl Frames {
         scene: &mut Scene<'_>,
         regions: &[Rect],
         time: u64,
+        mut proof: Option<&mut crate::hosted::actions::Actions>,
     ) -> bool {
         if regions.is_empty() {
             let started = output.pending_ready(time)
@@ -387,6 +417,9 @@ impl Frames {
         };
         let previous = scene.path;
         scene.path = Path::Native;
+        if let Some(tracker) = proof.as_deref_mut() {
+            tracker.native_completed(16, Default::default(), output.execution_observation());
+        }
         let result = unsafe {
             output.capture(
                 windows,
@@ -400,7 +433,20 @@ impl Frames {
             )
         };
         scene.path = previous;
-        let captured = if result.is_ok() {
+        let captured = if let Ok(stats) = result {
+            if let (Some(tracker), Some(key)) = (
+                proof.as_deref_mut(),
+                output.captured_view_key(Default::default()),
+            ) {
+                tracker.native_captured(
+                    16,
+                    key,
+                    output.execution_observation(),
+                    stats.rendered_windows,
+                    Rect::new(0, 0, scene.width, scene.height),
+                    regions,
+                );
+            }
             unsafe { output.start(app, resources, expected, time) }
         } else {
             output.reject(app);

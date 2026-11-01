@@ -58,6 +58,13 @@ macro_rules! record {
 record!(a::WindowModeIdentity; service, desktop, owner, serial, window_id, reserved);
 record!(a::WindowModeExchange; version, size, identity, ack_request_id, ack_result, mode, flags, reserved);
 record!(a::WindowModeReply; version, size, identity, request_id, result, phase, mode, requested_mode);
+record!(a::GuiWindowInfo; window_id, frame_x, frame_y, frame_w, frame_h, client_x, client_y, client_w, client_h, flags);
+record!(a::DesktopActionToken; version, size, window, request, controller, epoch, grant, rights, reserved);
+record!(a::DesktopActionRequest; token, operation, deadline, kind, flags, x, y, width, height, frame_generation);
+record!(a::DesktopActionState; version, size, window, view_revision, frame_before, candidate_generation, frame_generation, composition_serial, input_revision, info, proof_flags, reserved);
+record!(a::DesktopActionReply; request, result, phase, applied_tick, applied, current);
+record!(a::DesktopWindowExchange; mode, state, ack, applied, applied_tick, ack_result, flags);
+record!(a::DesktopWindowReply; mode, action);
 pub fn encode<T: Wire>(value: &T, output: &mut [u8]) -> bool {
     if output.len() != T::SIZE {
         return false;
