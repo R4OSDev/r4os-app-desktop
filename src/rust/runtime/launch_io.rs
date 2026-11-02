@@ -78,6 +78,16 @@ impl Task for Load {
             if control.stopped() {
                 return Ok(None);
             }
+            if let Some(link) = self.link {
+                let path = r4os_sdk::path::FilePath::parse(super::launch_wire::text(&link.link_path)).map_err(Failure::Path)?;
+                let system = r4os_sdk::storage::System::new(&app).map_err(Failure::Loader)?;
+                let mut bytes = [0; 1025];
+                let n = system.files().read(&path, &mut bytes).map_err(Failure::Loader)?.unwrap_or(0);
+                if n != link.link_length as usize || bytes[..n] != link.link_bytes[..n] {
+                    return Err(Failure::Loader(Error::Raw(a::desktop_link_result_changed)));
+                }
+            }
+            if control.stopped() { return Ok(None); }
             if let Some(deadline) = self.deadline {
                 if Clock::new(&app)
                     .ticks()
@@ -86,15 +96,6 @@ impl Task for Load {
                 {
                     self.expired = true;
                     return Ok(None);
-                }
-            }
-            if let Some(link) = self.link {
-                let path = r4os_sdk::path::FilePath::parse(super::launch_wire::text(&link.link_path)).map_err(Failure::Path)?;
-                let system = r4os_sdk::storage::System::new(&app).map_err(Failure::Loader)?;
-                let mut bytes = [0; 1025];
-                let n = system.files().read(&path, &mut bytes).map_err(Failure::Loader)?.unwrap_or(0);
-                if n != link.link_length as usize || bytes[..n] != link.link_bytes[..n] {
-                    return Err(Failure::Loader(Error::Raw(a::desktop_link_result_changed)));
                 }
             }
             control.publish_phase(2);
