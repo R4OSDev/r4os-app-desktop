@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     outputs::manager::Manager,
-    render::geometry::{Dirty, Rect},
+    render::geometry::Dirty,
     runtime::wire::Wire,
     windows::{layout, window::Kind},
 };
@@ -34,6 +34,8 @@ pub struct Actions {
     pub(super) scene_generations: [u64; 4],
     route: Option<(u64, u8)>,
     pub(super) native: [Option<super::action_frames::Native>; 4],
+    pointer_pending: Option<(usize, a::DesktopActionRequest)>,
+    pointer_cancel: Option<a::DesktopActionToken>,
 }
 fn generation(hosted: &Hosted<'_>, index: usize) -> u64 {
     let client = &hosted.model.clients.slots()[index];
@@ -92,8 +94,35 @@ impl Actions {
     }
     pub fn clear(&mut self, index: usize) {
         if index < 4 {
+            if self.pointer_pending.is_some_and(|(i, _)| i == index) {
+                self.pointer_pending = None;
+            }
             self.slots[index] = Slot::default();
             self.native[index] = None;
+        }
+    }
+    pub fn take_pointer(&mut self) -> Option<(usize, a::DesktopActionRequest)> {
+        self.pointer_pending.take()
+    }
+    pub fn take_pointer_cancel(&mut self) -> Option<a::DesktopActionToken> {
+        self.pointer_cancel.take()
+    }
+    pub fn finish_pointer(
+        &mut self,
+        index: usize,
+        request: a::DesktopActionRequest,
+        tick: u64,
+        result: i32,
+    ) {
+        if index < 4 {
+            self.slots[index].receipt = Some(Receipt {
+                request,
+                applied: self.slots[index].state,
+                tick,
+                result,
+                acknowledged: false,
+                paint_sent: false,
+            });
         }
     }
     pub fn envelope(
@@ -217,6 +246,13 @@ impl Actions {
             self.slots[index].state.proof_flags |= a::desktop_action_proof_app_ack;
             dirty.invalidate(hosted.model.windows.windows()[index].client_surface().rect);
         }
+        if request_is_pointer(reply.request.kind)
+            && [a::desktop_action_phase_expired, a::desktop_action_phase_released,
+                a::desktop_action_phase_ended, a::desktop_action_phase_rejected,
+                a::desktop_action_phase_unknown].contains(&reply.phase)
+        {
+            self.pointer_cancel = Some(reply.request.token);
+        }
         if reply.phase != a::desktop_action_phase_pending
             && reply.phase != a::desktop_action_phase_unknown
         {
@@ -286,10 +322,24 @@ impl Actions {
             1 => 1,
             2 => 2,
             3 => 4,
+            a::desktop_action_kind_pointer_down
+            | a::desktop_action_kind_pointer_move
+            | a::desktop_action_kind_pointer_up => a::desktop_action_right_pointer,
             _ => 0,
         };
         if right == 0 || request.token.rights & right == 0 {
             self.reject(index, request, now, a::desktop_action_result_not_owner);
+            return;
+        }
+        if request_is_pointer(request.kind) {
+            if self.pointer_pending.is_some()
+                || (request.kind == a::desktop_action_kind_pointer_down
+                    && !window.client_surface().rect.contains(request.x, request.y))
+            {
+                self.reject(index, request, now, a::desktop_action_result_invalid);
+            } else {
+                self.pointer_pending = Some((index, request));
+            }
             return;
         }
         if self.revision == u64::MAX {
@@ -383,4 +433,8 @@ impl Actions {
     pub fn state(&self, index: usize) -> a::DesktopActionState {
         self.slots[index].state
     }
+}
+fn request_is_pointer(kind: u32) -> bool {
+    [a::desktop_action_kind_pointer_down, a::desktop_action_kind_pointer_move,
+        a::desktop_action_kind_pointer_up].contains(&kind)
 }

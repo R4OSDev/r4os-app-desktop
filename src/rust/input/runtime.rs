@@ -50,6 +50,7 @@ pub struct State {
     pub physical_sequence: u64,
     pub physical_buttons: u8,
     pub remote_buttons: u8,
+    pub revision: u64,
     pub last_input_ns: u64,
     pub down_tick: u64,
     pub down_target: Target,

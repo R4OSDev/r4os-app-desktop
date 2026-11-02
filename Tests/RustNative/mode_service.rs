@@ -96,7 +96,7 @@ unsafe extern "C" fn call(
     _: u64,
 ) -> i32 {
     assert!(
-        op != a::window_mode_op_exchange,
+        op != a::desktop_action_op_exchange_focus,
         "mode work blocked in synchronous call"
     );
     {
@@ -432,9 +432,9 @@ unsafe extern "C" fn submit(
     assert_eq!(
         (op, len as usize, capacity as usize, timeout, flags),
         (
-            a::window_mode_op_exchange,
-            a::WindowModeExchange::SIZE,
-            a::WindowModeReply::SIZE,
+            a::desktop_action_op_exchange_focus,
+            a::DesktopWindowExchangeV2::SIZE,
+            a::DesktopWindowReply::SIZE,
             250,
             0
         )
@@ -465,15 +465,15 @@ unsafe extern "C" fn submit(
     0
 }
 unsafe fn complete(p: Pending, malformed: bool) -> a::ProgramIoInfo {
-    let request: a::WindowModeExchange = wire::decode(unsafe {
-        core::slice::from_raw_parts(p.request as *const u8, a::WindowModeExchange::SIZE)
+    let request: a::DesktopWindowExchangeV2 = wire::decode(unsafe {
+        core::slice::from_raw_parts(p.request as *const u8, a::DesktopWindowExchangeV2::SIZE)
     })
     .unwrap();
     assert_eq!(
         (
-            request.identity.desktop.instance_id,
-            request.identity.owner.instance_id,
-            request.identity.owner.generation
+            request.previous.mode.identity.desktop.instance_id,
+            request.previous.mode.identity.owner.instance_id,
+            request.previous.mode.identity.owner.generation
         ),
         (88, 42, 56)
     );
@@ -492,39 +492,42 @@ unsafe fn complete(p: Pending, malformed: bool) -> a::ProgramIoInfo {
         info.result = a::io_error_cancelled;
         return info;
     }
-    let reply = a::WindowModeReply {
-        identity: a::WindowModeIdentity {
-            serial: 19,
-            service: a::ProgramProcessHandle {
-                instance_id: 31,
-                generation: 7,
-                ..Default::default()
+    let reply = a::DesktopWindowReply {
+        mode: a::WindowModeReply {
+            identity: a::WindowModeIdentity {
+                serial: 19,
+                service: a::ProgramProcessHandle {
+                    instance_id: 31,
+                    generation: 7,
+                    ..Default::default()
+                },
+                ..request.previous.mode.identity
             },
-            ..request.identity
+            mode: request.previous.mode.mode,
+            ..Default::default()
         },
-        mode: request.mode,
         ..Default::default()
     };
     unsafe {
         (p.header as *mut a::ServiceMessageHeader).write(a::ServiceMessageHeader {
-            op: a::window_mode_op_exchange,
+            op: a::desktop_action_op_exchange_focus,
             request_id: 100 + p.id,
             client_id: 88,
             payload_len: if malformed {
                 0
             } else {
-                a::WindowModeReply::SIZE as u16
+                a::DesktopWindowReply::SIZE as u16
             },
             ..Default::default()
         });
         wire::encode(
             &reply,
-            core::slice::from_raw_parts_mut(p.response as *mut u8, a::WindowModeReply::SIZE),
+            core::slice::from_raw_parts_mut(p.response as *mut u8, a::DesktopWindowReply::SIZE),
         );
     }
     info.state = a::io_state_completed;
-    info.result = a::WindowModeReply::SIZE as i32;
-    info.processed_bytes = a::WindowModeReply::SIZE as u64;
+    info.result = a::DesktopWindowReply::SIZE as i32;
+    info.processed_bytes = a::DesktopWindowReply::SIZE as u64;
     info
 }
 unsafe extern "C" fn status(id: u32, out: *mut a::ProgramIoInfo) -> i32 {
@@ -671,12 +674,18 @@ fn d088_owned_mode_delay_late_ack_retirement_reconnect_and_queue_bound() {
         *STATE.lock().unwrap() = Peer::default();
         let mut host = Host::new(services, resources, owner).unwrap();
         host.initialize().unwrap();
-        let request = a::WindowModeExchange {
-            identity: a::WindowModeIdentity {
-                desktop: owner,
-                owner: a::ProgramProcessHandle {
-                    instance_id: 42,
-                    generation: 56,
+        let request = a::DesktopWindowExchangeV2 {
+            previous: a::DesktopWindowExchange {
+                mode: a::WindowModeExchange {
+                    identity: a::WindowModeIdentity {
+                        desktop: owner,
+                        owner: a::ProgramProcessHandle {
+                            instance_id: 42,
+                            generation: 56,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 ..Default::default()
@@ -702,8 +711,8 @@ fn d088_owned_mode_delay_late_ack_retirement_reconnect_and_queue_bound() {
         assert!(!host.mode_start(request, 250).unwrap());
         assert!(host.mode_poll().unwrap().is_none());
         let answer = host.mode_poll().unwrap().unwrap();
-        assert_eq!(answer.reply.identity.serial, 19);
-        assert!(answer.request.identity.same(&request.identity));
+        assert_eq!(answer.reply.mode.identity.serial, 19);
+        assert!(answer.request.previous.mode.identity.same(&request.previous.mode.identity));
         assert!(!host.mode_busy());
         let delayed = start.elapsed().as_nanos();
         assert!(delayed >= 20_000_000);

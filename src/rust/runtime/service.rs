@@ -423,10 +423,10 @@ impl<'a> Host<'a> {
     }
     pub fn mode_start(
         &mut self,
-        request: a::DesktopWindowExchange,
+        request: a::DesktopWindowExchangeV2,
         timeout_ticks: u64,
     ) -> Result<bool> {
-        if !self.claimed || self.retiring || !same(request.mode.identity.desktop, self.owner) {
+        if !self.claimed || self.retiring || !same(request.previous.mode.identity.desktop, self.owner) {
             return Err(Error::InvalidProvider);
         }
         let connection = self.connection.as_ref().ok_or(Error::InvalidProvider)?;

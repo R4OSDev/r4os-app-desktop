@@ -207,9 +207,15 @@ impl Controller {
         if index >= SLOT_COUNT {
             return change;
         }
+        // The active slot can remain unchanged while its window is minimized.
+        // In that case restore really regains input focus and needs a gain
+        // event even though activate() sees the same slot number.
+        let had_input_focus = self.active == index
+            && self.hosted_gui(index)
+            && self.keyboard_focus == Self::window_target(index);
         change.dirty = (1 << self.active) | (1 << index);
         self.windows[index].restore();
-        self.activate(index, false, &mut change);
+        self.activate(index, !had_input_focus, &mut change);
         self.keyboard_focus = Self::window_target(index);
         change.focus_mirror = Some(index);
         change.taskbar = true;
@@ -526,6 +532,21 @@ mod tests {
         assert!(windows.windows()[0].minimized());
         windows.cycle(true);
         assert!(!windows.windows()[0].minimized());
+    }
+    #[test]
+    fn restore_of_only_active_app_delivers_one_real_focus_gain() {
+        let mut windows = Controller::default();
+        windows.window_mut(2).unwrap().bind_app(12, c"App");
+        assert_eq!(windows.focus_or_restore(2).focus_gained, Some(2));
+        let minimized = windows.minimize(2);
+        assert_eq!(minimized.focus_lost, Some(2));
+        assert_eq!(windows.active(), 2);
+        assert_eq!(windows.keyboard_focus(), Target::None);
+        let restored = windows.focus_or_restore(2);
+        assert_eq!(restored.focus_gained, Some(2));
+        assert_eq!(restored.focus_lost, None);
+        assert_eq!(windows.keyboard_focus(), Controller::window_target(2));
+        assert_eq!(windows.focus_or_restore(2).focus_gained, None);
     }
     #[test]
     fn current_release_packet_applies_final_drag_and_resize_coordinates() {

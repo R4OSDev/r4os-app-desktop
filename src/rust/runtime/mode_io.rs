@@ -30,12 +30,12 @@ fn bytes(size: usize) -> Result<Box<[u8]>> {
 }
 struct Flight<'a> {
     io: OwnedIo<'a>,
-    request: a::DesktopWindowExchange,
+    request: a::DesktopWindowExchangeV2,
     broker: u32,
     terminal: Option<a::ProgramIoInfo>,
 }
 pub struct Completed {
-    pub request: a::DesktopWindowExchange,
+    pub request: a::DesktopWindowExchangeV2,
     pub reply: a::DesktopWindowReply,
 }
 pub struct ModeIo<'a> {
@@ -46,7 +46,7 @@ impl<'a> ModeIo<'a> {
     pub fn new() -> Result<Self> {
         Ok(Self {
             buffers: Some(IoBuffers::Service {
-                request: bytes(a::DesktopWindowExchange::SIZE)?,
+                request: bytes(a::DesktopWindowExchangeV2::SIZE)?,
                 header: boxed(a::ServiceMessageHeader::default())?,
                 response: bytes(a::DesktopWindowReply::SIZE)?,
             }),
@@ -61,7 +61,7 @@ impl<'a> ModeIo<'a> {
         resources: &'a Resources<'a>,
         endpoint: u32,
         broker: u32,
-        request: a::DesktopWindowExchange,
+        request: a::DesktopWindowExchangeV2,
         timeout: u64,
     ) -> Result<bool> {
         if self.busy() {
@@ -80,7 +80,7 @@ impl<'a> ModeIo<'a> {
         response.fill(0);
         match resources.io_service(
             endpoint,
-            a::desktop_action_op_exchange,
+            a::desktop_action_op_exchange_focus,
             body,
             header,
             response,
@@ -119,7 +119,7 @@ impl<'a> ModeIo<'a> {
             };
             if info.request_id != flight.io.id()
                 || info.kind != a::io_kind_service_call
-                || info.owner_instance != flight.request.mode.identity.desktop.instance_id
+                || info.owner_instance != flight.request.previous.mode.identity.desktop.instance_id
             {
                 return Err(Error::InvalidProvider);
             }
@@ -158,9 +158,9 @@ impl<'a> ModeIo<'a> {
             || info.processed_bytes != a::DesktopWindowReply::SIZE as u64
             || header.magic != a::service_api_magic
             || header.version != a::service_api_version
-            || header.op != a::desktop_action_op_exchange
+            || header.op != a::desktop_action_op_exchange_focus
             || header.request_id == 0
-            || header.client_id != request.mode.identity.desktop.instance_id
+            || header.client_id != request.previous.mode.identity.desktop.instance_id
             || header.reserved0 != 0
             || header.payload_len as usize != response.len()
             || header.status != 0

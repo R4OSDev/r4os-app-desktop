@@ -64,6 +64,8 @@ record!(a::DesktopActionRequest; token, operation, deadline, kind, flags, x, y, 
 record!(a::DesktopActionState; version, size, window, view_revision, frame_before, candidate_generation, frame_generation, composition_serial, input_revision, info, proof_flags, reserved);
 record!(a::DesktopActionReply; request, result, phase, applied_tick, applied, current);
 record!(a::DesktopWindowExchange; mode, state, ack, applied, applied_tick, ack_result, flags);
+record!(a::DesktopFocusSnapshot; version, size, window, view_revision, input_revision, observed_tick, focus_state, flags, reserved);
+record!(a::DesktopWindowExchangeV2; previous, focus);
 record!(a::DesktopWindowReply; mode, action);
 pub fn encode<T: Wire>(value: &T, output: &mut [u8]) -> bool {
     if output.len() != T::SIZE {

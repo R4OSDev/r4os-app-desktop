@@ -234,7 +234,6 @@ impl State<'_> {
                 tick,
                 ..a::GuiEvent::default()
             },
-        );
-        true
+        ) != Receipt::Cancelled
     }
 }

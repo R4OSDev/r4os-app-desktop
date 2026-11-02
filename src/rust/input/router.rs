@@ -63,6 +63,7 @@ pub struct PointerActions {
     pub wheel: Option<PointerEffect>,
     pub secondary: Option<PointerEffect>,
     pub primary: Action,
+    pub delivered: bool,
 }
 impl PointerActions {
     fn none() -> Self {
@@ -70,6 +71,7 @@ impl PointerActions {
             wheel: None,
             secondary: None,
             primary: Action::None,
+            delivered: false,
         }
     }
 }
@@ -242,6 +244,7 @@ impl Router {
             None
         };
         let mut secondary = None;
+        let mut delivered = false;
         let primary = (|| {
             if mouse.buttons & 2 != 0 && previous & 2 == 0 {
                 if identity.valid() {
@@ -295,7 +298,7 @@ impl Router {
                         if target == Controller::window_target(index) {
                             let change = hosted.model.windows.pointer_down(index, mouse.x, mouse.y);
                             if let Some(i) = change.client_pointer_down {
-                                hosted.gui_mouse(
+                                delivered = hosted.gui_mouse(
                                     app,
                                     session,
                                     i,
@@ -449,7 +452,7 @@ impl Router {
                     };
                 }
                 if let Some(i) = Controller::index_for_target(pressed) {
-                    hosted.gui_mouse(
+                    delivered = hosted.gui_mouse(
                         app,
                         session,
                         i,
@@ -471,7 +474,7 @@ impl Router {
                 }
             } else if !shell.blocked() {
                 if let Some(i) = hosted.active_gui() {
-                    hosted.gui_mouse(
+                    delivered = hosted.gui_mouse(
                         app,
                         session,
                         i,
@@ -489,6 +492,7 @@ impl Router {
             wheel,
             secondary,
             primary,
+            delivered,
         }
     }
 }

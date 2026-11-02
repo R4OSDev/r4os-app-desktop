@@ -6,6 +6,7 @@ use super::{
     owned::Owned,
     service::Host,
     views,
+    wire::Wire,
 };
 use crate::{
     capture::{publisher::Publisher, remote::Cursor as CaptureCursor, runtime as capture},
@@ -104,6 +105,11 @@ fn owned<T>(initialize: impl FnOnce() -> Result<T>, name: &'static str) -> Resul
     })
 }
 type WindowImages<'a> = Set<NativeMemory<'a, 'a, 'a>, Consumer>;
+#[derive(Clone, Copy)]
+struct DelegatedPointer {
+    index: usize,
+    token: a::DesktopActionToken,
+}
 struct Desktop<'a, 'input> {
     expected: &'static StartupInfo<'static>,
     shell: Owned<Shell<'input>>,
@@ -119,6 +125,8 @@ struct Desktop<'a, 'input> {
     cursor: Cursor,
     power: Owned<Power>,
     input: input::runtime::State,
+    delegated_pointer: Option<DelegatedPointer>,
+    focus_observed: Option<usize>,
     router: Router,
     platform_input: input::platform::Owner,
     modes: Modes,
@@ -193,6 +201,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             cursor: Cursor::default(),
             power: owned(|| Ok(Power::default()), "screen power")?,
             input: input::runtime::State::default(),
+            delegated_pointer: None,
+            focus_observed: None,
             router: Router::default(),
             platform_input: input::platform::Owner::default(),
             modes: Modes::default(),
@@ -482,6 +492,19 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         self.hosted
             .synchronize_mirror(host, &mut self.windows, time.tick, time.hz);
+        let controller = &self.hosted.model.windows;
+        let active = controller.active();
+        let window = &controller.windows()[active];
+        let focus_index = (window.kind() == Kind::App
+            && window.visible()
+            && !window.minimized()
+            && !self.shell.blocked()
+            && controller.keyboard_focus() == Windows::window_target(active))
+            .then_some(active);
+        if self.focus_observed != focus_index {
+            self.input.revision = self.input.revision.saturating_add(1).max(1);
+            self.focus_observed = focus_index;
+        }
         self.modes.synchronize(
             &mut self.hosted,
             &self.outputs,
@@ -494,7 +517,40 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.height,
             time.tick,
             time.hz,
+            focus_index,
+            self.input.revision.max(1),
+            self.shell.blocked(),
         );
+        let controller = &self.hosted.model.windows;
+        let active = controller.active();
+        let window = &controller.windows()[active];
+        let current_focus = (window.kind() == Kind::App && window.visible()
+            && !window.minimized() && !self.shell.blocked() && !self.hosted.terminal_mode
+            && controller.keyboard_focus() == Windows::window_target(active))
+            .then_some(active);
+        if self.focus_observed != current_focus {
+            self.input.revision = self.input.revision.saturating_add(1).max(1);
+            self.focus_observed = current_focus;
+        }
+        if let Some(token) = self.modes.actions.take_pointer_cancel() {
+            if self.delegated_pointer.is_some_and(|held| held.token.same(&token)) {
+                self.cancel_delegated_pointer(session, time.tick);
+            }
+        }
+        if self.delegated_pointer.is_some_and(|held| {
+            let window = &self.hosted.model.windows.windows()[held.index];
+            let owner = self.hosted.model.clients.slots()[held.index].handle();
+            !host.claimed() || !crate::hosted::process::same(owner, held.token.window.owner)
+                || window.kind() != Kind::App || !window.visible() || window.minimized()
+                || window.close_requested().is_some() || self.shell.blocked()
+                || self.hosted.model.windows.keyboard_focus() != Windows::window_target(held.index)
+        }) {
+            self.cancel_delegated_pointer(session, time.tick);
+        }
+        if let Some((index, request)) = self.modes.actions.take_pointer() {
+            let result = self.route_delegated_pointer(index, request, env, session, host, programs, time);
+            self.modes.actions.finish_pointer(index, request, time.tick.max(1), result);
+        }
         self.poll_loads(env, session, programs, time, false);
         let bindings = core::array::from_fn(|i| {
             if !self.outputs.active()
@@ -1476,6 +1532,94 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.input.right_tray = Default::default();
         self.full();
     }
+    fn cancel_delegated_pointer(&mut self, session: &mut Session<'_, '_>, tick: u64) {
+        let Some(held) = self.delegated_pointer.take() else { return; };
+        let owner = held.token.window.owner;
+        let _ = self.input.pointer_capture.cancel_for_window(
+            &mut input::pointer_capture::Native(session), held.index, owner, tick,
+            &mut self.input.cursor, self.hosted.bounds,
+        );
+        let _ = self.hosted.model.gui_pending[held.index].cancel_for(
+            &mut crate::hosted::gui_pending::Native(session), owner, held.index as i32,
+            a::gui_input_reset_reason_focus_lost, tick,
+        );
+        self.input.remote_buttons = 0;
+        self.pointer_ownership_changed();
+    }
+    fn route_delegated_pointer(
+        &mut self,
+        index: usize,
+        request: a::DesktopActionRequest,
+        env: &Environment<'a>,
+        session: &mut Session<'_, '_>,
+        host: &mut Host<'_>,
+        programs: &Programs<'_>,
+        time: Time,
+    ) -> i32 {
+        let window = &self.hosted.model.windows.windows()[index];
+        let owner = self.hosted.model.clients.slots()[index].handle();
+        if !host.claimed() || !crate::hosted::process::same(owner, request.token.window.owner)
+            || window.kind() != Kind::App || !window.visible() || window.minimized()
+            || window.close_requested().is_some() || self.shell.blocked()
+            || self.hosted.terminal_mode
+        {
+            self.cancel_delegated_pointer(session, time.tick);
+            return a::desktop_action_result_stale;
+        }
+        let down = request.kind == a::desktop_action_kind_pointer_down;
+        let up = request.kind == a::desktop_action_kind_pointer_up;
+        if down {
+            if self.delegated_pointer.is_some() || self.input.physical_buttons & 1 != 0
+                || self.input.remote_buttons != 0
+                || !window.client_surface().rect.contains(request.x, request.y)
+            {
+                return a::desktop_action_result_busy;
+            }
+        } else if !self.delegated_pointer.is_some_and(|held| {
+            held.index == index && held.token.same(&request.token)
+        }) {
+            return a::desktop_action_result_stale;
+        }
+        self.sync_pointer_capture(session, host, time.tick);
+        if down && self.input.pointer_capture.active() {
+            return a::desktop_action_result_busy;
+        }
+        if !down && !self.input.pointer_capture.matches_window(index, owner) {
+            self.cancel_delegated_pointer(session, time.tick);
+            return a::desktop_action_result_stale;
+        }
+        if down {
+            let scene = views::scene(
+                self.width, self.height, &self.hosted, &self.shell, &self.input,
+                &self.tray, &self.status, &self.frames.stats,
+                self.cursor.software(), self.capture.recording_state(), self.blink,
+            );
+            if input::hit::target(&scene, request.x, request.y) != Windows::window_target(index) {
+                return a::desktop_action_result_stale;
+            }
+        }
+        let routed = self.route_mouse(
+            env, session, host, programs, time,
+            a::Mouse {
+                x: request.x, y: request.y,
+                dx: request.x.saturating_sub(self.input.cursor.x),
+                dy: request.y.saturating_sub(self.input.cursor.y),
+                wheel: 0, buttons: if up { 0 } else { 1 }, present: 1,
+                reserved: 0, packets: 0,
+            },
+            true, None, a::remote_input_kind_mouse_buttons,
+        );
+        if !routed {
+            self.cancel_delegated_pointer(session, time.tick);
+            return a::desktop_action_result_unavailable;
+        }
+        if down {
+            self.delegated_pointer = Some(DelegatedPointer { index, token: request.token });
+        } else if up {
+            self.delegated_pointer = None;
+        }
+        a::desktop_action_result_ok
+    }
     fn restore_capture_cursor(&mut self) {
         if let Some((_, point)) = self.outputs.layout.nearest(self.input.cursor) {
             self.input.cursor = point;
@@ -1543,6 +1687,129 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         changed
     }
+    fn route_mouse(
+        &mut self,
+        env: &Environment<'a>,
+        session: &mut Session<'_, '_>,
+        host: &mut Host<'_>,
+        programs: &Programs<'_>,
+        time: Time,
+        value: a::Mouse,
+        remote: bool,
+        motion: Option<[u32; 2]>,
+        remote_kind: u32,
+    ) -> bool {
+        let was_relative = self.input.pointer_capture.relative();
+        let before = self.input.cursor;
+        if self.input.pointer_capture.mouse(
+            &mut input::pointer_capture::Native(session),
+            value,
+            remote,
+            remote_kind,
+            motion,
+            &mut self.input.cursor,
+            self.hosted.bounds,
+            time.tick,
+        ) {
+            if remote {
+                self.input.remote_buttons = value.buttons;
+            } else {
+                self.input.physical_buttons = value.buttons;
+            }
+            self.input.last_event_tick = time.tick;
+            if was_relative != self.input.pointer_capture.relative() {
+                self.restore_capture_cursor();
+                self.full();
+            }
+            if !self.input.pointer_capture.active() {
+                self.pointer_ownership_changed();
+            }
+            if before != self.input.cursor {
+                self.input.stats.cursor_moves =
+                    self.input.stats.cursor_moves.wrapping_add(1);
+                self.cursor_queued_tick = time.tick;
+                for point in [before, self.input.cursor] {
+                    let rect =
+                        output_geometry::cursor_rect(self.hosted.bounds, point);
+                    self.publisher.cursor_damage.invalidate(rect);
+                    if self.cursor.software() {
+                        self.dirty.invalidate(rect);
+                    }
+                }
+            }
+            return self.input.pointer_capture.route_valid();
+        }
+        self.input.last_event_tick = time.tick;
+        let before = self.input.cursor;
+        let captured = self.hosted.model.windows.pointer_window();
+        let scene = views::scene(
+            self.width,
+            self.height,
+            &self.hosted,
+            &self.shell,
+            &self.input,
+            &self.tray,
+            &self.status,
+            &self.frames.stats,
+            self.cursor.software(),
+            self.capture.recording_state(),
+            self.blink,
+        );
+        let target = input::hit::target(&scene, value.x, value.y);
+        let identity = self
+            .tray
+            .registry()
+            .hit(value.x, value.y)
+            .unwrap_or_default();
+        let actions = self.router.pointer(
+            &mut self.input,
+            &mut self.shell,
+            &mut self.hosted,
+            &self.outputs,
+            env.app,
+            session,
+            &mut self.dirty,
+            target,
+            identity,
+            self.tray.registry(),
+            value,
+            remote,
+            self.cursor.software(),
+            self.width,
+            self.height,
+            time.tick,
+            time.hz,
+        );
+        if before != self.input.cursor {
+            self.cursor_queued_tick = time.tick;
+            self.publisher
+                .cursor_damage
+                .invalidate(output_geometry::cursor_rect(
+                    self.hosted.bounds,
+                    before,
+                ));
+            self.publisher
+                .cursor_damage
+                .invalidate(output_geometry::cursor_rect(
+                    self.hosted.bounds,
+                    self.input.cursor,
+                ));
+        }
+        if let Some(index) = captured
+            .filter(|_| self.hosted.model.windows.pointer_window().is_none())
+        {
+            self.hosted.flush_geometry(index, host, time.tick, time.hz);
+        }
+        if let Some(wheel) = actions.wheel {
+            self.action(wheel.action(), env, session, host, programs, time);
+        }
+        if let Some(secondary) = actions.secondary {
+            self.action(secondary.action(), env, session, host, programs, time);
+        }
+        let delivered = actions.delivered;
+        self.action(actions.primary, env, session, host, programs, time);
+        delivered
+    }
     fn poll_input(
         &mut self,
         env: &Environment<'a>,
@@ -1574,6 +1841,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     Poll::Event(v) => v,
                 };
                 active = true;
+                if self.delegated_pointer.is_some() {
+                    self.cancel_delegated_pointer(session, time.tick);
+                }
+                self.input.revision = self.input.revision.saturating_add(1).max(1);
                 self.diagnostics.input();
                 self.input.last_input_ns = time.nanoseconds;
                 let waking = if power_sampled {
@@ -1621,114 +1892,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         motion,
                         remote_kind,
                     } => {
-                        let was_relative = self.input.pointer_capture.relative();
-                        let before = self.input.cursor;
-                        if self.input.pointer_capture.mouse(
-                            &mut input::pointer_capture::Native(session),
-                            value,
-                            remote,
-                            remote_kind,
-                            motion,
-                            &mut self.input.cursor,
-                            self.hosted.bounds,
-                            time.tick,
-                        ) {
-                            if remote {
-                                self.input.remote_buttons = value.buttons;
-                            } else {
-                                self.input.physical_buttons = value.buttons;
-                            }
-                            self.input.last_event_tick = time.tick;
-                            if was_relative != self.input.pointer_capture.relative() {
-                                self.restore_capture_cursor();
-                                self.full();
-                            }
-                            if !self.input.pointer_capture.active() {
-                                self.pointer_ownership_changed();
-                            }
-                            if before != self.input.cursor {
-                                self.input.stats.cursor_moves =
-                                    self.input.stats.cursor_moves.wrapping_add(1);
-                                self.cursor_queued_tick = time.tick;
-                                for point in [before, self.input.cursor] {
-                                    let rect =
-                                        output_geometry::cursor_rect(self.hosted.bounds, point);
-                                    self.publisher.cursor_damage.invalidate(rect);
-                                    if self.cursor.software() {
-                                        self.dirty.invalidate(rect);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                        self.input.last_event_tick = time.tick;
-                        let before = self.input.cursor;
-                        let captured = self.hosted.model.windows.pointer_window();
-                        let scene = views::scene(
-                            self.width,
-                            self.height,
-                            &self.hosted,
-                            &self.shell,
-                            &self.input,
-                            &self.tray,
-                            &self.status,
-                            &self.frames.stats,
-                            self.cursor.software(),
-                            self.capture.recording_state(),
-                            self.blink,
+                        let _ = self.route_mouse(
+                            env, session, host, programs, time, value, remote, motion, remote_kind,
                         );
-                        let target = input::hit::target(&scene, value.x, value.y);
-                        let identity = self
-                            .tray
-                            .registry()
-                            .hit(value.x, value.y)
-                            .unwrap_or_default();
-                        let actions = self.router.pointer(
-                            &mut self.input,
-                            &mut self.shell,
-                            &mut self.hosted,
-                            &self.outputs,
-                            env.app,
-                            session,
-                            &mut self.dirty,
-                            target,
-                            identity,
-                            self.tray.registry(),
-                            value,
-                            remote,
-                            self.cursor.software(),
-                            self.width,
-                            self.height,
-                            time.tick,
-                            time.hz,
-                        );
-                        if before != self.input.cursor {
-                            self.cursor_queued_tick = time.tick;
-                            self.publisher
-                                .cursor_damage
-                                .invalidate(output_geometry::cursor_rect(
-                                    self.hosted.bounds,
-                                    before,
-                                ));
-                            self.publisher
-                                .cursor_damage
-                                .invalidate(output_geometry::cursor_rect(
-                                    self.hosted.bounds,
-                                    self.input.cursor,
-                                ));
-                        }
-                        if let Some(index) = captured
-                            .filter(|_| self.hosted.model.windows.pointer_window().is_none())
-                        {
-                            self.hosted.flush_geometry(index, host, time.tick, time.hz);
-                        }
-                        if let Some(wheel) = actions.wheel {
-                            self.action(wheel.action(), env, session, host, programs, time);
-                        }
-                        if let Some(secondary) = actions.secondary {
-                            self.action(secondary.action(), env, session, host, programs, time);
-                        }
-                        self.action(actions.primary, env, session, host, programs, time);
                     }
                 }
             }

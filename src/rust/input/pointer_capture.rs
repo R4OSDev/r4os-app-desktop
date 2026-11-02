@@ -404,6 +404,32 @@ impl Capture {
     pub fn active(&self) -> bool {
         self.info.state == a::gui_pointer_state_active
     }
+    pub fn route_valid(&self) -> bool {
+        self.info.state == a::gui_pointer_state_active
+    }
+    pub fn matches_window(&self, index: usize, owner: a::ProgramProcessHandle) -> bool {
+        self.active()
+            && self.info.capture.window.window_id == index as i32
+            && same(self.info.capture.window.owner, owner)
+    }
+    pub fn cancel_for_window(
+        &mut self,
+        provider: &mut impl Provider,
+        index: usize,
+        owner: a::ProgramProcessHandle,
+        tick: u64,
+        cursor: &mut Point,
+        bounds: Rect,
+    ) -> bool {
+        if !self.active()
+            || self.info.capture.window.window_id != index as i32
+            || !same(self.info.capture.window.owner, owner)
+        {
+            return false;
+        }
+        self.cancel(provider, a::gui_pointer_reason_focus_lost, tick, cursor, bounds);
+        true
+    }
     pub fn bind(&mut self, provider: &mut impl Provider, rebind: bool) -> i32 {
         let request = a::GuiPointerHostRequest {
             operation: a::gui_pointer_host_bind,

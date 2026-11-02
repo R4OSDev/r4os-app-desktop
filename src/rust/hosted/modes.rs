@@ -172,6 +172,9 @@ impl Modes {
         height: i32,
         tick: u64,
         hz: u32,
+        focus_index: Option<usize>,
+        input_revision: u64,
+        focus_blocked: bool,
     ) -> bool {
         let interval = u64::from(hz).div_ceil(20).max(1);
         let timeout = u64::from(hz).div_ceil(4).max(1);
@@ -188,7 +191,7 @@ impl Modes {
             Ok(Some(done))
                 if hosted.mirror.gate.available() && !hosted.terminal_mode && host.claimed() =>
             {
-                let i = done.request.mode.identity.window_id as usize;
+                let i = done.request.previous.mode.identity.window_id as usize;
                 if i >= 4 {
                     let _ = host.close();
                     self.pending = host.mode_busy();
@@ -197,7 +200,7 @@ impl Modes {
                 let owner = hosted.model.clients.slots()[i].handle();
                 let win = &hosted.model.windows.windows()[i];
                 let valid_mode = match self.finish(
-                    done.request.mode,
+                    done.request.previous.mode,
                     done.reply.mode,
                     owner,
                     win.kind() == Kind::App && win.close_requested().is_none(),
@@ -225,7 +228,7 @@ impl Modes {
                         false
                     }
                 };
-                if valid_mode && done.request.mode.flags == 1 {
+                if valid_mode && done.request.previous.mode.flags == 1 {
                     self.actions.clear(i);
                 } else if valid_mode {
                     let identity = self.slots[i].exchange.identity;
@@ -255,6 +258,16 @@ impl Modes {
         {
             return changed;
         }
+        // A just-applied Restore can change the router focus inside the
+        // preceding reply. Publish the state after that change in this cycle.
+        let controller = &hosted.model.windows;
+        let active = controller.active();
+        let window = &controller.windows()[active];
+        let current_focus = (window.kind() == Kind::App && window.visible()
+            && !window.minimized() && !focus_blocked && !hosted.terminal_mode
+            && controller.keyboard_focus() == crate::windows::controller::Controller::window_target(active))
+            .then_some(active);
+        let current_input_revision = input_revision.saturating_add(u64::from(current_focus != focus_index));
         for offset in 0..4 {
             let i = (self.cursor + offset) % 4;
             let owner = hosted.model.clients.slots()[i].handle();
@@ -272,7 +285,25 @@ impl Modes {
             ) else {
                 continue;
             };
-            let envelope = self.actions.envelope(i, request, hosted);
+            let previous = self.actions.envelope(i, request, hosted);
+            let focus = if request.flags == 0 {
+                a::DesktopFocusSnapshot {
+                    window: previous.state.window,
+                    view_revision: previous.state.view_revision,
+                    input_revision: current_input_revision.max(1),
+                    observed_tick: tick.max(1),
+                    focus_state: if current_focus == Some(i) {
+                        a::desktop_focus_state_focused
+                    } else {
+                        a::desktop_focus_state_unfocused
+                    },
+                    flags: previous.state.info.flags & 3,
+                    ..Default::default()
+                }
+            } else {
+                a::DesktopFocusSnapshot::default()
+            };
+            let envelope = a::DesktopWindowExchangeV2 { previous, focus };
             match host.mode_start(envelope, timeout) {
                 Ok(true) => self.sent(i, request, tick, interval),
                 Ok(false) => {}
