@@ -11,6 +11,7 @@ pub(super) struct Owner {
 }
 struct Receipt {
     value: w::Message,
+    link: Option<a::DesktopLinkReply>,
     acknowledged: bool,
     evidence: Option<a::ProgramObservationHandle>,
 }
@@ -38,6 +39,7 @@ impl Owner {
         };
         self.receipts[index] = Some(Receipt {
             value: work,
+            link: None,
             acknowledged: false,
             evidence: None,
         });
@@ -78,6 +80,9 @@ impl Owner {
             Ok(value) => entry.evidence = Some(value),
             Err(_) => entry.value.flags |= w::EVIDENCE_UNAVAILABLE,
         }
+    }
+    pub(super) fn link_binding(&self, work: w::Message) -> Option<a::DesktopLinkRequest> {
+        self.find(work).and_then(|i| self.receipts[i].as_ref().and_then(|r| r.link.map(|l| l.request)))
     }
     fn retire_other_brokers(&mut self, programs: &Programs<'_>, broker: w::Identity) {
         for entry in &mut self.receipts {
@@ -179,9 +184,20 @@ impl<'a, 'input> Desktop<'a, 'input> {
         programs: &Programs<'_>,
         time: Time,
     ) {
-        let Some(work) = host.take_launch_mailbox() else {
-            return;
-        };
+        let regular = host.take_launch_mailbox();
+        let link = host.take_link_mailbox();
+        if let Some(work) = regular { self.external_one(work, None, env, session, host, programs, time); }
+        if let Some(link) = link {
+            let work = w::Message {
+                link_serial: link.request.token.serial,
+                broker: identity(link.request.token.service), request: identity(link.request.token.owner), desktop: identity(link.desktop),
+                deadline: link.request.deadline, phase: w::STARTING, flags: w::WAIT_FRAME | w::RETAIN_EVIDENCE,
+                path: link.request.link_path, ..Default::default()
+            };
+            self.external_one(work, Some(link), env, session, host, programs, time);
+        }
+    }
+    fn external_one(&mut self, work: w::Message, link: Option<a::DesktopLinkReply>, env: &Environment<'a>, session: &mut Session<'_, '_>, host: &mut Host<'_>, programs: &Programs<'_>, time: Time) {
         if !host.claimed() {
             return;
         }
@@ -195,12 +211,17 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         let Some(work) = candidate else { return };
         if self.launches.admit(work) {
+            let index = self.launches.find(work).unwrap();
+            self.launches.receipts[index].as_mut().unwrap().link = link;
+            let mut work = work;
             let mut result = work;
             if work.phase != w::STARTING || time.tick >= work.deadline {
                 result.code = 9;
             } else {
                 let title = w::text(&work.title);
-                let request = if title.is_empty() {
+                let request = if let Some(link) = link {
+                    self.associations.shortcut(env.standard, &env.store, w::text(&link.request.link_path), Some(&link.request.link_bytes[..link.request.link_length as usize]))
+                } else if title.is_empty() {
                     Launch::program(
                         w::text(&work.path),
                         w::text(&work.args),
@@ -222,8 +243,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     )
                 };
                 match request {
-                    Err(_) => result.code = 12,
+                    Err(error) => { result.code = 12; result.raw = if matches!(error, crate::shell::launch::Error::LinkChanged) { a::desktop_link_result_changed } else { a::desktop_link_result_unavailable }; },
                     Ok(request) => {
+                        if let Some(receipt) = self.launches.receipts[index].as_mut().unwrap().link.as_mut() {
+                            receipt.resolved_path[..request.path().len()].copy_from_slice(request.path());
+                            receipt.resolved_args[..request.args().len()].copy_from_slice(request.args());
+                            receipt.policy = request.policy.0;
+                            receipt.flags |= a::desktop_link_flag_validated;
+                            work.path = receipt.resolved_path; work.args = receipt.resolved_args; work.policy = receipt.policy;
+                        }
                         self.shell_damage();
                         self.shell.close_top();
                         match self.begin_load(request, Some(work), env, session, programs, time) {
@@ -295,7 +323,19 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             if !receipt.acknowledged {
                 let value = receipt.value;
-                let ack = if value.phase == w::STARTING && value.code == 0 {
+                let ack = if let Some(link) = receipt.link.as_mut() {
+                    link.result = if value.code == 0 { 0 } else if value.raw == a::desktop_link_result_changed { a::desktop_link_result_changed } else { a::desktop_link_result_unavailable };
+                    link.phase = if value.process.valid() {
+                        link.process = a::ProgramProcessHandle { instance_id: value.process.instance, generation: value.process.generation, reserved: 0 };
+                        if link.started_tick == 0 { link.started_tick = time.tick.max(1); }
+                        if value.content != 0 {
+                            if link.ready_tick == 0 { link.ready_tick = time.tick.max(1); }
+                            link.content_generation = value.content;
+                            a::desktop_link_phase_ready
+                        } else { a::desktop_link_phase_process }
+                    } else if value.code != 0 { a::desktop_link_phase_rejected } else { a::desktop_link_phase_starting };
+                    host.link_report(link)
+                } else if value.phase == w::STARTING && value.code == 0 {
                     host.launch_received(value)
                 } else {
                     host.launch_complete(value)

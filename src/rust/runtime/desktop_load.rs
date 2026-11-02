@@ -27,9 +27,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
         launch::path(request.path()).map_err(Failure::Path)?;
         if request.policy != a::LaunchPolicy::console {
             if let Some(index) = self.hosted.single_instance(request.path()) {
+                if origin.is_some_and(|o| o.link_serial != 0) { return Err(Failure::Loader(r4os_sdk::storage::Error::Raw(a::desktop_link_result_unavailable))); }
                 self.hosted
                     .focus(index, session, env.app, time.tick, &mut self.dirty);
                 return Ok(Accepted::Window(index));
+            }
+            if origin.is_some_and(|o| o.link_serial != 0) && self.loads.pending_single(request.path()) {
+                return Err(Failure::Loader(r4os_sdk::storage::Error::Raw(a::desktop_link_result_unavailable)));
             }
             let cancelled = core::array::from_fn(|i| self.hosted.model.launch_cancelled(i));
             if let Some(index) = self.loads.pending_path(request.path(), origin, cancelled) {
@@ -90,6 +94,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 request,
                 self.hosted.terminal_mode,
                 origin,
+                origin.and_then(|work| self.launches.link_binding(work)),
             )
         } {
             self.release_load(index, ticket);

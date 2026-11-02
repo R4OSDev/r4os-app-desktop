@@ -24,6 +24,8 @@ impl Identity {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
+    /// Native link sidecar identity, never encoded into the legacy RDL1 wire.
+    pub link_serial: u64,
     pub broker: Identity,
     pub request: Identity,
     pub desktop: Identity,
@@ -43,6 +45,7 @@ pub struct Message {
 impl Default for Message {
     fn default() -> Self {
         Self {
+            link_serial: 0,
             broker: Identity::default(),
             request: Identity::default(),
             desktop: Identity::default(),
@@ -63,7 +66,7 @@ impl Default for Message {
 }
 impl Message {
     pub fn same_key(self, other: Self) -> bool {
-        self.broker == other.broker && self.request == other.request
+        self.broker == other.broker && self.request == other.request && self.link_serial == other.link_serial
     }
     pub fn done(self) -> bool {
         self.flags & TERMINAL != 0
@@ -90,6 +93,7 @@ pub fn decode(b: &[u8]) -> Option<Message> {
         return None;
     }
     let m = Message {
+        link_serial: 0,
         broker: id_at(b, 8)?,
         request: id_at(b, 24)?,
         desktop: id_at(b, 40)?,

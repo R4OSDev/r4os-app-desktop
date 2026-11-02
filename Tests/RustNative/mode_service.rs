@@ -117,7 +117,7 @@ unsafe extern "C" fn call(
     let source = unsafe { core::slice::from_raw_parts(request, count as usize) };
     let out = unsafe { core::slice::from_raw_parts_mut(response, capacity as usize) };
     match op {
-        launch::EXCHANGE => {
+        a::desktop_link_op_exchange => {
             STATE.lock().unwrap().launch_mailboxes += 1;
             let size = a::TrayDesktopExchange::SIZE;
             let mut value: a::TrayDesktopExchange = wire::decode(source).unwrap();
@@ -138,10 +138,12 @@ unsafe extern "C" fn call(
                     },
                     ..Default::default()
                 }),
-                (&mut out[size + diagnostic::WORK_SIZE..])
+                (&mut out[size + diagnostic::WORK_SIZE..size + diagnostic::WORK_SIZE + launch::SIZE])
                     .try_into()
                     .unwrap(),
             );
+            let link = a::DesktopLinkReply { request: a::DesktopLinkRequest { token: a::DesktopLinkToken { service: a::ProgramProcessHandle { instance_id: 31, generation: 9, reserved: 0 }, ..Default::default() }, ..Default::default() }, flags: a::desktop_link_capabilities, ..Default::default() };
+            wire::encode(&link, &mut out[size + diagnostic::WORK_SIZE + launch::SIZE..]);
         }
         launch::RECEIVED | launch::COMPLETE => {
             let value = launch::decode(source).unwrap();
@@ -355,7 +357,7 @@ fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
         };
         host.tray(&request).unwrap();
         STATE.lock().unwrap().next_error =
-            Some((launch::EXCHANGE, a::service_api_result_timeout, 0));
+            Some((a::desktop_link_op_exchange, a::service_api_result_timeout, 0));
         assert!(host.tray(&request).is_err());
         assert!(
             host.claimed(),
@@ -373,7 +375,7 @@ fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
         );
         // A retired provider still invalidates the common connection.
         STATE.lock().unwrap().next_error =
-            Some((launch::EXCHANGE, a::service_api_result_not_running, 0));
+            Some((a::desktop_link_op_exchange, a::service_api_result_not_running, 0));
         assert!(host.tray(&request).is_err());
         assert!(!host.claimed());
     });

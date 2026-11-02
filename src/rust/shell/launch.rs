@@ -18,6 +18,7 @@ use r4os_sdk::abi as a;
 #[derive(Debug)]
 pub enum Error {
     Length,
+    LinkChanged,
     Memory,
     InvalidProvider,
     Call(r4os_library_helpers::Error),
@@ -227,6 +228,18 @@ impl Associations {
             return Err(Error::InvalidProvider);
         }
         Ok(launch)
+    }
+    /// Same native activation path for Desktop icons and bounded link jobs.
+    /// Always reread the real link; cached icon metadata cannot authorize a start.
+    pub fn shortcut(&self, standard: &r4os_library_helpers::standard::Standard<'_>, store: &Store<'_, '_>, path: &[u8], expected: Option<&[u8]>) -> Result<Launch, Error> {
+        let mut bytes = [0; 1025];
+        let n = store.read(path, &mut bytes).map_err(|_| Error::InvalidProvider)?.ok_or(Error::InvalidProvider)?;
+        if n == 0 || n > 1024 { return Err(Error::InvalidProvider); }
+        if expected.is_some_and(|value| value != &bytes[..n]) { return Err(Error::LinkChanged); }
+        let link = standard.parse_shortcut(&bytes[..n])?;
+        let mut item = Item::new(path, super::desktop_items::FsKind::File);
+        if !item.apply_shortcut(&link) { return Err(Error::InvalidProvider); }
+        self.item(&item)
     }
     pub fn item(&self, item: &Item) -> Result<Launch, Error> {
         match item.launch_kind {

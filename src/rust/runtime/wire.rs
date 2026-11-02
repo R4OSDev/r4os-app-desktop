@@ -223,3 +223,11 @@ mod tests {
         assert!(!copy.same(&reply));
     }
 }
+
+record!(a::DesktopLinkToken; version, size, service, owner, epoch, intent, serial);
+record!(a::DesktopLinkRequest; token, deadline, link_path, link_length, reserved, link_bytes);
+record!(a::DesktopLinkReply; request, result, phase, desktop, process, accepted_tick, started_tick, ready_tick, cleanup_tick, content_generation, resolved_path, resolved_args, policy, flags, completion);
+
+record!(a::ConsoleState; fg, bg, clear_count, cursor_x, cursor_y, cursor_visible, reserved, cols, rows, stdin_pending, stdin_bytes, stdout_bytes, stderr_bytes, output_capacity, output_len, scrollback_lines, output_dropped_bytes);
+
+record!(a::ProgramProcessCompletion; handle, sequence, start_tick, finish_tick, exit_code, task_id, output_revision, output_length, flags, app_class, role, exit_reason, reserved0, console_state);

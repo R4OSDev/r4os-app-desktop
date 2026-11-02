@@ -1377,7 +1377,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             Action::Desktop(i) => {
                 if let Some(item) = self.shell.folder.items.entries().get(i) {
-                    match self.associations.item(item) {
+                    match if item.kind == shell::desktop_items::Kind::Shortcut { self.associations.shortcut(env.standard, &env.store, item.path(), None) } else { self.associations.item(item) } {
                         Ok(request) => self.launch(request, env, session, programs, time),
                         Err(_) => self.message(
                             MessageKind::Error,

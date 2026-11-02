@@ -49,6 +49,7 @@ pub struct Host<'a> {
     response: Vec<u8>,
     work: Option<diagnostic::Work>,
     launch: Option<launch::Message>,
+    link: Option<a::DesktopLinkReply>,
     images: Option<images::Snapshot>,
     images_activity: u64,
     failures: [Option<Failure>; 4],
@@ -64,7 +65,7 @@ impl<'a> Host<'a> {
         if owner.instance_id == 0 || owner.generation == 0 || owner.reserved != 0 {
             return Err(Error::InvalidProvider);
         }
-        let capacity = (a::TrayDesktopExchange::SIZE + diagnostic::WORK_SIZE + launch::SIZE)
+        let capacity = (a::TrayDesktopExchange::SIZE + diagnostic::WORK_SIZE + launch::SIZE + a::DesktopLinkReply::SIZE)
             .max(a::DisplayColorExchange::SIZE);
         let mut request = Vec::new();
         let mut response = Vec::new();
@@ -87,6 +88,7 @@ impl<'a> Host<'a> {
             response,
             work: None,
             launch: None,
+            link: None,
             images: None,
             images_activity: 0,
             failures: [None; 4],
@@ -229,8 +231,8 @@ impl<'a> Host<'a> {
             self.request.resize(size, 0);
             wire::encode(request, &mut self.request);
             self.call(
-                launch::EXCHANGE,
-                size + diagnostic::WORK_SIZE + launch::SIZE,
+                a::desktop_link_op_exchange,
+                size + diagnostic::WORK_SIZE + launch::SIZE + a::DesktopLinkReply::SIZE,
             )?;
             let Some(received) =
                 diagnostic::decode_work(&self.response[size..size + diagnostic::WORK_SIZE])
@@ -245,7 +247,7 @@ impl<'a> Host<'a> {
                 }
                 self.work = Some(work);
             }
-            let Some(launch) = launch::decode(&self.response[size + diagnostic::WORK_SIZE..])
+            let Some(launch) = launch::decode(&self.response[size + diagnostic::WORK_SIZE..size + diagnostic::WORK_SIZE + launch::SIZE])
             else {
                 self.fail();
                 return Err(Error::InvalidProvider);
@@ -259,6 +261,10 @@ impl<'a> Host<'a> {
                 return Err(Error::InvalidProvider);
             }
             self.launch = Some(launch);
+            let link: a::DesktopLinkReply = wire::decode(&self.response[size + diagnostic::WORK_SIZE + launch::SIZE..]).ok_or(Error::InvalidProvider)?;
+            if link.request.token.service.instance_id != launch.broker.instance || link.request.token.service.generation != launch.broker.generation
+                || link.request.link_length > a::desktop_link_max_bytes || (link.request.token.serial != 0 && !same(link.desktop, self.owner)) { self.fail(); return Err(Error::InvalidProvider); }
+            self.link = Some(link);
             wire::decode(&self.response[..size]).ok_or(Error::InvalidProvider)?
         } else {
             self.exchange(operation, request)?
@@ -305,6 +311,15 @@ impl<'a> Host<'a> {
     }
     pub fn launch_received(&mut self, value: launch::Message) -> Result<()> {
         self.launch_reply(launch::RECEIVED, value)
+    }
+    pub fn take_link_mailbox(&mut self) -> Option<a::DesktopLinkReply> {
+        self.link.take().filter(|v| v.request.token.serial != 0)
+    }
+    pub fn link_report(&mut self, value: &a::DesktopLinkReply) -> Result<()> {
+        if !self.claimed || !same(value.desktop, self.owner) { return Err(Error::InvalidProvider); }
+        self.request.resize(a::DesktopLinkReply::SIZE, 0);
+        wire::encode(value, &mut self.request);
+        self.call(a::desktop_link_op_report, 0)
     }
     pub fn diagnostic_work(&self) -> Option<diagnostic::Work> {
         self.work
@@ -530,7 +545,7 @@ impl<'a> Host<'a> {
             let timeout = kind == "timeout"
                 && matches!(
                     operation,
-                    launch::EXCHANGE
+                    launch::EXCHANGE | a::desktop_link_op_exchange | a::desktop_link_op_report
                         | launch::RECEIVED
                         | launch::COMPLETE
                         | diagnostic::COMPLETE_OPERATION
@@ -564,6 +579,7 @@ impl<'a> Host<'a> {
         self.claimed = false;
         self.work = None;
         self.launch = None;
+        self.link = None;
         let _ = self.close();
     }
     #[track_caller]
@@ -592,6 +608,7 @@ impl<'a> Host<'a> {
         self.claimed = false;
         self.images = None;
         self.launch = None;
+        self.link = None;
         self.retiring = true;
         // Endpoint Close releases only that reference, not an in-flight RPC.
         // Keep its bounded native request/buffers through independent Close ACK;
