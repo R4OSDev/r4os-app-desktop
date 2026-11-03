@@ -239,11 +239,10 @@ mod tests {
         let mut state = Controller::default();
         assert!(!state.navigate(&menu, Direction::Down));
         state.toggle();
-        assert_eq!(state.selected_target(&menu), Target::MenuUpdate);
-        state.navigate(&menu, Direction::Down);
         assert_eq!(state.selected_target(&menu), Target::MenuPrograms);
-        assert!(state.view().submenu_open);
+        assert!(!state.view().submenu_open);
         state.navigate(&menu, Direction::Right);
+        assert!(state.view().submenu_open);
         assert_eq!(state.view().focus, Focus::Submenu);
         state.hover(&menu, Target::MenuProgramsInternet);
         assert_eq!(state.selected_target(&menu), Target::MenuProgramsInternet);
@@ -273,7 +272,7 @@ mod tests {
         state.navigate(&menu, Direction::Up);
         assert_eq!(state.selected_target(&menu), Target::MenuScreenOff);
         state.navigate(&menu, Direction::Down);
-        assert_eq!(state.selected_target(&menu), Target::MenuUpdate);
+        assert_eq!(state.selected_target(&menu), Target::MenuPrograms);
         assert!(!state.hover(&menu, Target::None));
     }
 }

@@ -28,7 +28,7 @@ pub enum Target {
     MenuPrograms = 23,
     MenuProgramsInternet = 24,
     MenuKlickifax = 25,
-    MenuUpdate = 26,
+    MenuUpdate = 26, // Reserved historical identity; no active menu/launch after 0.89.38.
     MenuSettingsDisplay = 27,
     MenuScreenOff = 28,
     StartMenuPanel = 50,

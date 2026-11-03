@@ -149,14 +149,7 @@ struct Known {
     policy: Policy,
     args: &'static [u8],
 }
-const KNOWN: [Known; 16] = [
-    Known {
-        target: Target::MenuUpdate,
-        title: b"R4OS Update",
-        path: b"/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X",
-        policy: Policy::Gui,
-        args: b"",
-    },
+const KNOWN: [Known; 15] = [
     Known {
         target: Target::MenuTerminal,
         title: b"Terminal",
@@ -332,12 +325,11 @@ impl Default for Menu {
 impl Menu {
     pub fn defaults() -> Self {
         let mut menu = Self::default();
-        menu.add(KNOWN[0].entry());
         menu.add_submenu(b"Programs", SubmenuId::Programs);
         let programs = menu
             .ensure(SubmenuId::Programs)
             .expect("bounded original programs");
-        for known in &KNOWN[1..8] {
+        for known in &KNOWN[0..7] {
             menu.submenus[programs].add(known.entry());
         }
         menu.submenus[programs].add(Entry::child(
@@ -348,14 +340,14 @@ impl Menu {
         let internet = menu
             .ensure(SubmenuId::Internet)
             .expect("bounded original internet");
-        menu.submenus[internet].add(KNOWN[8].entry());
+        menu.submenus[internet].add(KNOWN[7].entry());
         menu.action(Target::MenuTerminalMode, b"Terminal Mode");
         menu.action(Target::MenuRun, b"Run...");
         menu.add_submenu(b"Settings", SubmenuId::Settings);
         let settings = menu
             .ensure(SubmenuId::Settings)
             .expect("bounded original settings");
-        for index in [15, 9, 10, 11, 12, 13, 14] {
+        for index in [14, 8, 9, 10, 11, 12, 13] {
             menu.submenus[settings].add(KNOWN[index].entry());
         }
         menu.submenus[settings].add(Entry::known(
@@ -363,7 +355,7 @@ impl Menu {
             Kind::Item,
             b"Display",
             Policy::Gui,
-            KNOWN[15].path,
+            KNOWN[14].path,
             b"/DISPLAY",
         ));
         for (target, title) in [
@@ -761,17 +753,17 @@ fn subitem_target(id: SubmenuId, title: &[u8], path: &[u8]) -> Target {
     match id {
         SubmenuId::Programs => item_target(title, path),
         SubmenuId::Internet => {
-            if KNOWN[8].matches(title, path) {
-                KNOWN[8].target
+            if KNOWN[7].matches(title, path) {
+                KNOWN[7].target
             } else {
                 Target::None
             }
         }
         SubmenuId::Settings => {
-            if eq(title, b"Display") && eq(path, KNOWN[15].path) {
+            if eq(title, b"Display") && eq(path, KNOWN[14].path) {
                 return Target::MenuSettingsDisplay;
             }
-            for i in [15, 9, 10, 11, 12, 13, 14] {
+            for i in [14, 8, 9, 10, 11, 12, 13] {
                 if KNOWN[i].matches(title, path) {
                     return KNOWN[i].target;
                 }
@@ -809,41 +801,29 @@ fn copy_z(out: &mut [u8], value: &[u8]) {
 mod tests {
     use super::*;
     #[test]
-    fn original_stable_default_entries() {
+    fn current_defaults_keep_programs_and_retire_standalone_update() {
         let menu = Menu::defaults();
-        assert_eq!(menu.entries().len(), 10);
+        assert_eq!(menu.entries().len(), 9);
         assert_eq!(menu.submenu_count(), 3);
-        assert_eq!(menu.target(0), Target::MenuUpdate);
-        assert_eq!(
-            menu.launch(0).unwrap().path,
-            b"/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X"
-        );
-        assert_eq!(menu.target(1), Target::MenuPrograms);
-        assert_eq!(menu.launch(1).unwrap().kind, Kind::Submenu);
-        assert!(menu.has_submenu(1));
-        assert_eq!(menu.submenu_target(1, 0), Target::MenuTerminal);
-        assert_eq!(menu.submenu_launch(1, 0).unwrap().policy, Policy::Console);
-        assert_eq!(menu.submenu_target(1, 2), Target::MenuPaint);
-        assert_eq!(menu.submenu_target(1, 6), Target::MenuR4code);
-        assert_eq!(menu.submenu_target(1, 7), Target::MenuProgramsInternet);
-        assert!(menu.submenu_has_submenu(1, 7));
-        assert_eq!(menu.nested_target(1, 7, 0), Target::MenuKlickifax);
-        assert_eq!(
-            menu.nested_launch(1, 7, 0).unwrap().path,
-            b"/R4OS/SOFTWARE/INTERNET/KLICKIFAX.R4X"
-        );
-        assert_eq!(menu.target(2), Target::MenuTerminalMode);
-        assert_eq!(menu.target(4), Target::MenuSettings);
-        assert_eq!(menu.target(6), Target::MenuRestart);
-        assert_eq!(menu.target(8), Target::MenuHalt);
-        assert_eq!(menu.target(9), Target::MenuScreenOff);
-        assert_eq!(menu.submenu_target(4, 0), Target::MenuSettingsAppearance);
-        assert_eq!(
-            menu.submenu_launch(4, 0).unwrap().path,
-            b"/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X"
-        );
-        assert_eq!(menu.submenu_target(4, 7), Target::MenuSettingsDisplay);
-        assert_eq!(menu.submenu_launch(4, 7).unwrap().args, b"/DISPLAY");
+        assert_eq!(menu.target(0), Target::MenuPrograms);
+        assert_eq!(menu.launch(0).unwrap().kind, Kind::Submenu);
+        assert!(menu.has_submenu(0));
+        assert_eq!(menu.submenu_target(0, 0), Target::MenuTerminal);
+        assert_eq!(menu.submenu_launch(0, 0).unwrap().policy, Policy::Console);
+        assert_eq!(menu.submenu_target(0, 2), Target::MenuPaint);
+        assert_eq!(menu.submenu_target(0, 6), Target::MenuR4code);
+        assert_eq!(menu.submenu_target(0, 7), Target::MenuProgramsInternet);
+        assert!(menu.submenu_has_submenu(0, 7));
+        assert_eq!(menu.nested_target(0, 7, 0), Target::MenuKlickifax);
+        assert_eq!(menu.target(1), Target::MenuTerminalMode);
+        assert_eq!(menu.target(3), Target::MenuSettings);
+        assert_eq!(menu.target(5), Target::MenuRestart);
+        assert_eq!(menu.target(7), Target::MenuHalt);
+        assert_eq!(menu.target(8), Target::MenuScreenOff);
+        assert_eq!(menu.submenu_target(3, 0), Target::MenuSettingsAppearance);
+        assert_eq!(menu.submenu_target(3, 7), Target::MenuSettingsDisplay);
+        assert_eq!(menu.submenu_launch(3, 7).unwrap().args, b"/DISPLAY");
+        assert!(menu.entries().iter().all(|e| e.target() != Target::MenuUpdate));
     }
     #[test]
     fn original_menu_r4s_parser() {
@@ -872,8 +852,10 @@ mod tests {
     fn original_unknown_config_keeps_defaults() {
         let mut menu = Menu::defaults();
         assert!(!menu.load(b"ITEM;title=Unknown;path=/R4OS/SOFTWARE/DESKTOP/UNKNOWN.R4X;policy=gui\nACTION;title=Settings;action=settings\nACTION;title=Nope;action=unknown\n"));
-        assert_eq!(menu.entries().len(), 10);
-        assert_eq!(menu.target(0), Target::MenuUpdate);
+        assert_eq!(menu.entries().len(), 9);
+        assert_eq!(menu.target(0), Target::MenuPrograms);
+        assert!(!menu.load(b"ITEM;title=R4OS Update;path=/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X;policy=gui\n"));
+        assert!(menu.entries().iter().all(|e| e.target() != Target::MenuUpdate));
     }
     #[test]
     fn original_group_layout_and_nested_hits() {
@@ -881,29 +863,29 @@ mod tests {
         let height = 720;
         let top = height - style::TASKBAR_H - style::MENU_H;
         assert!(menu.starts_group(0));
-        assert!(!menu.starts_group(1));
-        assert!(menu.starts_group(2));
-        assert!(menu.starts_group(6));
+        assert!(!menu.starts_group(2));
+        assert!(menu.starts_group(1));
+        assert!(menu.starts_group(5));
         assert_eq!(menu.group_label(0), b"Programs");
-        assert_eq!(menu.group_label(2), b"System");
-        assert_eq!(menu.group_label(6), b"Power");
+        assert_eq!(menu.group_label(1), b"System");
+        assert_eq!(menu.group_label(5), b"Power");
         assert_eq!(
             menu.item_y(height, 0),
             top + style::MENU_TOP_PAD + style::MENU_GROUP_H
         );
         assert_eq!(menu.hit(height, 40, menu.item_y(height, 1) + 3), Some(1));
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, 1) - 3), Some(0));
-        assert!(menu.item_y(height, 9) + style::MENU_ITEM_H <= top + style::MENU_H);
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, 9) + 3), Some(9));
-        let rect = menu.submenu_rect(1280, height, 1).unwrap();
+        assert_eq!(menu.hit(height, 40, menu.item_y(height, 2) - 3), Some(1));
+        assert!(menu.item_y(height, 8) + style::MENU_ITEM_H <= top + style::MENU_H);
+        assert_eq!(menu.hit(height, 40, menu.item_y(height, 8) + 3), Some(8));
+        let rect = menu.submenu_rect(1280, height, 0).unwrap();
         assert_eq!(rect.x, style::MENU_W - 4);
         assert_eq!(
-            menu.submenu_hit(1280, height, 1, rect.x + 8, submenu_item_y(rect, 7) + 3),
+            menu.submenu_hit(1280, height, 0, rect.x + 8, submenu_item_y(rect, 7) + 3),
             Some(7)
         );
-        let rect = menu.nested_rect(1280, height, 1, 7).unwrap();
+        let rect = menu.nested_rect(1280, height, 0, 7).unwrap();
         assert_eq!(
-            menu.nested_hit(1280, height, 1, 7, rect.x + 8, submenu_item_y(rect, 0) + 3),
+            menu.nested_hit(1280, height, 0, 7, rect.x + 8, submenu_item_y(rect, 0) + 3),
             Some(0)
         );
     }
