@@ -31,6 +31,7 @@ pub enum Target {
     MenuUpdate = 26, // Reserved historical identity; no active menu/launch after 0.89.38.
     MenuSettingsDisplay = 27,
     MenuScreenOff = 28,
+    MenuSpectra = 29,
     StartMenuPanel = 50,
     StartMenuBackdrop = 51,
     RunClose = 60,
