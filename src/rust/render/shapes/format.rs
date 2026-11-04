@@ -52,6 +52,7 @@ pub(super) struct Rounded {
 }
 #[derive(Clone, Copy)]
 pub(super) struct Parsed<'a> {
+    pub gradient: Option<super::gradient::Paint<'a>>,
     pub geometry_kind: u32,
     pub flags: u32,
     pub segment_count: u32,
@@ -111,11 +112,26 @@ pub(super) fn parse<'a>(command: &a::GuiFrameCommand, bytes: &'a [u8]) -> Option
     // All fields are integer scalars; unaligned initialized wire bytes are
     // valid representations. No reference to transport storage is fabricated.
     let h = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<a::GuiShapeResource>()) };
+    let gradient = if command.kind == a::gui_frame_command_kind_gradient_rounded_rect {
+        if h.segment_count != 0 || h.geometry_kind != a::gui_shape_geometry_kind_rounded_rect {
+            return None;
+        }
+        Some(super::gradient::parse(
+            &bytes[core::mem::size_of::<a::GuiShapeResource>()..],
+        )?)
+    } else {
+        None
+    };
     if h.version != a::gui_shape_resource_version
         || h.size != a::gui_shape_resource_size
         || h.segment_count > a::gui_shape_max_segments
         || u64::from(a::gui_shape_resource_size)
             + u64::from(h.segment_count) * u64::from(a::gui_path_segment_size)
+            + if gradient.is_some() {
+                (bytes.len() - core::mem::size_of::<a::GuiShapeResource>()) as u64
+            } else {
+                0
+            }
             != bytes.len() as u64
         || h.flags & !a::gui_shape_flag_shadow_inset != 0
         || (h.clip_w == 0) != (h.clip_h == 0)
@@ -168,6 +184,7 @@ pub(super) fn parse<'a>(command: &a::GuiFrameCommand, bytes: &'a [u8]) -> Option
         return None;
     }
     let parsed = Parsed {
+        gradient,
         geometry_kind: h.geometry_kind,
         flags: h.flags,
         segment_count: h.segment_count,
@@ -254,7 +271,8 @@ pub(super) fn parse<'a>(command: &a::GuiFrameCommand, bytes: &'a [u8]) -> Option
                 return None;
             }
         }
-        a::gui_frame_command_kind_rounded_rect => {
+        a::gui_frame_command_kind_rounded_rect
+        | a::gui_frame_command_kind_gradient_rounded_rect => {
             if parsed.geometry_kind != a::gui_shape_geometry_kind_rounded_rect {
                 return None;
             }

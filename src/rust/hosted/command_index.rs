@@ -96,7 +96,8 @@ fn command_bounds(command: &GuiFrameCommand, resources: &[u8]) -> Bounds {
         | abi::gui_frame_command_kind_path_fill
         | abi::gui_frame_command_kind_path_stroke
         | abi::gui_frame_command_kind_rounded_rect
-        | abi::gui_frame_command_kind_shadow => (),
+        | abi::gui_frame_command_kind_shadow
+        | abi::gui_frame_command_kind_gradient_rounded_rect => (),
         _ => return Bounds::default(),
     }
     Bounds {

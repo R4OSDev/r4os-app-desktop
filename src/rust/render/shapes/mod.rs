@@ -2,6 +2,7 @@
 //! expansion, coverage and clipping are separate; no old renderer callback.
 mod format;
 mod geometry;
+mod gradient;
 mod mask;
 #[cfg(any(test, feature = "render-probe"))]
 #[path = "../../../../Tests/RustNative/shapes.rs"]
@@ -63,7 +64,10 @@ impl Renderer {
         };
         let g = geometry.as_ref();
         let count = area.w.checked_mul(area.h).ok_or(Error::OutOfMemory)?;
-        if count > self.mask_limit {
+        let scratch_bytes = count
+            .checked_mul(if p.gradient.is_some() { 5 } else { 1 })
+            .ok_or(Error::OutOfMemory)?;
+        if scratch_bytes > self.mask_limit {
             return Err(Error::OutOfMemory);
         }
         let mut pixels = allocate(count)?;
@@ -86,12 +90,17 @@ impl Renderer {
                 });
                 mask::blend(painter, bounds, command, area, &mut pixels, p.stroke_argb)
             }
-            a::gui_frame_command_kind_rounded_rect => {
+            a::gui_frame_command_kind_rounded_rect
+            | a::gui_frame_command_kind_gradient_rounded_rect => {
                 let outer = geometry::normalize(p.rounded);
                 mask::fill(&mut pixels, area, p, |point| {
                     geometry::rounded(outer, point)
                 });
-                let drew = mask::blend(painter, bounds, command, area, &mut pixels, p.fill_argb)?;
+                let drew = if let Some(paint) = p.gradient {
+                    gradient::blend(painter, bounds, command, area, &pixels, paint)?
+                } else {
+                    mask::blend(painter, bounds, command, area, &mut pixels, p.fill_argb)?
+                };
                 let inner = geometry::inner(p);
                 mask::fill(&mut pixels, area, p, |point| {
                     geometry::rounded(outer, point)

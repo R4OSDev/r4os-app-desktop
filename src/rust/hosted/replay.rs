@@ -166,7 +166,8 @@ pub fn replay(
             a::gui_frame_command_kind_path_fill
             | a::gui_frame_command_kind_path_stroke
             | a::gui_frame_command_kind_rounded_rect
-            | a::gui_frame_command_kind_shadow => {
+            | a::gui_frame_command_kind_shadow
+            | a::gui_frame_command_kind_gradient_rounded_rect => {
                 if item_rect(client, command).is_some() {
                     if let Some(bytes) = resource(frame.resources, command) {
                         shapes.replay(&mut ui.painter, client, command, bytes)?;
@@ -192,6 +193,7 @@ fn bounded(kind: u32) -> bool {
             | a::gui_frame_command_kind_path_stroke
             | a::gui_frame_command_kind_rounded_rect
             | a::gui_frame_command_kind_shadow
+            | a::gui_frame_command_kind_gradient_rounded_rect
     )
 }
 fn clipped(bounds: Rect, x: i64, y: i64, w: i64, h: i64) -> Option<Rect> {

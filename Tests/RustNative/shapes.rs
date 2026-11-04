@@ -314,6 +314,100 @@ fn original_malformed_resources_rejected_before_replay() {
     );
     assert!(pixels.iter().all(|p| *p == 0x123456));
 }
+fn gradient_resource(kind: u32, first: u32, last: u32) -> Vec<u8> {
+    let mut b = rounded(0.0, 0.0, 32.0, 24.0, [0.0; 8], 0);
+    let start = b.len();
+    b.resize(start + 32 + 16, 0);
+    for (offset, value) in [
+        (0, 1),
+        (4, 32),
+        (8, kind),
+        (12, 2),
+        (24, 16.0f32.to_bits()),
+        (28, 12.0f32.to_bits()),
+    ] {
+        put(&mut b, start + offset, value);
+    }
+    put(&mut b, start + 36, first);
+    put(&mut b, start + 40, 1.0f32.to_bits());
+    put(&mut b, start + 44, last);
+    b
+}
+#[cfg_attr(test, test)]
+fn gradient_colors_alpha_clipping_and_damage_are_consistent() {
+    let mut b = gradient_resource(a::gui_gradient_kind_linear, 0xffff0000, 0xff0000ff);
+    let paint = gradient::parse(&b[160..]).unwrap();
+    assert_eq!(paint.color(0.0, 0.0), 0xffff0000);
+    assert_eq!(paint.color(16.0, 12.0), 0xff0000ff);
+    assert_eq!(paint.color(8.0, 6.0), 0xff800080);
+    let c = command(a::gui_frame_command_kind_gradient_rounded_rect, 32, 24, &b);
+    dirty(c, &b);
+    let mut pixels = [0x203040; 32 * 24];
+    assert!(apply(&mut pixels, 32, 24, &c, &b));
+    assert_ne!(pixels[0], pixels[31]);
+    b = gradient_resource(a::gui_gradient_kind_radial, 0xffff0000, 0xff0000ff);
+    let paint = gradient::parse(&b[160..]).unwrap();
+    assert_eq!(paint.color(0.0, 0.0), 0xffff0000);
+    assert_eq!(paint.color(16.0, 0.0), 0xff0000ff);
+    assert_eq!(paint.color(0.0, 12.0), 0xff0000ff);
+    dirty(
+        command(a::gui_frame_command_kind_gradient_rounded_rect, 32, 24, &b),
+        &b,
+    );
+    b = gradient_resource(a::gui_gradient_kind_linear, 0xffff0000, 0x000000ff);
+    assert_eq!(
+        gradient::parse(&b[160..]).unwrap().color(8.0, 6.0),
+        0x80ff0000
+    );
+}
+#[cfg_attr(test, test)]
+fn malformed_or_overbudget_gradients_do_not_paint() {
+    let original = gradient_resource(a::gui_gradient_kind_linear, 0xffff0000, 0xff0000ff);
+    let c = command(
+        a::gui_frame_command_kind_gradient_rounded_rect,
+        32,
+        24,
+        &original,
+    );
+    for (offset, value) in [
+        (160, 0),
+        (164, 0),
+        (168, 99),
+        (172, 1),
+        (184, f32::NAN.to_bits()),
+        (200, 0),
+    ] {
+        let mut b = original.clone();
+        put(&mut b, offset, value);
+        let mut pixels = [0x123456; 32 * 24];
+        let mut scene = CpuScene::new(&mut pixels, 32, 24).unwrap();
+        assert_eq!(
+            Renderer::default().paint(
+                &mut Painter::cpu(&mut scene),
+                Rect::new(0, 0, 32, 24),
+                &c,
+                &b
+            ),
+            Err(Error::Invalid)
+        );
+        assert!(pixels.iter().all(|p| *p == 0x123456));
+    }
+    let mut pixels = [0x123456; 32 * 24];
+    let mut scene = CpuScene::new(&mut pixels, 32, 24).unwrap();
+    let mut renderer = Renderer {
+        mask_limit: 32 * 24 * 5 - 1,
+    };
+    assert_eq!(
+        renderer.paint(
+            &mut Painter::cpu(&mut scene),
+            Rect::new(0, 0, 32, 24),
+            &c,
+            &original
+        ),
+        Err(Error::OutOfMemory)
+    );
+    assert!(pixels.iter().all(|p| *p == 0x123456));
+}
 #[cfg(feature = "render-probe")]
 pub(super) fn conformance_probe() {
     original_tiny_damage_bounds_scratch_independently_of_command_dimensions();
@@ -322,4 +416,6 @@ pub(super) fn conformance_probe() {
     original_separate_outer_and_inset_shadow_layers_golden();
     original_one_logical_command_tiny_and_large_rounded_goldens();
     original_malformed_resources_rejected_before_replay();
+    gradient_colors_alpha_clipping_and_damage_are_consistent();
+    malformed_or_overbudget_gradients_do_not_paint();
 }
