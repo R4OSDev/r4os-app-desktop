@@ -48,6 +48,8 @@ struct LayoutEntry {
 #[derive(Clone, Copy)]
 struct Glyph {
     used: bool,
+    width: u8,
+    advance: u8,
     font: u32,
     revision: u32,
     scalar: u32,
@@ -57,6 +59,8 @@ impl Default for Glyph {
     fn default() -> Self {
         Self {
             used: false,
+            width: CELL as u8,
+            advance: CELL as u8,
             font: 0,
             revision: 0,
             scalar: 0,
@@ -230,6 +234,8 @@ impl Cache {
         }
         *entry = Glyph {
             used: true,
+            width: layout.width as u8,
+            advance: layout.width as u8,
             font,
             revision,
             scalar,
@@ -238,6 +244,11 @@ impl Cache {
         if layout.imported {
             let mut bitmap = GuiGlyphBitmap::default();
             if source.bitmap(font, scalar, &mut bitmap) == 0 {
+                entry.advance = bitmap.advance.min(MAX_CELL as u32) as u8;
+                entry.width = bitmap
+                    .width
+                    .max(u32::from(entry.advance))
+                    .min(MAX_CELL as u32) as u8;
                 let height = (bitmap.height as usize)
                     .min(layout.bitmap_height)
                     .min(MAX_CELL);
@@ -282,6 +293,57 @@ impl Cache {
         let Some(bounds) = crate::render::scene::intersect(bounds, scene) else {
             return Ok(());
         };
+        if layout.imported {
+            // Bitmap advances are authoritative, as in R4DRAW.fontMeasure.
+            // Only vertically visible lines need glyph metrics; known suffixes
+            // beyond the right edge still skip directly to the next newline.
+            let (mut offset, mut cursor_x, mut cursor_y) = (0, x, y);
+            while offset < text.len() && !bounds.is_empty() && x < bounds.right() {
+                if cursor_y >= bounds.bottom() {
+                    break;
+                }
+                if cursor_y.saturating_add(layout.height as i32) <= bounds.y
+                    || cursor_x >= bounds.right()
+                {
+                    let Some(next) = text[offset..].iter().position(|&b| b == b'\n') else {
+                        break;
+                    };
+                    offset += next + 1;
+                    cursor_x = x;
+                    cursor_y = cursor_y.saturating_add(layout.height as i32);
+                    continue;
+                }
+                let (scalar, count) = layout::decode(&text[offset..]);
+                offset += count;
+                if scalar == 13 {
+                    continue;
+                }
+                if scalar == 10 {
+                    cursor_x = x;
+                    cursor_y = cursor_y.saturating_add(layout.height as i32);
+                    continue;
+                }
+                let glyph = self.coverage(source, font, revision, layout, scalar);
+                let advance = i32::from(glyph.advance);
+                paint_glyph(
+                    glyph,
+                    font,
+                    revision,
+                    scalar,
+                    cursor_x,
+                    cursor_y,
+                    usize::from(glyph.width),
+                    layout.height,
+                    fg,
+                    bg,
+                    bounds,
+                    scene,
+                    &mut paint,
+                )?;
+                cursor_x = cursor_x.saturating_add(advance);
+            }
+            return Ok(());
+        }
         for cell in Visible::new(
             text,
             bounds,
@@ -290,46 +352,64 @@ impl Cache {
             layout.width as i32,
             layout.height as i32,
         ) {
-            let Some(clip) = layout::clip_cell(
-                bounds,
+            let coverage = self.coverage(source, font, revision, layout, cell.scalar);
+            paint_glyph(
+                coverage,
+                font,
+                revision,
+                cell.scalar,
                 cell.x,
                 cell.y,
                 layout.width,
                 layout.height,
-                scene.right(),
-                scene.bottom(),
-            ) else {
-                continue;
-            };
-            let coverage = self.coverage(source, font, revision, layout, cell.scalar);
-            let mut view = View::new(
-                Format::Glyph,
-                layout.width as u32,
-                layout.height as u32,
-                0,
-                &[],
-            );
-            view.rows = &coverage.rows;
-            view.foreground = fg;
-            view.background = bg;
-            view.identity = Identity {
-                font,
-                revision,
-                glyph: cell.scalar,
-                ..Default::default()
-            };
-            paint(Paint::Picture(Picture {
-                view,
-                viewport: Rect::new(cell.x, cell.y, layout.width as i32, layout.height as i32),
-                clip,
-                guest_w: layout.width as u32,
-                guest_h: layout.height as u32,
-                source_x: 0,
-                source_y: 0,
-            }))?;
+                fg,
+                bg,
+                bounds,
+                scene,
+                &mut paint,
+            )?;
         }
         Ok(())
     }
+}
+fn paint_glyph(
+    coverage: &Glyph,
+    font: u32,
+    revision: u32,
+    scalar: u32,
+    x: i32,
+    y: i32,
+    width: usize,
+    height: usize,
+    fg: u32,
+    bg: u32,
+    bounds: Rect,
+    scene: Rect,
+    paint: &mut impl FnMut(Paint<'_>) -> Result<()>,
+) -> Result<()> {
+    let Some(clip) = layout::clip_cell(bounds, x, y, width, height, scene.right(), scene.bottom())
+    else {
+        return Ok(());
+    };
+    let mut view = View::new(Format::Glyph, width as u32, height as u32, 0, &[]);
+    view.rows = &coverage.rows;
+    view.foreground = fg;
+    view.background = bg;
+    view.identity = Identity {
+        font,
+        revision,
+        glyph: scalar,
+        ..Default::default()
+    };
+    paint(Paint::Picture(Picture {
+        view,
+        viewport: Rect::new(x, y, width as i32, height as i32),
+        clip,
+        guest_w: width as u32,
+        guest_h: height as u32,
+        source_x: 0,
+        source_y: 0,
+    }))
 }
 fn cpu(painter: &mut crate::render::scene::CpuScene<'_>, operation: Paint<'_>) -> Result<()> {
     let Paint::Picture(picture) = operation else {
@@ -388,6 +468,9 @@ mod tests {
                 return -1;
             }
             out.height = 2;
+            // This original case tests the 40-pixel layout/bitmap clamp.
+            out.width = 64;
+            out.advance = 64;
             out.rows[0] = 1;
             out.rows[1] = 2;
             0
@@ -561,6 +644,107 @@ mod tests {
             })
             .unwrap();
         assert!(pixels.iter().any(|&p| p != 0));
+    }
+    #[test]
+    fn proportional_bitmap_advances_match_measurement_and_dirty_clipping() {
+        struct Proportional;
+        impl Fonts for Proportional {
+            fn revision(&mut self) -> u32 {
+                46
+            }
+            fn has_glyph_row(&self) -> bool {
+                true
+            }
+            fn info(&mut self, _: u32, out: &mut GuiFontInfo) -> i32 {
+                out.flags = abi::gui_font_flag_renderable;
+                out.max_advance = 12;
+                out.height = 1;
+                out.line_height = 2;
+                1
+            }
+            fn bitmap(&mut self, _: u32, scalar: u32, out: &mut GuiGlyphBitmap) -> i32 {
+                out.height = 1;
+                out.rows[0] = 1;
+                out.advance = match scalar {
+                    65 => 4,
+                    105 => 2,
+                    66 => 8,
+                    _ => 0,
+                };
+                out.width = out.advance;
+                0
+            }
+            fn row(&mut self, _: u32, _: u32, _: u32) -> u64 {
+                panic!("bitmap path required")
+            }
+        }
+        let bounds = Rect::new(0, 0, 40, 4);
+        let mut reference = [0x123456; 160];
+        let mut cache = Cache::new().unwrap();
+        {
+            let mut scene = CpuScene::new(&mut reference, 40, 4).unwrap();
+            cache
+                .paint(
+                    &mut Proportional,
+                    7,
+                    0,
+                    0,
+                    b"AiB",
+                    0xffffff,
+                    0,
+                    bounds,
+                    bounds,
+                    |op| cpu(&mut scene, op),
+                )
+                .unwrap();
+        }
+        for (x, &pixel) in reference[..40].iter().enumerate() {
+            assert_eq!(
+                pixel,
+                if [0, 4, 6].contains(&x) {
+                    0xffffff
+                } else if x < 14 {
+                    0
+                } else {
+                    0x123456
+                }
+            );
+        }
+        for clip in [
+            Rect::new(3, 0, 7, 2),
+            Rect::new(0, 1, 14, 1),
+            Rect::new(13, 0, 1, 2),
+        ] {
+            let mut actual = [0x123456; 160];
+            let mut scene = CpuScene::new(&mut actual, 40, 4).unwrap();
+            cache
+                .paint(
+                    &mut Proportional,
+                    7,
+                    0,
+                    0,
+                    b"AiB",
+                    0xffffff,
+                    0,
+                    clip,
+                    bounds,
+                    |op| cpu(&mut scene, op),
+                )
+                .unwrap();
+            for y in 0..4 {
+                for x in 0..40 {
+                    assert_eq!(
+                        actual[y * 40 + x],
+                        if clip.contains(x as i32, y as i32) {
+                            reference[y * 40 + x]
+                        } else {
+                            0x123456
+                        }
+                    );
+                }
+            }
+        }
+        assert_eq!(core::mem::size_of::<Glyph>(), 336); // existing bounded cache footprint
     }
     #[test]
     fn imported_bitmap_row_fallback_layout_clamp_and_revision_replacement() {
