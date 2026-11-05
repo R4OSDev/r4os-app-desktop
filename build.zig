@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) void {
     // independent original Zig oracles remain available as explicit targets.
     const sdk_build = b.lazyImport(@This(), "r4os_sdk") orelse return;
     const sdk_dep = b.dependencyFromBuildZig(sdk_build, .{});
-    const libraries_build = b.lazyImport(@This(), "r4os_libraries") orelse return;
-    const libraries_dep = b.dependencyFromBuildZig(libraries_build, .{});
+    const libraries_build = sdk_build.systemLibrariesBuild(sdk_dep) orelse return;
+    const libraries_dep = sdk_dep.builder.dependencyFromBuildZig(libraries_build, .{});
     const sdk = sdk_build.sdk(b, sdk_dep, .{});
     if (!(b.option(bool, "host-tests", "Build only explicit original host oracles") orelse false))
         @panic("Build the Rust product through Build.sh/Build.bat. Original Zig oracles require -Dhost-tests=true.");

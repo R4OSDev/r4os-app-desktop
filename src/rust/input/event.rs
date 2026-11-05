@@ -32,6 +32,7 @@ pub enum Target {
     MenuSettingsDisplay = 27,
     MenuScreenOff = 28,
     MenuSpectra = 29,
+    MenuPortex = 30,
     StartMenuPanel = 50,
     StartMenuBackdrop = 51,
     RunClose = 60,

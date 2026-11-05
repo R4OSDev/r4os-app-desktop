@@ -185,6 +185,13 @@ impl<'app, 'start> Store<'app, 'start> {
         let mut name = [0; desktop_folder::MAX_LINK_PATH + 1];
         let mut bytes = [0; desktop_folder::MAX_LINK_BYTES];
         for link in desktop_folder::DEFAULTS {
+            // Existing installations may receive Desktop before Portex.
+            // Publish its new default only once the module is present.
+            if link == desktop_folder::DefaultLink::Portex
+                && !matches!(files.info(&path(link.target())?), Ok(Some(_)))
+            {
+                continue;
+            }
             let Some(name) = desktop_folder::default_path(&mut name, link.file()) else {
                 continue;
             };

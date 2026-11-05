@@ -7,7 +7,7 @@ use crate::{
 };
 pub const MAX_ENTRIES: usize = 10;
 pub const MAX_SUBMENUS: usize = 3;
-pub const MAX_CHILDREN: usize = 8;
+pub const MAX_CHILDREN: usize = 9;
 pub const SUBMENU_W: i32 = 196;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -149,7 +149,7 @@ struct Known {
     policy: Policy,
     args: &'static [u8],
 }
-const KNOWN: [Known; 16] = [
+const KNOWN: [Known; 17] = [
     Known {
         target: Target::MenuTerminal,
         title: b"Terminal",
@@ -262,6 +262,13 @@ const KNOWN: [Known; 16] = [
         policy: Policy::Gui,
         args: b"/GUI",
     },
+    Known {
+        target: Target::MenuPortex,
+        title: b"Portex",
+        path: b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X",
+        policy: Policy::Gui,
+        args: b"",
+    },
 ];
 impl Known {
     fn entry(&self) -> Entry {
@@ -349,6 +356,7 @@ impl Menu {
             .ensure(SubmenuId::Internet)
             .expect("bounded original internet");
         menu.submenus[internet].add(KNOWN[7].entry());
+        menu.submenus[programs].add(KNOWN[16].entry());
         menu.action(Target::MenuTerminalMode, b"Terminal Mode");
         menu.action(Target::MenuRun, b"Run...");
         menu.add_submenu(b"Settings", SubmenuId::Settings);
@@ -826,6 +834,8 @@ mod tests {
         assert_eq!(menu.submenu_target(1, 7), Target::MenuProgramsInternet);
         assert!(menu.submenu_has_submenu(1, 7));
         assert_eq!(menu.nested_target(1, 7, 0), Target::MenuKlickifax);
+        assert_eq!(menu.submenu_target(1, 8), Target::MenuPortex);
+        assert_eq!(menu.submenu_launch(1, 8).unwrap().path, b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X");
         assert_eq!(menu.target(2), Target::MenuTerminalMode);
         assert_eq!(menu.target(4), Target::MenuSettings);
         assert_eq!(menu.target(6), Target::MenuRestart);
