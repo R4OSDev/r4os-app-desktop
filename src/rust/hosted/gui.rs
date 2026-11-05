@@ -89,6 +89,45 @@ impl<'loan, 'app, 'storage> Host<'loan, 'app, 'storage> {
             ))
         }
     }
+    pub fn appearance(
+        &mut self,
+        owner: a::ProgramProcessHandle,
+        index: usize,
+    ) -> Option<a::GuiWindowAppearance> {
+        if !super::process::valid(owner) || index >= 4 {
+            return None;
+        }
+        let mut identity = a::GuiPointerWindowIdentity::default();
+        let query = a::GuiHostInputRequest {
+            window: a::GuiPointerWindowIdentity {
+                owner,
+                window_id: index as i32,
+                ..Default::default()
+            },
+            operation: a::gui_host_input_operation_query,
+            ..Default::default()
+        };
+        if self.input(&query, &mut identity) != 0 {
+            return None;
+        }
+        let mut result = a::GuiWindowAppearance::default();
+        let rc = unsafe {
+            code(c::R4SdkGuiDesktopContext_guiWindowAppearance(
+                0,
+                self.session.native_desktop(),
+                &identity,
+                &mut result,
+            ))
+        };
+        (rc == 0
+            && super::process::same(result.window.owner, owner)
+            && result.window.window_id == index as i32
+            && result.window.epoch == identity.epoch
+            && identity.epoch != 0
+            && result.window.reserved == 0
+            && result.reserved == 0)
+            .then_some(result)
+    }
     pub fn console_host(&mut self, instance: u32, kind: a::ConsoleHostKind) -> i32 {
         unsafe {
             code(c::R4SdkGuiDesktopContext_programSetConsoleHost(

@@ -9,6 +9,14 @@ use crate::shell::style::{BUTTON, TASKBAR_H, TITLE_H};
 const RESIZE_MARGIN: i32 = 6;
 const TITLE_MAX: usize = 40;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TitleAppearance {
+    generation: u64,
+    epoch: u64,
+    flags: u32,
+    background: u32,
+    foreground: u32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
     Terminal,
@@ -59,10 +67,12 @@ pub struct Window {
     min_frame_w: i32,
     min_frame_h: i32,
     title: [u8; TITLE_MAX + 1],
+    title_appearance: Option<TitleAppearance>,
 }
 impl Window {
     pub fn new(kind: Kind, rect: Rect) -> Self {
         Self {
+            title_appearance: None,
             kind,
             starting: false,
             current: rect,
@@ -200,7 +210,59 @@ impl Window {
         self.close_requested_tick = 0;
     }
     pub fn bind_instance(&mut self, id: u32) {
+        // Even the same PID may be a newly admitted process generation.
+        self.title_appearance = None;
         self.instance_id = id;
+    }
+    pub fn set_title_appearance(
+        &mut self,
+        value: Option<r4os_contract::GuiWindowAppearance>,
+    ) -> bool {
+        let next = value
+            .filter(|v| {
+                self.kind == Kind::App
+                    && self.instance_id != 0
+                    && v.window.owner.instance_id == self.instance_id
+                    && v.window.owner.generation != 0
+                    && v.window.owner.reserved == 0
+                    && v.window.reserved == 0
+                    && v.window.epoch != 0
+                    && v.reserved == 0
+                    && v.flags & !3 == 0
+                    && v.flags != 0
+                    && v.title_background <= 0xffffff
+                    && v.title_foreground <= 0xffffff
+            })
+            .map(|v| TitleAppearance {
+                generation: v.window.owner.generation,
+                epoch: v.window.epoch,
+                flags: v.flags,
+                background: v.title_background,
+                foreground: v.title_foreground,
+            });
+        let changed = self.title_appearance != next;
+        self.title_appearance = next;
+        changed
+    }
+    pub fn active_title_colors(&self, background: u32, foreground: u32) -> (u32, u32) {
+        match self
+            .title_appearance
+            .filter(|_| self.kind == Kind::App && self.instance_id != 0)
+        {
+            Some(v) => (
+                if v.flags & 1 != 0 {
+                    v.background
+                } else {
+                    background
+                },
+                if v.flags & 2 != 0 {
+                    v.foreground
+                } else {
+                    foreground
+                },
+            ),
+            None => (background, foreground),
+        }
     }
     pub fn starting(&self) -> bool {
         self.starting
@@ -228,6 +290,7 @@ impl Window {
         self.close_requested_tick = 0;
     }
     pub fn unbind_instance(&mut self) {
+        self.title_appearance = None;
         self.starting = false;
         self.leave_fullscreen();
         self.instance_id = 0;
@@ -758,6 +821,55 @@ mod tests {
         assert_eq!(w.kind(), Kind::App);
         assert_eq!(w.instance_id(), 7);
         assert_eq!(w.title().to_bytes(), b"Notepad");
+    }
+    #[test]
+    fn title_appearance_is_optional_and_never_survives_rebinding() {
+        let mut w = manager();
+        let defaults = (0x000080, 0xffffff);
+        let appearance = r4os_contract::GuiWindowAppearance {
+            window: r4os_contract::GuiPointerWindowIdentity {
+                owner: r4os_contract::ProgramProcessHandle {
+                    instance_id: 7,
+                    generation: 42,
+                    reserved: 0,
+                },
+                epoch: 55,
+                window_id: 1,
+                reserved: 0,
+            },
+            flags: 3,
+            title_background: 0,
+            title_foreground: 0xffeedd,
+            reserved: 0,
+        };
+        assert!(!w.set_title_appearance(Some(appearance)));
+        w.bind_app(7, c"App");
+        assert!(w.set_title_appearance(Some(appearance)));
+        assert_eq!(w.active_title_colors(defaults.0, defaults.1), (0, 0xffeedd));
+        assert!(!w.set_title_appearance(Some(appearance)));
+        w.bind_app(7, c"Same PID, fresh generation");
+        assert_eq!(w.active_title_colors(defaults.0, defaults.1), defaults);
+        let mut invalid = appearance;
+        invalid.window.owner.instance_id = 8;
+        assert!(!w.set_title_appearance(Some(invalid)));
+        invalid = appearance;
+        invalid.window.epoch = 0;
+        assert!(!w.set_title_appearance(Some(invalid)));
+        invalid = appearance;
+        invalid.flags = 4;
+        assert!(!w.set_title_appearance(Some(invalid)));
+        let mut background_only = appearance;
+        background_only.flags = 1;
+        assert!(w.set_title_appearance(Some(background_only)));
+        assert_eq!(
+            w.active_title_colors(defaults.0, defaults.1),
+            (0, defaults.1)
+        );
+        w.unbind_instance();
+        assert_eq!(w.active_title_colors(defaults.0, defaults.1), defaults);
+        w.bind_console(7, c"Foreign terminal");
+        assert!(!w.set_title_appearance(Some(appearance)));
+        assert_eq!(w.active_title_colors(defaults.0, defaults.1), defaults);
     }
     #[test]
     fn title_runtime_buffer_preserves_whole_utf8_prefix() {

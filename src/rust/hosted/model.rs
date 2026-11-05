@@ -125,7 +125,7 @@ impl Model {
         }
         let win = self.windows.window_mut(index).unwrap();
         win.bind_app(handle.instance_id, c"R4X App");
-        metadata(win, index, session, work);
+        metadata(win, handle, index, session, work);
         if let Ok(revision) = Host::new(session).revision(handle.instance_id) {
             win.set_gui_revision(revision)
         }
@@ -300,6 +300,7 @@ impl Model {
                 .bind_app(handle.instance_id, c"R4X App");
             metadata(
                 self.windows.window_mut(index).unwrap(),
+                handle,
                 index,
                 session,
                 work_areas[index],
@@ -373,7 +374,8 @@ impl Model {
                     window.set_gui_revision(revision);
                     client.frames_mut().mark_pending();
                     let before = window.frame_surface().rect;
-                    let change = metadata(window, index, session, work_areas[index]);
+                    let change =
+                        metadata(window, client.handle(), index, session, work_areas[index]);
                     if change.title || change.geometry {
                         dirty.invalidate(before);
                         dirty.invalidate(window.frame_surface().rect);
@@ -433,6 +435,7 @@ struct Metadata {
 }
 fn metadata(
     window: &mut crate::windows::window::Window,
+    owner: a::ProgramProcessHandle,
     index: usize,
     session: &mut Session<'_, '_>,
     work_area: Rect,
@@ -451,6 +454,7 @@ fn metadata(
         .minimum_size(instance)
         .is_some_and(|size| window.set_min_client_size_in(size.w, size.h, work_area));
     let _ = gui.publish_info(instance, &window.gui_info(index));
+    changed |= window.set_title_appearance(gui.appearance(owner, index));
     Metadata {
         title: changed,
         geometry,

@@ -65,10 +65,10 @@ pub fn chrome(
         ui.fill(frame, s::WINDOW_BG)?;
         ui.bevel(frame, false)?;
         let title = win.title_surface().rect;
-        let color = if active {
-            s::TITLE_ACTIVE
+        let (color, text_color) = if active {
+            win.active_title_colors(s::TITLE_ACTIVE, s::TITLE_TEXT)
         } else {
-            s::TITLE_INACTIVE
+            (s::TITLE_INACTIVE, s::TITLE_TEXT)
         };
         let text = if win.kind() == Kind::Terminal && index == 0 && !console_title.is_empty() {
             console_title
@@ -87,7 +87,8 @@ pub fn chrome(
                 s::TASKBAR_LIGHT
             },
         )?;
-        ui.text(title.x + 5, title.y + 6, text, s::TITLE_TEXT, color)?;
+        // Keep the native system buttons' own contrasting surfaces and glyphs.
+        ui.text(title.x + 5, title.y + 6, text, text_color, color)?;
         let max = if win.maximized() {
             [
                 Target::TerminalMaxFull,
