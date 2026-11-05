@@ -130,8 +130,9 @@ pub(super) fn blend(
     area: Area,
     mask: &[u8],
     paint: Paint<'_>,
+    bytes: &mut alloc::vec::Vec<u8>,
 ) -> Result<bool> {
-    let mut bytes = super::allocate(mask.len().checked_mul(4).ok_or(Error::OutOfMemory)?)?;
+    super::resize_buffer(bytes, mask.len().checked_mul(4).ok_or(Error::OutOfMemory)?)?;
     for y in 0..area.h {
         for x in 0..area.w {
             let i = y * area.w + x;
@@ -155,7 +156,7 @@ pub(super) fn blend(
             area.w as u32,
             area.h as u32,
             area.w * 4,
-            &bytes,
+            bytes.as_slice(),
         ),
         viewport: rect,
         clip: rect,

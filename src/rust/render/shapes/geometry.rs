@@ -317,8 +317,22 @@ fn ellipse(p: Point, cx: f32, cy: f32, r: Point) -> bool {
     let dy = (p.y - cy) / r.y;
     dx * dx + dy * dy <= 1.0
 }
+/// Preserve the original normalizer's f32 rounding once at the caller's
+/// command boundary instead of repeating it for every coverage sample.
+#[derive(Clone, Copy)]
+pub(super) struct NormalizedRounded(Rounded);
+impl NormalizedRounded {
+    pub fn new(raw: Rounded) -> Self {
+        Self(normalize(raw))
+    }
+    pub fn contains(self, p: Point) -> bool {
+        rounded_normalized(self.0, p)
+    }
+}
 pub(super) fn rounded(raw: Rounded, p: Point) -> bool {
-    let r = normalize(raw);
+    NormalizedRounded::new(raw).contains(p)
+}
+fn rounded_normalized(r: Rounded, p: Point) -> bool {
     if r.w <= 0.0 || r.h <= 0.0 || p.x < r.x || p.y < r.y || p.x >= r.x + r.w || p.y >= r.y + r.h {
         return false;
     }

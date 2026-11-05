@@ -147,14 +147,17 @@ fn original_tiny_damage_bounds_scratch_independently_of_command_dimensions() {
     let crop = mask::area(scene.paint_bounds(), scene.full_rect(), &c, 0).unwrap();
     assert_eq!(crop.w * crop.h, 1);
     assert!(
-        Renderer { mask_limit: 2 }
-            .paint(
-                &mut Painter::cpu(&mut scene),
-                Rect::new(0, 0, 16, 16),
-                &c,
-                &b
-            )
-            .unwrap()
+        Renderer {
+            mask_limit: 2,
+            ..Renderer::default()
+        }
+        .paint(
+            &mut Painter::cpu(&mut scene),
+            Rect::new(0, 0, 16, 16),
+            &c,
+            &b
+        )
+        .unwrap()
     );
     assert_eq!(pixels[8 * 16 + 8], 0xffffff);
     assert_eq!(pixels.iter().filter(|p| **p != 0).count(), 1);
@@ -396,6 +399,7 @@ fn malformed_or_overbudget_gradients_do_not_paint() {
     let mut scene = CpuScene::new(&mut pixels, 32, 24).unwrap();
     let mut renderer = Renderer {
         mask_limit: 32 * 24 * 5 - 1,
+        ..Renderer::default()
     };
     assert_eq!(
         renderer.paint(
@@ -408,6 +412,89 @@ fn malformed_or_overbudget_gradients_do_not_paint() {
     );
     assert!(pixels.iter().all(|p| *p == 0x123456));
 }
+
+#[cfg_attr(test, test)]
+fn scratch_reuse_keeps_mixed_pixels_and_recovers_after_invalid_input() {
+    let mut resources = vec![gradient_resource(
+        a::gui_gradient_kind_linear,
+        0x90ff0000,
+        0x300000ff,
+    )];
+    let mut solid = rounded(1.0, 1.0, 14.0, 12.0, [5.0; 8], 0x806080c0);
+    scalar!(&mut solid, border_top_bits, 1.0);
+    scalar!(&mut solid, border_right_bits, 1.0);
+    scalar!(&mut solid, border_bottom_bits, 1.0);
+    scalar!(&mut solid, border_left_bits, 1.0);
+    field!(&mut solid, stroke_argb, 0xb0abcdef);
+    resources.push(solid);
+    let mut shadow = rounded(4.0, 4.0, 16.0, 12.0, [4.0; 8], 0);
+    field!(&mut shadow, shadow_argb, 0x90602040);
+    scalar!(&mut shadow, shadow_blur_bits, 2.0);
+    resources.push(shadow);
+    let kinds = [
+        a::gui_frame_command_kind_gradient_rounded_rect,
+        a::gui_frame_command_kind_rounded_rect,
+        a::gui_frame_command_kind_shadow,
+    ];
+    let mut shared = Renderer::default();
+    let mut expected = vec![0x203040; 48 * 40];
+    let mut actual = expected.clone();
+    for round in 0..3 {
+        for (i, resource) in resources.iter().enumerate() {
+            let c = command(kinds[i], 32, 24, resource);
+            for (image, renderer) in [
+                (&mut expected, &mut Renderer::default()),
+                (&mut actual, &mut shared),
+            ] {
+                let mut scene = CpuScene::new(image, 48, 40).unwrap();
+                if round == 1 {
+                    scene.set_paint_clip(Rect::new(8, 8, 1, 1));
+                }
+                assert!(
+                    renderer
+                        .paint(
+                            &mut Painter::cpu(&mut scene),
+                            Rect::new(0, 0, 48, 40),
+                            &c,
+                            resource
+                        )
+                        .unwrap()
+                );
+            }
+            assert_eq!(expected, actual, "mixed shape {i}, round {round}");
+            let mut invalid = resource.clone();
+            invalid[0] = 0;
+            let mut scene = CpuScene::new(&mut actual, 48, 40).unwrap();
+            assert_eq!(
+                shared.paint(
+                    &mut Painter::cpu(&mut scene),
+                    Rect::new(0, 0, 48, 40),
+                    &c,
+                    &invalid
+                ),
+                Err(Error::Invalid)
+            );
+            assert_eq!(expected, actual);
+        }
+    }
+    // A legal large draw exceeds retention, not the draw admission budget.
+    let mut large = vec![0; 2048 * 513];
+    let mut scene = CpuScene::new(&mut large, 2048, 513).unwrap();
+    let resource = rounded(0.0, 0.0, 2048.0, 513.0, [0.0; 8], 0xffffffff);
+    let c = command(a::gui_frame_command_kind_rounded_rect, 2048, 513, &resource);
+    assert!(
+        shared
+            .paint(
+                &mut Painter::cpu(&mut scene),
+                Rect::new(0, 0, 2048, 513),
+                &c,
+                &resource
+            )
+            .unwrap()
+    );
+    assert!(large.iter().all(|pixel| *pixel == 0xffffff));
+    assert!(shared.pixels.capacity() <= 1024 * 1024 && shared.scratch.capacity() <= 1024 * 1024);
+}
 #[cfg(feature = "render-probe")]
 pub(super) fn conformance_probe() {
     original_tiny_damage_bounds_scratch_independently_of_command_dimensions();
@@ -418,4 +505,5 @@ pub(super) fn conformance_probe() {
     original_malformed_resources_rejected_before_replay();
     gradient_colors_alpha_clipping_and_damage_are_consistent();
     malformed_or_overbudget_gradients_do_not_paint();
+    scratch_reuse_keeps_mixed_pixels_and_recovers_after_invalid_input();
 }

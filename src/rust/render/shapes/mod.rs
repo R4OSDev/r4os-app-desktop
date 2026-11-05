@@ -25,23 +25,46 @@ use geometry::Geometry;
 use r4os_contract as a;
 pub struct Renderer {
     mask_limit: usize,
+    pixels: Vec<u8>,
+    scratch: Vec<u8>,
 }
 impl Default for Renderer {
     fn default() -> Self {
         Self {
             mask_limit: usize::MAX,
+            pixels: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 }
-fn allocate(count: usize) -> Result<Vec<u8>> {
-    let mut data = Vec::new();
+fn resize_buffer(data: &mut Vec<u8>, count: usize) -> Result<()> {
+    data.clear();
     data.try_reserve_exact(count)
         .map_err(|_| Error::OutOfMemory)?;
     data.resize(count, 0);
-    Ok(data)
+    Ok(())
 }
 impl Renderer {
     pub fn paint(
+        &mut self,
+        painter: &mut Painter<'_, '_>,
+        bounds: Rect,
+        command: &a::GuiFrameCommand,
+        resource: &[u8],
+    ) -> Result<bool> {
+        let result = self.paint_inner(painter, bounds, command, resource);
+        // Retention is independent of admission: larger legal draws still
+        // work, but do not pin their peak scratch allocation for the session.
+        let retained = self.mask_limit.min(1024 * 1024);
+        for data in [&mut self.pixels, &mut self.scratch] {
+            data.clear();
+            if data.capacity() > retained {
+                *data = Vec::new();
+            }
+        }
+        result
+    }
+    fn paint_inner(
         &mut self,
         painter: &mut Painter<'_, '_>,
         bounds: Rect,
@@ -70,16 +93,17 @@ impl Renderer {
         if scratch_bytes > self.mask_limit {
             return Err(Error::OutOfMemory);
         }
-        let mut pixels = allocate(count)?;
+        resize_buffer(&mut self.pixels, count)?;
+        let pixels = self.pixels.as_mut_slice();
         match command.kind {
             a::gui_frame_command_kind_path_fill => {
-                mask::fill(&mut pixels, area, p, |point| {
+                mask::fill(pixels, area, p, |point| {
                     g.expect("admitted geometry").inside(point, p.fill_rule)
                 });
-                mask::blend(painter, bounds, command, area, &mut pixels, p.fill_argb)
+                mask::blend(painter, bounds, command, area, pixels, p.fill_argb)
             }
             a::gui_frame_command_kind_path_stroke => {
-                mask::fill(&mut pixels, area, p, |point| {
+                mask::fill(pixels, area, p, |point| {
                     g.expect("admitted geometry").stroke(
                         point,
                         p.stroke_width,
@@ -88,38 +112,49 @@ impl Renderer {
                         p.miter_limit,
                     )
                 });
-                mask::blend(painter, bounds, command, area, &mut pixels, p.stroke_argb)
+                mask::blend(painter, bounds, command, area, pixels, p.stroke_argb)
             }
             a::gui_frame_command_kind_rounded_rect
             | a::gui_frame_command_kind_gradient_rounded_rect => {
-                let outer = geometry::normalize(p.rounded);
-                mask::fill(&mut pixels, area, p, |point| {
-                    geometry::rounded(outer, point)
-                });
-                let drew = if let Some(paint) = p.gradient {
-                    gradient::blend(painter, bounds, command, area, &pixels, paint)?
+                // The original path normalized the outer shape, then again
+                // inside rounded(). Keep both f32 operations, once per command.
+                let outer = geometry::NormalizedRounded::new(geometry::normalize(p.rounded));
+                let drew = if p.gradient.is_some() || p.fill_argb >> 24 != 0 {
+                    mask::fill(pixels, area, p, |point| outer.contains(point));
+                    if let Some(paint) = p.gradient {
+                        gradient::blend(
+                            painter,
+                            bounds,
+                            command,
+                            area,
+                            pixels,
+                            paint,
+                            &mut self.scratch,
+                        )?
+                    } else {
+                        mask::blend(painter, bounds, command, area, pixels, p.fill_argb)?
+                    }
                 } else {
-                    mask::blend(painter, bounds, command, area, &mut pixels, p.fill_argb)?
+                    false
                 };
-                let inner = geometry::inner(p);
-                mask::fill(&mut pixels, area, p, |point| {
-                    geometry::rounded(outer, point)
-                        && inner.is_none_or(|inner| !geometry::rounded(inner, point))
+                if p.stroke_argb >> 24 == 0 {
+                    return Ok(drew);
+                }
+                let inner = geometry::inner(p).map(geometry::NormalizedRounded::new);
+                mask::fill(pixels, area, p, |point| {
+                    outer.contains(point) && inner.is_none_or(|inner| !inner.contains(point))
                 });
-                Ok(
-                    mask::blend(painter, bounds, command, area, &mut pixels, p.stroke_argb)?
-                        || drew,
-                )
+                Ok(mask::blend(painter, bounds, command, area, pixels, p.stroke_argb)? || drew)
             }
             a::gui_frame_command_kind_shadow => {
-                mask::fill(&mut pixels, area, p, |point| geometry::shadow(p, g, point));
+                mask::fill(pixels, area, p, |point| geometry::shadow(p, g, point));
                 if radius != 0 {
                     if count > self.mask_limit.saturating_sub(count) {
                         return Err(Error::OutOfMemory);
                     }
-                    let mut scratch = allocate(count)?;
-                    mask::blur_horizontal(&pixels, &mut scratch, area.w, area.h, radius);
-                    mask::blur_vertical(&scratch, &mut pixels, area.w, area.h, radius);
+                    resize_buffer(&mut self.scratch, count)?;
+                    mask::blur_horizontal(pixels, &mut self.scratch, area.w, area.h, radius);
+                    mask::blur_vertical(&self.scratch, pixels, area.w, area.h, radius);
                 }
                 if p.flags & a::gui_shape_flag_shadow_inset != 0 {
                     for y in 0..area.h {
@@ -134,7 +169,7 @@ impl Renderer {
                         }
                     }
                 }
-                mask::blend(painter, bounds, command, area, &mut pixels, p.shadow_argb)
+                mask::blend(painter, bounds, command, area, pixels, p.shadow_argb)
             }
             _ => Err(Error::Invalid),
         }
