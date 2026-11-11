@@ -9,8 +9,9 @@ use crate::runtime::worker::{Control, Task, Worker};
 use core::{fmt::Write, pin::pin};
 use r4enc as e;
 use r4os_library_helpers::media::Mux;
+use r4os_sdk::app2::StartupInfo;
 use r4os_sdk::{
-    App, StartupInfo, abi as a,
+    App2, abi as a,
     graphics::{Graphics, GraphicsStorage},
     path::FilePath,
     resources::Resources,
@@ -46,7 +47,7 @@ pub struct Report {
     pub error: Option<Error>,
 }
 pub struct Manager<'a> {
-    app: &'a App<'a>,
+    app: &'a App2<'a>,
     resources: &'a Resources<'a>,
     expected: &'static StartupInfo<'static>,
     runtime: Option<e::R4EncRuntime>,
@@ -55,11 +56,11 @@ pub struct Manager<'a> {
 }
 impl<'a> Manager<'a> {
     pub fn new(
-        app: &'a App<'a>,
+        app: &'a App2<'a>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,
     ) -> Option<Self> {
-        e::EncodeV1Client::optional(app).ok()??;
+        e::EncodeV1Client::optional2(app).ok()??;
         Source::new(app).ok()?;
         Some(Self {
             app,
@@ -147,7 +148,7 @@ impl<'a> Manager<'a> {
         let Some(runtime) = self.runtime else {
             return true;
         };
-        let Ok(api) = e::EncodeV1Client::init(self.app) else {
+        let Ok(api) = e::EncodeV1Client::init2(self.app) else {
             return false;
         };
         if unsafe { api.finish(&runtime, 1_000_000_000) } != e::ok {
@@ -179,8 +180,8 @@ impl Job {
 impl Task for Job {
     fn run(&mut self, control: &Control) -> i32 {
         let app = match unsafe {
-            App::from_raw(
-                self.raw as *const a::R4XStartContext,
+            App2::from_raw(
+                self.raw as *const a::generation2::R4XStartContext2,
                 self.expected,
                 c"R4DESK",
             )
@@ -207,11 +208,11 @@ enum Next {
     Stopped,
 }
 impl Job {
-    fn record(&mut self, app: &App<'_>, control: &Control) -> Result<(), Error> {
-        let api = e::EncodeV1Client::init(app).map_err(|_| Error::Unavailable)?;
+    fn record(&mut self, app: &App2<'_>, control: &Control) -> Result<(), Error> {
+        let api = e::EncodeV1Client::init2(app).map_err(|_| Error::Unavailable)?;
         let source = Source::new(app).map_err(|_| Error::Capture)?;
         let mut storage = pin!(GraphicsStorage::new());
-        let graphics = Graphics::open(storage.as_mut(), app).map_err(|_| Error::Unavailable)?;
+        let graphics = Graphics::open2(storage.as_mut(), app).map_err(|_| Error::Unavailable)?;
         let result = (|| {
             if self.runtime.is_none() {
                 let startup = e::R4EncStartup {
@@ -229,7 +230,7 @@ impl Job {
                 self.runtime = Some(runtime);
             }
             self.started = encoder::now(app)?;
-            let system = System::new(app).map_err(|_| Error::Directory)?;
+            let system = System::new2(app).map_err(|_| Error::Directory)?;
             let files = system.files();
             let directory = FilePath::parse(b"C:\\RECORDINGS").map_err(|_| Error::Path)?;
             if files
@@ -295,7 +296,7 @@ impl Job {
     }
     fn wait_first(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         source: &Source<'_>,
         control: &Control,
     ) -> Result<(a::RemoteFrameInfo, u64), Error> {
@@ -320,7 +321,7 @@ impl Job {
     }
     fn part(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         source: &Source<'_>,
         control: &Control,
         codec: &mut Codec<'_, '_>,
@@ -342,7 +343,7 @@ impl Job {
         )
         .map_err(|_| Error::Path)?;
         let names = file::names(&path.bytes[..path.len]).map_err(|_| Error::Path)?;
-        let system = System::new(app).map_err(|_| Error::Open)?;
+        let system = System::new2(app).map_err(|_| Error::Open)?;
         let files = system.files();
         let mut output = Output::open(&files, &names).map_err(|_| Error::Open)?;
         let _ = app.write(match codec.backend {
@@ -385,7 +386,7 @@ impl Job {
     }
     fn frames(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         source: &Source<'_>,
         control: &Control,
         codec: &mut Codec<'_, '_>,

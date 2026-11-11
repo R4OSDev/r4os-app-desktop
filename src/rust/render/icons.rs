@@ -6,7 +6,7 @@ use super::{
     ui::Ui,
 };
 use alloc::vec::Vec;
-use r4os_sdk::{App, data::raw as c, path::FilePath, storage::System};
+use r4os_sdk::{App2, data::raw as c, path::FilePath, storage::System};
 #[cfg(test)]
 std::thread_local! {
     static PIXEL_BRIDGE_CALLS: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
@@ -33,12 +33,12 @@ pub trait Loader {
     fn container(&mut self, path: &[u8], output: &mut [u8]) -> Option<usize>;
 }
 pub struct Native<'a, 'start> {
-    pub app: &'a App<'start>,
+    pub app: &'a App2<'start>,
 }
 impl Loader for Native<'_, '_> {
     fn file(&mut self, path: &[u8], output: &mut [u8]) -> Option<usize> {
         let path = FilePath::parse(path).ok()?;
-        System::new(self.app)
+        System::new2(self.app)
             .ok()?
             .files()
             .read(&path, output)
@@ -49,10 +49,17 @@ impl Loader for Native<'_, '_> {
         if path.is_empty() || path.len() > PATH_MAX || path.contains(&0) {
             return None;
         }
-        let pointer = self.app.system_api()?.module_resource_read;
-        if pointer == 0 {
-            return None;
-        }
+        let pointer = self
+            .app
+            .context()
+            .lookup(
+                1,
+                core::mem::offset_of!(
+                    r4os_sdk::abi::generation2::R4XStartR4Sys2,
+                    module_resource_read
+                ) as u32,
+            )
+            .ok()?;
         let mut name = [0; PATH_MAX + 1];
         name[..path.len()].copy_from_slice(path);
         // Exact current R4SYS signature from the platform contract; no native

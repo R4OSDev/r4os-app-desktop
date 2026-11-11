@@ -1,7 +1,8 @@
 //! Real SDK async admission/status/Close and resident original R4STD decoder.
 //! Only the file provider and RAM directory journal are controlled here.
 use super::*;
-use r4os_sdk::{App, ImportSpec, StartupInfo, storage::System};
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
+use r4os_sdk::{App2, storage::System};
 use std::{ffi::CStr, sync::Mutex};
 const UTC: &[u8] = b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=UTC\n";
 const BERLIN: &[u8] = b"R4S_FORMAT=1\nSCHEMA=TIME\nTIMEZONE=Europe/Berlin\n";
@@ -214,58 +215,58 @@ fn complete(index: usize, result: Option<i32>, close_busy: u32) {
         request.close_busy = close_busy;
     });
 }
-fn with(case: impl FnOnce(&App<'_>, &Resources<'_>, &Files<'_>)) {
+fn with(case: impl FnOnce(&App2<'_>, &Resources<'_>, &Files<'_>)) {
     let _serial = CASE.lock().unwrap();
     crate::standard_fixture::with(|_| {
         *STATE.lock().unwrap() = Some(Peer::default());
-        let table = a::R4XStartR4Sys {
-            io_file_read: read as *const () as usize,
-            io_file_info: info as *const () as usize,
-            io_status: status as *const () as usize,
-            io_close: close as *const () as usize,
-            directory_change_begin: begin as *const () as usize,
-            directory_change_poll: poll as *const () as usize,
-            file_read: sync_read as *const () as usize,
-            file_info: sync_info as *const () as usize,
-            time_state: calendar as *const () as usize,
+        let table = a::generation2::R4XStartR4Sys2 {
+            io_file_read: read as *const () as _,
+            io_file_info: info as *const () as _,
+            io_status: status as *const () as _,
+            io_close: close as *const () as _,
+            directory_change_begin: begin as *const () as _,
+            directory_change_poll: poll as *const () as _,
+            file_read: sync_read as *const () as _,
+            file_info: sync_info as *const () as _,
+            time_state: calendar as *const () as _,
             ..Default::default()
         };
         let imports = [a::R4XStartImport {
             group_id: 1,
-            min_version: 1,
-            resolved_version: 1,
+            min_version: 2,
+            resolved_version: 2,
             flags: a::r4xstart_import_flag_group_interface,
             module_name: c"R4SYS".as_ptr() as u64,
-            symbol_name: c"Query".as_ptr() as u64,
+            symbol_name: c"Query2".as_ptr() as u64,
             table: &table as *const _ as u64,
             ..Default::default()
         }];
-        let raw = a::R4XStartContext {
+        let raw = a::generation2::R4XStartContext2 {
             app_class: a::R4XStartAppClass::console.0,
             instance_id: 88,
-            flags: a::r4xstart_flag_imports_valid,
+            flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+            should_close: crate::standard_fixture::keep_open as *const () as u64,
             imports: imports.as_ptr() as u64,
             import_count: 1,
             ..Default::default()
         };
         let specs = [ImportSpec {
-            module_name: b"R4SYS",
-            symbol_name: b"Query",
-            minimum: 1,
-            optional: false,
+            module_name: (c"R4SYS").as_ptr().cast(),
+            symbol_name: (c"Query2").as_ptr().cast(),
+            minimum: 2,
+            optional: 0,
             group_id: 1,
-            magic: table.magic,
-            version: table.abi_version,
-            size: table.size,
+            reserved: 0,
         }];
         let expected = StartupInfo {
-            app_class: a::R4XStartAppClass::console,
+            profile: 0,
+            app_class: a::R4XStartAppClass::console.0,
             required_groups: 2,
             imports: &specs,
         };
-        let app = unsafe { App::from_raw(&raw, &expected, c"FILEFIX") }.unwrap();
-        let resources = Resources::new(&app).unwrap();
-        let system = System::new(&app).unwrap();
+        let app = unsafe { App2::from_raw(&raw, &expected, c"FILEFIX") }.unwrap();
+        let resources = Resources::new2(&app).unwrap();
+        let system = System::new2(&app).unwrap();
         case(&app, &resources, &system.files());
         peer(|p| {
             assert!(p.pending.iter().all(Option::is_none));

@@ -3,7 +3,7 @@
 use super::cache::Fonts;
 use r4os_contract::{GuiFontInfo, GuiGlyphBitmap};
 use r4os_sdk::{
-    App,
+    App2,
     gui::{Session, raw as c},
 };
 pub struct SessionFonts<'loan, 'app, 'storage> {
@@ -11,10 +11,15 @@ pub struct SessionFonts<'loan, 'app, 'storage> {
     has_rows: bool,
 }
 impl<'loan, 'app, 'storage> SessionFonts<'loan, 'app, 'storage> {
-    pub fn new(session: &'loan mut Session<'app, 'storage>, app: &App<'_>) -> Self {
+    pub fn new(session: &'loan mut Session<'app, 'storage>, app: &App2<'_>) -> Self {
         let has_rows = app
-            .drawing_api()
-            .is_some_and(|table| table.font_glyph_row != 0);
+            .context()
+            .lookup(
+                3,
+                core::mem::offset_of!(r4os_contract::generation2::R4XStartR4Draw2, font_glyph_row)
+                    as u32,
+            )
+            .is_ok();
         Self { session, has_rows }
     }
 }

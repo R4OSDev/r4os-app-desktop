@@ -7,13 +7,14 @@ use crate::render::{
     pixels::PixelBytes,
     primitive_image::{Format, Picture, View},
 };
-use r4os_sdk::{App, ImportSpec, StartupInfo};
+use r4os_sdk::App2;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 use std::sync::Mutex;
 static CASE: Mutex<()> = Mutex::new(());
 #[path = "gpu_windows.rs"]
 mod windows;
 unsafe extern "C" {
-    fn r4desk_gpu_context() -> *const a::R4XStartContext;
+    fn r4desk_gpu_context2() -> *const a::generation2::R4XStartContext2;
     fn r4desk_gpu_control(op: u32, value: u64, device: *const g::R4GfxDevice) -> i32;
     fn r4desk_gpu_visible(out: *mut u32);
     fn r4desk_gpu_stats(out: *mut u64);
@@ -35,9 +36,9 @@ pub(crate) fn stats() -> [u64; 16] {
 pub(crate) fn control(session: &Session<'_, '_>, op: u32, value: u64) {
     assert_eq!(unsafe { r4desk_gpu_control(op, value, session.raw()) }, 0);
 }
-pub(crate) fn with(case: impl FnOnce(&App<'_>, &mut Device)) {
+pub(crate) fn with(case: impl FnOnce(&App2<'_>, &mut Device)) {
     let _guard = CASE.lock().unwrap();
-    let raw = unsafe { r4desk_gpu_context() };
+    let raw = unsafe { r4desk_gpu_context2() };
     assert!(!raw.is_null(), "previous native model not fully retired");
     let context = unsafe { &*raw };
     let imports = unsafe {
@@ -46,56 +47,45 @@ pub(crate) fn with(case: impl FnOnce(&App<'_>, &mut Device)) {
             context.import_count as usize,
         )
     };
-    assert_eq!(imports.len(), 5);
-    let sys = unsafe { &*(imports[0].table as *const a::R4XStartR4Sys) };
-    let draw = unsafe { &*(imports[1].table as *const a::R4XStartR4Draw) };
-    let specs = core::array::from_fn::<_, 5, _>(|i| ImportSpec {
-        module_name: match i {
-            0 => b"R4SYS",
-            1 => b"R4DRAW",
-            3 => b"R4NV",
-            _ => b"R4GFX",
-        },
-        symbol_name: match i {
-            0 | 1 => b"Query",
-            2 => b"DEVICE_V1",
-            3 => b"BACKEND_V1",
-            _ => b"COLOR_V1",
-        },
+    assert_eq!(imports.len(), 6);
+    let specs = core::array::from_fn::<_, 6, _>(|i| ImportSpec {
+        module_name: (match i {
+            0 => c"R4SYS",
+            1 => c"R4DRAW",
+            3 => c"R4NV",
+            _ => c"R4GFX",
+        })
+        .as_ptr()
+        .cast(),
+        symbol_name: (match i {
+            0 | 1 | 5 => c"Query2",
+            2 => c"DEVICE_V1",
+            3 => c"BACKEND_V1",
+            _ => c"COLOR_V1",
+        })
+        .as_ptr()
+        .cast(),
         minimum: match i {
-            0 | 1 => 1,
+            0 | 1 | 5 => 2,
             2 => g::device_v1_expectation.min_revision as u32,
             3 => 3,
             _ => g::color_v1_expectation.min_revision as u32,
         },
-        optional: i == 3,
+        optional: u32::from(i == 3),
         group_id: match i {
             0 => 1,
             1 => 3,
             _ => 0,
         },
-        magic: match i {
-            0 => sys.magic,
-            1 => draw.magic,
-            _ => 0,
-        },
-        version: match i {
-            0 => sys.abi_version,
-            1 => draw.abi_version,
-            _ => 0,
-        },
-        size: match i {
-            0 => sys.size,
-            1 => draw.size,
-            _ => 0,
-        },
+        reserved: 0,
     });
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
-        required_groups: 10,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
+        required_groups: 2,
         imports: &specs,
     };
-    let app = unsafe { App::from_raw(raw, &expected, c"GPUFIX") }.unwrap();
+    let app = unsafe { App2::from_raw(raw, &expected, c"GPUFIX") }.unwrap();
     let mut device = unsafe { Device::open(&app, 0) }.unwrap();
     case(&app, &mut device);
     assert!(device.close(&app).unwrap());
@@ -146,7 +136,7 @@ fn expected(color: u32) -> [u32; 64] {
     out
 }
 pub(crate) fn begin(
-    app: &App<'_>,
+    app: &App2<'_>,
     device: &mut Device,
     engine: &mut Engine,
     cache: &Cache,
@@ -159,7 +149,7 @@ pub(crate) fn begin(
     unsafe { engine.begin(&s, cache, frame, 1000) }.unwrap();
 }
 pub(crate) fn pump(
-    app: &App<'_>,
+    app: &App2<'_>,
     device: &mut Device,
     engine: &mut Engine,
     cache: &mut Cache,
@@ -802,44 +792,66 @@ fn publication_cases(image: &crate::capture::remote::Image<'_>) {
         p.regions = unsafe { core::slice::from_raw_parts(regions, region_count as usize) }.to_vec();
         p.result
     }
-    let desk = a::R4XStartR4Desk {
-        remote_frame_publish_regions: publish as *const () as usize,
+    let desk = a::generation2::R4XStartR4Desk2 {
+        remote_frame_publish_regions: publish as *const () as _,
         ..Default::default()
     };
-    let imports = [a::R4XStartImport {
-        group_id: 2,
-        min_version: 1,
-        resolved_version: 1,
-        flags: a::r4xstart_import_flag_group_interface,
-        module_name: c"R4DESK".as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
-        table: &desk as *const _ as u64,
-        ..Default::default()
-    }];
-    let specs = [ImportSpec {
-        module_name: b"R4DESK",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
-        group_id: 2,
-        magic: desk.magic,
-        version: desk.abi_version,
-        size: desk.size,
-    }];
-    let raw = a::R4XStartContext {
+    let sys = a::generation2::R4XStartR4Sys2::default();
+    let draw = a::generation2::R4XStartR4Draw2::default();
+    let imports = [
+        a::R4XStartImport {
+            group_id: 1,
+            min_version: 2,
+            resolved_version: 2,
+            flags: a::r4xstart_import_flag_group_interface,
+            module_name: c"R4SYS".as_ptr() as u64,
+            symbol_name: c"Query2".as_ptr() as u64,
+            table: &sys as *const _ as u64,
+        },
+        a::R4XStartImport {
+            group_id: 2,
+            min_version: 2,
+            resolved_version: 2,
+            flags: a::r4xstart_import_flag_group_interface,
+            module_name: c"R4DESK".as_ptr() as u64,
+            symbol_name: c"Query2".as_ptr() as u64,
+            table: &desk as *const _ as u64,
+            ..Default::default()
+        },
+        a::R4XStartImport {
+            group_id: 3,
+            min_version: 2,
+            resolved_version: 2,
+            flags: a::r4xstart_import_flag_group_interface,
+            module_name: c"R4DRAW".as_ptr() as u64,
+            symbol_name: c"Query2".as_ptr() as u64,
+            table: &draw as *const _ as u64,
+        },
+    ];
+    let specs = imports.map(|item| ImportSpec {
+        module_name: item.module_name as *const u8,
+        symbol_name: c"Query2".as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
+        group_id: item.group_id,
+        reserved: 0,
+    });
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::gui.0,
         instance_id: 88,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
-        import_count: 1,
+        import_count: 3,
         ..Default::default()
     };
     let app = unsafe {
-        App::from_raw(
+        App2::from_raw(
             &raw,
             &StartupInfo {
-                app_class: a::R4XStartAppClass::gui,
-                required_groups: 4,
+                profile: 1,
+                app_class: a::R4XStartAppClass::gui.0,
+                required_groups: 14,
                 imports: &specs,
             },
             c"CAPTUREFIX",
@@ -1594,7 +1606,7 @@ fn separated_damage_repairs_both_target_ages_and_matches_full_scaled_rotated_pix
     }
 }
 
-pub(crate) fn pixels(app: &App<'_>, device: &mut Device, engine: &Engine) -> [u32; 64] {
+pub(crate) fn pixels(app: &App2<'_>, device: &mut Device, engine: &Engine) -> [u32; 64] {
     use crate::capture::readback::Readback;
     let mut reader = {
         let s = device.bind(app).unwrap();

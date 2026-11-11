@@ -18,7 +18,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::mem;
 use r4gfx as g;
-use r4os_sdk::{App, abi as a, c_facades as c, graphics::Graphics};
+use r4os_sdk::{App2, abi as a, c_facades as c, graphics::Graphics};
 #[path = "cpu_frame.rs"]
 mod frame;
 #[cfg(test)]
@@ -90,7 +90,7 @@ impl Output {
     /// Keep actual provider/loader/callback code resident through successful
     /// close. A partial failed output is returned and retains its exact owners.
     pub unsafe fn open(
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         view: Viewport,
         target: a::GfxOutputTarget,
@@ -199,7 +199,7 @@ impl Output {
     /// Library/profile callback code stays resident until this output closes.
     pub unsafe fn set_profile(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         path: &[u8],
         intent: u32,
@@ -219,7 +219,7 @@ impl Output {
         );
         Ok(())
     }
-    pub fn poll(&mut self, app: &App<'_>, time: u64) {
+    pub fn poll(&mut self, app: &App2<'_>, time: u64) {
         if let Some(state) = self.state.as_deref_mut() {
             state.poll(app, time);
         }
@@ -258,7 +258,7 @@ impl Output {
             .is_some_and(|s| s.capture.take_redraw(time))
     }
     /// Refusal preserves each surviving map/acquisition/chain/image/reference.
-    pub fn close(&mut self, app: &App<'_>, graphics: &Graphics<'_, '_>, time: u64) -> bool {
+    pub fn close(&mut self, app: &App2<'_>, graphics: &Graphics<'_, '_>, time: u64) -> bool {
         let Some(state) = self.state.as_deref_mut() else {
             return true;
         };
@@ -329,7 +329,7 @@ impl Output {
     }
 }
 impl State {
-    fn prepare(&mut self, app: &App<'_>, graphics: &Graphics<'_, '_>) -> Result<()> {
+    fn prepare(&mut self, app: &App2<'_>, graphics: &Graphics<'_, '_>) -> Result<()> {
         self.view.validate().map_err(|_| Error::State)?;
         let session = self.device.bind(app).map_err(|_| Error::Graphics)?;
         let mut info = g::R4GfxPresentationInfo::default();
@@ -418,7 +418,7 @@ impl State {
         self.ready = true;
         Ok(())
     }
-    fn poll(&mut self, app: &App<'_>, time: u64) {
+    fn poll(&mut self, app: &App2<'_>, time: u64) {
         let Ok(session) = self.device.bind(app) else {
             return;
         };
@@ -494,7 +494,7 @@ impl State {
             self.reported[i] = false;
         }
     }
-    fn abandon(&mut self, app: &App<'_>, graphics: &Graphics<'_, '_>) {
+    fn abandon(&mut self, app: &App2<'_>, graphics: &Graphics<'_, '_>) {
         if let Some(frame) = self.acquired {
             if frame.slot > 0 && frame.slot <= 3 {
                 self.history.rejected(frame.slot as usize - 1);

@@ -1,5 +1,5 @@
 //! Synchronous snapshot adapter over the general SDK host session. Each call
-//! borrows its current native context briefly; no App/context/out pointer is
+//! borrows its current native context briefly; no App2/context/out pointer is
 //! stored by the Desktop adapter or allowed to outlive that call.
 use super::frame_snapshot::Reader;
 use super::gui::code;

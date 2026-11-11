@@ -96,7 +96,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
         items.layout(640, 480, 32);
         let config = Config::default();
         let quick = Bar::defaults();
-        let menu = Menu::defaults();
+        let menu = Menu::original_pixel_fixture();
         let tray = Registry::new().unwrap();
         let mut cache = Cache::new().unwrap();
         let wallpaper: [u32; 64] =

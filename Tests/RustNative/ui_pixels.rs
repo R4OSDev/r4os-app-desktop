@@ -91,7 +91,7 @@ fn original_eight_complete_chrome_menu_and_dirty_pixel_digests() {
             )
             .unwrap();
         } else {
-            let menu = Menu::defaults();
+            let menu = Menu::original_pixel_fixture();
             let v = View {
                 open: true,
                 selected: if case == 4 {

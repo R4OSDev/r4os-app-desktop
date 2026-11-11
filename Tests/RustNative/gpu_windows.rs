@@ -127,7 +127,7 @@ fn capture_window(
     cache.finish(Some(frame)).unwrap();
 }
 fn pump_window(
-    app: &App<'_>,
+    app: &App2<'_>,
     device: &mut Device,
     engine: &mut Engine,
     cache: &mut Cache,

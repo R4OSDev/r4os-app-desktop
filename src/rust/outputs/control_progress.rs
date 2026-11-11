@@ -3,7 +3,7 @@ use super::*;
 impl Owner {
     pub(super) fn progress(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         store: &Store<'_, '_>,

@@ -1,7 +1,7 @@
 //! Current R4DESK immutable CPU snapshots. Demand and snapshot identities are
 //! independent; failed release leaves the exact identity available for retry.
 use core::marker::PhantomData;
-use r4os_sdk::{App, abi as a};
+use r4os_sdk::{App2, abi as a};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Unavailable,
@@ -16,7 +16,7 @@ pub struct Source<'a> {
     release: Demand,
     snapshot: Acquire,
     retire: Release,
-    _loan: PhantomData<&'a App<'a>>,
+    _loan: PhantomData<&'a App2<'a>>,
 }
 #[must_use = "release demand and the exact snapshot; retain refused identities"]
 pub struct Loans {
@@ -45,24 +45,44 @@ impl Loans {
     }
 }
 impl<'a> Source<'a> {
-    pub fn new(app: &'a App<'_>) -> Result<Self, Error> {
-        let t = app.desktop_api().ok_or(Error::Unavailable)?;
-        if [
-            t.remote_frame_acquire,
-            t.remote_frame_release,
-            t.remote_frame_snapshot_acquire,
-            t.remote_frame_snapshot_release,
-        ]
-        .contains(&0)
-        {
-            return Err(Error::Unavailable);
-        }
+    pub fn new(app: &'a App2<'_>) -> Result<Self, Error> {
+        let context = app.context();
+        let acquire = context
+            .lookup(
+                2,
+                core::mem::offset_of!(a::generation2::R4XStartR4Desk2, remote_frame_acquire) as u32,
+            )
+            .map_err(|_| Error::Unavailable)?;
+        let release = context
+            .lookup(
+                2,
+                core::mem::offset_of!(a::generation2::R4XStartR4Desk2, remote_frame_release) as u32,
+            )
+            .map_err(|_| Error::Unavailable)?;
+        let snapshot = context
+            .lookup(
+                2,
+                core::mem::offset_of!(
+                    a::generation2::R4XStartR4Desk2,
+                    remote_frame_snapshot_acquire
+                ) as u32,
+            )
+            .map_err(|_| Error::Unavailable)?;
+        let retire = context
+            .lookup(
+                2,
+                core::mem::offset_of!(
+                    a::generation2::R4XStartR4Desk2,
+                    remote_frame_snapshot_release
+                ) as u32,
+            )
+            .map_err(|_| Error::Unavailable)?;
         Ok(unsafe {
             Self {
-                acquire: core::mem::transmute::<usize, Demand>(t.remote_frame_acquire),
-                release: core::mem::transmute::<usize, Demand>(t.remote_frame_release),
-                snapshot: core::mem::transmute::<usize, Acquire>(t.remote_frame_snapshot_acquire),
-                retire: core::mem::transmute::<usize, Release>(t.remote_frame_snapshot_release),
+                acquire: core::mem::transmute::<u64, Demand>(acquire),
+                release: core::mem::transmute::<u64, Demand>(release),
+                snapshot: core::mem::transmute::<u64, Acquire>(snapshot),
+                retire: core::mem::transmute::<u64, Release>(retire),
                 _loan: PhantomData,
             }
         })

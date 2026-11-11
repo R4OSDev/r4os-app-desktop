@@ -20,8 +20,8 @@ use crate::{
     windows::controller::Controller,
 };
 use r4os_contract as a;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 use r4os_sdk::{
-    ImportSpec, StartupInfo,
     graphics::GraphicsStorage,
     gui::{Role, SessionStorage},
 };
@@ -204,19 +204,19 @@ unsafe extern "C" fn legacy_present() -> i32 {
     p.legacy_presents += 1;
     p.legacy_status
 }
-fn with(case: impl FnOnce(&App<'_>, &mut Session<'_, '_>, &Graphics<'_, '_>)) {
+fn with(case: impl FnOnce(&App2<'_>, &mut Session<'_, '_>, &Graphics<'_, '_>)) {
     let _case = CASE.lock().unwrap();
     *PROBE.lock().unwrap() = Probe::default();
-    let sys = a::R4XStartR4Sys {
-        monotonic_clock: precise as *const () as usize,
+    let sys = a::generation2::R4XStartR4Sys2 {
+        monotonic_clock: precise as *const () as _,
         ..Default::default()
     };
-    let desk = a::R4XStartR4Desk::default();
-    let draw = a::R4XStartR4Draw {
-        display_begin_frame_rect: begin as *const () as usize,
-        display_present_regions: present as *const () as usize,
-        display_blit_xrgb32_stride: legacy_blit as *const () as usize,
-        display_present: legacy_present as *const () as usize,
+    let desk = a::generation2::R4XStartR4Desk2::default();
+    let draw = a::generation2::R4XStartR4Draw2 {
+        display_begin_frame_rect: begin as *const () as _,
+        display_present_regions: present as *const () as _,
+        display_blit_xrgb32_stride: legacy_blit as *const () as _,
+        display_present: legacy_present as *const () as _,
         ..Default::default()
     };
     let tables = [
@@ -247,37 +247,37 @@ fn with(case: impl FnOnce(&App<'_>, &mut Session<'_, '_>, &Graphics<'_, '_>)) {
     ];
     let imports = tables.map(|(id, name, table, _, _, _)| a::R4XStartImport {
         group_id: id,
-        min_version: 1,
-        resolved_version: 1,
+        min_version: 2,
+        resolved_version: 2,
         flags: a::r4xstart_import_flag_group_interface,
         module_name: name.as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
+        symbol_name: c"Query2".as_ptr() as u64,
         table,
         ..Default::default()
     });
-    let specs = tables.map(|(id, name, _, magic, version, size)| ImportSpec {
-        module_name: name.to_bytes(),
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+    let specs = tables.map(|(id, name, _, _, _, _)| ImportSpec {
+        module_name: (name).as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: id,
-        magic,
-        version,
-        size,
+        reserved: 0,
     });
-    let raw = a::R4XStartContext {
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::gui.0,
         instance_id: 88,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
         import_count: 3,
         ..Default::default()
     };
     let app = unsafe {
-        App::from_raw(
+        App2::from_raw(
             &raw,
             &StartupInfo {
-                app_class: a::R4XStartAppClass::gui,
+                profile: 1,
+                app_class: a::R4XStartAppClass::gui.0,
                 required_groups: 14,
                 imports: &specs,
             },
@@ -286,10 +286,10 @@ fn with(case: impl FnOnce(&App<'_>, &mut Session<'_, '_>, &Graphics<'_, '_>)) {
     }
     .unwrap();
     let mut graphics_storage = pin!(GraphicsStorage::new());
-    let graphics = Graphics::open(graphics_storage.as_mut(), &app).unwrap();
+    let graphics = Graphics::open2(graphics_storage.as_mut(), &app).unwrap();
     let mut session_storage = pin!(SessionStorage::new());
     let mut timers = [];
-    let mut session = Session::open(
+    let mut session = Session::open2(
         session_storage.as_mut(),
         &app,
         Role::DesktopHost,
@@ -300,7 +300,7 @@ fn with(case: impl FnOnce(&App<'_>, &mut Session<'_, '_>, &Graphics<'_, '_>)) {
 }
 fn frame(
     owner: &mut Frames,
-    app: &App<'_>,
+    app: &App2<'_>,
     session: &mut Session<'_, '_>,
     graphics: &Graphics<'_, '_>,
     trace: bool,
@@ -316,7 +316,7 @@ fn frame(
 }
 fn frame_damage(
     owner: &mut Frames,
-    app: &App<'_>,
+    app: &App2<'_>,
     session: &mut Session<'_, '_>,
     graphics: &Graphics<'_, '_>,
     trace: bool,

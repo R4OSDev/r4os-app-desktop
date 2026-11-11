@@ -5,9 +5,10 @@ use super::{
     screenshot::{Result as ScreenshotResult, Screenshot},
 };
 use crate::runtime::worker::Worker;
-use r4os_sdk::{App, StartupInfo, resources::Resources};
+use r4os_sdk::app2::StartupInfo;
+use r4os_sdk::{App2, resources::Resources};
 pub struct Owner<'a> {
-    app: &'a App<'a>,
+    app: &'a App2<'a>,
     resources: &'a Resources<'a>,
     expected: &'static StartupInfo<'static>,
     pub recorder: Option<recording::Manager<'a>>,
@@ -17,7 +18,7 @@ pub struct Owner<'a> {
 }
 impl<'a> Owner<'a> {
     pub fn new(
-        app: &'a App<'a>,
+        app: &'a App2<'a>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,
     ) -> Self {

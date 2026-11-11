@@ -2,7 +2,7 @@
 //! retains only its spawned process until the real completion/reap receipt.
 use crate::hosted::process::{Programs, same};
 use r4os_sdk::{
-    App, abi as a,
+    App2, abi as a,
     path::FilePath,
     resources::Wait,
     storage::{Error, Result},
@@ -13,7 +13,7 @@ pub struct Owner {
     handle: Option<a::ProgramProcessHandle>,
     close_requested: bool,
 }
-pub fn requested(app: &App<'_>) -> bool {
+pub fn requested(app: &App2<'_>) -> bool {
     app.args()
         .split(|v| v.is_ascii_whitespace())
         .any(|v| v.eq_ignore_ascii_case(b"/HEADLESS-SUBSYSTEM"))

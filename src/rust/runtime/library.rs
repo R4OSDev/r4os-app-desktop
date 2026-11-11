@@ -1,9 +1,9 @@
 //! Checked library-helper call protocol and stable ordinary native contexts.
-//! No private Zig App/Draw/Bundle layout is reconstructed by Rust callers.
+//! No private Zig App2/Draw/Bundle layout is reconstructed by Rust callers.
 use alloc::vec::Vec;
 use core::{mem::MaybeUninit, ptr};
 use r4os_library_helpers::{Error as CallError, raw as c};
-use r4os_sdk::{App, abi as a};
+use r4os_sdk::{App2, abi as a};
 pub(crate) fn result(slot: c::R4LibrariesSlot) -> Result<c::R4LibrariesSlot, CallError> {
     if slot.status != 0 {
         return Err(CallError::Transport(slot.status));
@@ -43,17 +43,17 @@ impl From<CallError> for Error {
     }
 }
 struct Native {
-    app: MaybeUninit<c::R4Lib_r4os_app_contract_App>,
+    app: MaybeUninit<c::R4Lib_r4os_app2_App>,
     system: MaybeUninit<c::R4Lib_r4os_r4sys_Context>,
     draw: MaybeUninit<c::R4Lib_r4os_r4draw_Context>,
 }
 pub struct Context<'app, 'start> {
-    _app: &'app App<'start>,
+    _app: &'app App2<'start>,
     native: Vec<Native>,
     drawing: bool,
 }
 impl<'app, 'start> Context<'app, 'start> {
-    pub fn new(app: &'app App<'start>) -> Result<Self, Error> {
+    pub fn new(app: &'app App2<'start>) -> Result<Self, Error> {
         let mut native = Vec::new();
         native.try_reserve_exact(1).map_err(|_| Error::Memory)?;
         native.push(Native {
@@ -64,10 +64,10 @@ impl<'app, 'start> Context<'app, 'start> {
         let pointer = native.as_mut_ptr();
         let n = unsafe { &mut *pointer };
         let status = scalar(unsafe {
-            c::R4Library_application(
+            c::R4Library_application2(
                 0,
                 n.app.as_mut_ptr(),
-                app.start_context(),
+                core::ptr::from_ref(app.start_context()).cast(),
                 u32::from(a::R4AppProfile::console.0),
             )
         })? as i32;
@@ -75,10 +75,10 @@ impl<'app, 'start> Context<'app, 'start> {
             return Err(Error::Call(CallError::Transport(status)));
         }
         required(unsafe {
-            c::R4Library_applicationSystem(0, n.app.as_ptr(), n.system.as_mut_ptr())
+            c::R4Library_applicationSystem2(0, n.app.as_ptr(), n.system.as_mut_ptr())
         })?;
         let drawing = result(unsafe {
-            c::R4Library_applicationDraw(0, n.app.as_ptr(), n.draw.as_mut_ptr())
+            c::R4Library_applicationDraw2(0, n.app.as_ptr(), n.draw.as_mut_ptr())
         })?
         .flags
             & 1
@@ -91,7 +91,7 @@ impl<'app, 'start> Context<'app, 'start> {
     }
     pub(crate) fn system(&self) -> *mut c::R4Lib_r4os_r4sys_Context {
         // The original native context stores an immutable pointer into this
-        // allocation. Calls borrow only its context, not the Rust App/owner.
+        // allocation. Calls borrow only its context, not the Rust App2/owner.
         unsafe {
             ptr::addr_of!((*self.native.as_ptr()).system)
                 .cast::<c::R4Lib_r4os_r4sys_Context>()

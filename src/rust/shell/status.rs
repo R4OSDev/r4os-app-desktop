@@ -131,9 +131,11 @@ impl Status {
             return false;
         }
         self.next_tick = tick.saturating_add(u64::from(hz).max(1).div_ceil(2));
-        if let Some(sys) = env.app.system_api().filter(|s| s.program_status != 0) {
-            let call: a::R4SysFns::program_status =
-                unsafe { core::mem::transmute(sys.program_status) };
+        if let Ok(address) = env.app.context().lookup(
+            1,
+            core::mem::offset_of!(a::generation2::R4XStartR4Sys2, program_status) as u32,
+        ) {
+            let call: a::R4SysFns::program_status = unsafe { core::mem::transmute(address) };
             unsafe { call(&mut self.program) };
         }
         let mut next = a::KeyboardLayoutInfo::default();

@@ -337,6 +337,16 @@ impl Default for Menu {
     }
 }
 impl Menu {
+    #[cfg(test)]
+    pub(crate) fn original_pixel_fixture() -> Self {
+        // Zig146/Rust5b228db rendered these two immutable menu facts. Keep
+        // their pixel oracle independent of later product menu additions.
+        let mut menu = Self::defaults();
+        copy_z(&mut menu.entries[0].title, b"R4OS Update");
+        let programs = menu.ensure(SubmenuId::Programs).unwrap();
+        menu.submenus[programs].count = 8;
+        menu
+    }
     pub fn defaults() -> Self {
         let mut menu = Self::default();
         menu.add(KNOWN[15].entry());
@@ -835,7 +845,10 @@ mod tests {
         assert!(menu.submenu_has_submenu(1, 7));
         assert_eq!(menu.nested_target(1, 7, 0), Target::MenuKlickifax);
         assert_eq!(menu.submenu_target(1, 8), Target::MenuPortex);
-        assert_eq!(menu.submenu_launch(1, 8).unwrap().path, b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X");
+        assert_eq!(
+            menu.submenu_launch(1, 8).unwrap().path,
+            b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X"
+        );
         assert_eq!(menu.target(2), Target::MenuTerminalMode);
         assert_eq!(menu.target(4), Target::MenuSettings);
         assert_eq!(menu.target(6), Target::MenuRestart);
@@ -844,7 +857,11 @@ mod tests {
         assert_eq!(menu.submenu_target(4, 0), Target::MenuSettingsAppearance);
         assert_eq!(menu.submenu_target(4, 7), Target::MenuSettingsDisplay);
         assert_eq!(menu.submenu_launch(4, 7).unwrap().args, b"/DISPLAY");
-        assert!(menu.entries().iter().all(|e| e.target() != Target::MenuUpdate));
+        assert!(
+            menu.entries()
+                .iter()
+                .all(|e| e.target() != Target::MenuUpdate)
+        );
     }
     #[test]
     fn original_menu_r4s_parser() {
@@ -875,8 +892,16 @@ mod tests {
         assert!(!menu.load(b"ITEM;title=Unknown;path=/R4OS/SOFTWARE/DESKTOP/UNKNOWN.R4X;policy=gui\nACTION;title=Settings;action=settings\nACTION;title=Nope;action=unknown\n"));
         assert_eq!(menu.entries().len(), 10);
         assert_eq!(menu.target(0), Target::MenuSpectra);
-        assert!(!menu.load(b"ITEM;title=R4OS Update;path=/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X;policy=gui\n"));
-        assert!(menu.entries().iter().all(|e| e.target() != Target::MenuUpdate));
+        assert!(
+            !menu.load(
+                b"ITEM;title=R4OS Update;path=/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X;policy=gui\n"
+            )
+        );
+        assert!(
+            menu.entries()
+                .iter()
+                .all(|e| e.target() != Target::MenuUpdate)
+        );
     }
     #[test]
     fn original_group_layout_and_nested_hits() {

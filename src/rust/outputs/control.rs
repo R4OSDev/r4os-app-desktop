@@ -18,7 +18,7 @@ use crate::{
 };
 use core::mem::MaybeUninit;
 use r4os_library_helpers::{Error, raw as c};
-use r4os_sdk::{App, abi as a};
+use r4os_sdk::{App2, abi as a};
 const OPERATION_NS: u64 = 30_000_000_000;
 const CONFIRMATION_NS: u64 = 15_000_000_000;
 type Result<T> = core::result::Result<T, Error>;
@@ -121,7 +121,7 @@ impl Owner {
     }
     pub fn step(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         host: &mut Host<'_>,
@@ -215,7 +215,7 @@ impl Owner {
     }
     fn handle(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         owner: a::ProgramProcessHandle,
@@ -412,7 +412,7 @@ impl Owner {
     }
     fn select_color(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         entry: Entry,
@@ -433,7 +433,7 @@ impl Owner {
             return Ok(false);
         }
         if color::validate(context, entry, self.mode.selected()?, signal).is_err()
-            || r4gfx::ColorV1Client::init(app).is_err()
+            || r4gfx::ColorV1Client::init2(app).is_err()
         {
             return Ok(false);
         }
@@ -442,7 +442,7 @@ impl Owner {
     }
     fn preserve_color(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
     ) -> Result<bool> {

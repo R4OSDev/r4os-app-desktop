@@ -5,7 +5,7 @@ use alloc::alloc::{alloc, alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, mem::MaybeUninit, ptr::NonNull};
 use r4gfx as g;
 use r4os_library_helpers::raw as c;
-use r4os_sdk::App;
+use r4os_sdk::App2;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const CONVERSION_PIXELS: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub struct Readback {
     closed: bool,
 }
 // All native self-pointers target the same stable allocation. Allocator
-// callbacks use Rust's global allocator and no App or local thread state.
+// callbacks use Rust's global allocator and no App2 or local thread state.
 // Actual device calls require a matching, serialized Session on that task.
 unsafe impl Send for Readback {}
 fn checked(slot: c::R4LibrariesSlot) -> Result<c::R4LibrariesSlot> {
@@ -90,7 +90,7 @@ impl Readback {
     /// # Safety
     /// The exact R4X/provider and callback code remain resident until close,
     /// including serialized moves between main and preparation tasks.
-    pub unsafe fn new(app: &App<'_>, session: &Session<'_, '_>) -> Result<Self> {
+    pub unsafe fn new(app: &App2<'_>, session: &Session<'_, '_>) -> Result<Self> {
         let pointer =
             NonNull::new(unsafe { alloc_zeroed(Layout::new::<Native>()) }.cast::<Native>())
                 .ok_or(Error::Limit)?;
@@ -108,8 +108,20 @@ impl Readback {
             )
         })?;
         checked(unsafe { c::R4LibraryMemory_allocator(0, &mut n.memory, &mut n.allocator) })?;
-        checked(unsafe { c::R4Library_deviceClient(0, app.start_context(), &mut n.client) })?;
-        checked(unsafe { c::R4Library_colorClient(0, app.start_context(), &mut n.colors) })?;
+        checked(unsafe {
+            c::R4Library_deviceClient2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                &mut n.client,
+            )
+        })?;
+        checked(unsafe {
+            c::R4Library_colorClient2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                &mut n.colors,
+            )
+        })?;
         checked(unsafe {
             c::R4GfxReadbackOwner_init(
                 0,

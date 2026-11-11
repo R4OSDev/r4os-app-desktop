@@ -2,7 +2,8 @@
 //! write/finish/abort cannot acknowledge a nonexistent native stream.
 use super::*;
 use core::ffi::CStr;
-use r4os_sdk::{App, ImportSpec, StartupInfo, storage::System};
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
+use r4os_sdk::{App2, storage::System};
 use std::sync::Mutex;
 static CASE: Mutex<()> = Mutex::new(());
 #[derive(Clone, Copy)]
@@ -93,52 +94,52 @@ unsafe extern "C" fn abort(p: *const u8) -> i32 {
 fn with(case: impl FnOnce(&Files<'_>, &Names)) {
     with_app(|files, names, _| case(files, names));
 }
-fn with_app(case: impl FnOnce(&Files<'_>, &Names, &App<'_>)) {
+fn with_app(case: impl FnOnce(&Files<'_>, &Names, &App2<'_>)) {
     let _guard = CASE.lock().unwrap();
     *STATE.lock().unwrap() = EMPTY;
-    let table = a::R4XStartR4Sys {
-        file_stream_begin: begin as *const () as usize,
-        file_stream_write: write as *const () as usize,
-        file_stream_finish: finish as *const () as usize,
-        file_stream_abort: abort as *const () as usize,
-        file_replace_atomic: publish as *const () as usize,
-        ..a::R4XStartR4Sys::default()
+    let table = a::generation2::R4XStartR4Sys2 {
+        file_stream_begin: begin as *const () as _,
+        file_stream_write: write as *const () as _,
+        file_stream_finish: finish as *const () as _,
+        file_stream_abort: abort as *const () as _,
+        file_replace_atomic: publish as *const () as _,
+        ..a::generation2::R4XStartR4Sys2::default()
     };
     let imports = [a::R4XStartImport {
         group_id: 1,
-        min_version: 1,
-        resolved_version: 1,
+        min_version: 2,
+        resolved_version: 2,
         flags: a::r4xstart_import_flag_group_interface,
         module_name: c"R4SYS".as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
+        symbol_name: c"Query2".as_ptr() as u64,
         table: core::ptr::from_ref(&table) as u64,
         ..a::R4XStartImport::default()
     }];
-    let raw = a::R4XStartContext {
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::console.0,
         instance_id: 86,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
         import_count: 1,
-        ..a::R4XStartContext::default()
+        ..a::generation2::R4XStartContext2::default()
     };
     let spec = [ImportSpec {
-        module_name: b"R4SYS",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+        module_name: (c"R4SYS").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 1,
-        magic: table.magic,
-        version: table.abi_version,
-        size: table.size,
+        reserved: 0,
     }];
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
         required_groups: 2,
         imports: &spec,
     };
-    let app = unsafe { App::from_raw(&raw, &expected, c"CAPTUREFIX") }.unwrap();
-    let system = System::new(&app).unwrap();
+    let app = unsafe { App2::from_raw(&raw, &expected, c"CAPTUREFIX") }.unwrap();
+    let system = System::new2(&app).unwrap();
     let files = system.files();
     let paths = names(b"C:\\TEMP\\CAPTURE.BMP").unwrap();
     case(&files, &paths, &app);

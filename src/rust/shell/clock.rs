@@ -404,11 +404,11 @@ impl Clock {
         self.config_dirty = true;
         Ok(true)
     }
-    pub fn update(&mut self, app: &r4os_sdk::App<'_>, now_ns: u64) -> Result<bool, Error> {
+    pub fn update(&mut self, app: &r4os_sdk::App2<'_>, now_ns: u64) -> Result<bool, Error> {
         self.refresh(
             now_ns,
             |_| Ok(false),
-            || r4os_sdk::time::Clock::new(app).state().ok(),
+            || r4os_sdk::time::Clock::new2(app).state().ok(),
         )
     }
     /// Include the calendar due in the ordinary activity wait. Read the live

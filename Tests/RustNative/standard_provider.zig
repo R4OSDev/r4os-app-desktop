@@ -7,8 +7,8 @@ const gpu_model = @import("gpu_owner_model");
 export fn r4desk_wallpaper_check(callback: gpu_model.NativeWallpaperCallback) callconv(.c) i32 {
     return gpu_model.nativeWallpaperCheck(callback);
 }
-export fn r4desk_catalog_context() callconv(.c) *const r.abi.R4XStartContext {
-    return gpu_model.nativeCatalogContext();
+export fn r4desk_catalog_context2() callconv(.c) *const r.platform2.abi.R4XStartContext2 {
+    return catalog_context.init(gpu_model.nativeCatalogContext());
 }
 export fn r4desk_catalog_control(op: u32, value: u64) callconv(.c) i32 {
     return gpu_model.nativeCatalogControl(op, value);
@@ -16,9 +16,68 @@ export fn r4desk_catalog_control(op: u32, value: u64) callconv(.c) i32 {
 export fn r4desk_cpu_transform(parameters: *const [11]i64, source: [*]const u32, count: usize, output: [*]u32, length: usize) callconv(.c) void {
     gpu_model.nativeCpuTransform(parameters, source[0..count], output[0..length]);
 }
-export fn r4desk_gpu_context() callconv(.c) ?*const r.abi.R4XStartContext {
-    return gpu_model.nativeContext();
+export fn r4desk_gpu_context2() callconv(.c) ?*const r.platform2.abi.R4XStartContext2 {
+    return gpu_context.init(gpu_model.nativeContext() orelse return null);
 }
+
+// The retained original scheduling and pixel oracles expose generation1
+// fixtures. Project their named callbacks into genuine generation2 tables at
+// this host-only boundary. The original algorithms and expected values stay
+// in Tests/Original. Native guest qualification uses the actual Kernel tables.
+const ModelContext2 = struct {
+    system: r.platform2.abi.R4XStartR4Sys2 = .{},
+    draw: r.platform2.abi.R4XStartR4Draw2 = .{},
+    imports: [6]r.abi.R4XStartImport = undefined,
+    raw: r.platform2.abi.R4XStartContext2 = .{},
+
+    fn project(comptime T: type, original: anytype) T {
+        var current: T = .{};
+        inline for (@typeInfo(T).@"struct".fields) |field| {
+            if (@offsetOf(T, field.name) >= 16 and @hasField(@TypeOf(original.*), field.name)) {
+                @field(current, field.name) = @intCast(@field(original.*, field.name));
+            }
+        }
+        return current;
+    }
+
+    fn init(self: *ModelContext2, original: *const r.abi.R4XStartContext) *const r.platform2.abi.R4XStartContext2 {
+        const rows: [*]const r.abi.R4XStartImport = @ptrFromInt(original.imports);
+        var count: usize = 0;
+        var graphics = false;
+        for (rows[0..original.import_count]) |item| {
+            var row = item;
+            switch (row.group_id) {
+                1 => {
+                    self.system = project(r.platform2.abi.R4XStartR4Sys2, @as(*const r.abi.R4XStartR4Sys, @ptrFromInt(item.table)));
+                    row.table = @intFromPtr(&self.system);
+                },
+                3 => {
+                    self.draw = project(r.platform2.abi.R4XStartR4Draw2, @as(*const r.abi.R4XStartR4Draw, @ptrFromInt(item.table)));
+                    row.table = @intFromPtr(&self.draw);
+                },
+                else => {},
+            }
+            if (row.group_id != 0) {
+                row.min_version = 2;
+                row.resolved_version = 2;
+                row.symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr);
+            } else if (r.runtime_r4l.importNameEquals(row.module_name, "R4GFX")) {
+                graphics = true;
+            }
+            self.imports[count] = row;
+            count += 1;
+        }
+        if (graphics) {
+            self.imports[count] = .{ .module_name = @intFromPtr(@as([:0]const u8, "R4GFX").ptr), .symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&model_query2) };
+            count += 1;
+        }
+        self.raw = .{ .app_class = original.app_class, .instance_id = original.instance_id, .flags = r.abi.r4xstart_flag_imports_valid | r.abi.r4xstart_flag_close_supported, .imports = @intFromPtr(&self.imports), .import_count = @intCast(count), .args = original.args, .args_len = original.args_len, .should_close = @intFromPtr(&keepOpen) };
+        return &self.raw;
+    }
+};
+const model_query2: r.platform2.abi.R4LQuery2 = .{};
+var catalog_context: ModelContext2 = .{};
+var gpu_context: ModelContext2 = .{};
 export fn r4desk_gpu_control(op: u32, value: u64, device: *const colors.c.R4GfxDevice) callconv(.c) i32 {
     return gpu_model.nativeControl(op, value, device);
 }
@@ -99,15 +158,19 @@ export fn r4desk_wire_check(kind: u32, bytes: [*]const u8, count: usize) callcon
     }
     return 0;
 }
-var system: r.abi.R4XStartR4Sys = .{};
-var imports: [6]r.abi.R4XStartImport = undefined;
-var context: r.abi.R4XStartContext = undefined;
-export fn r4desk_standard_context() callconv(.c) *const r.abi.R4XStartContext {
-    imports[0] = .{ .group_id = @intFromEnum(r.abi.R4LGroup.r4sys), .min_version = 1, .resolved_version = 1, .flags = r.abi.r4xstart_import_flag_group_interface, .module_name = @intFromPtr(@as([:0]const u8, "R4SYS").ptr), .symbol_name = @intFromPtr(@as([:0]const u8, "Query").ptr), .table = @intFromPtr(&system) };
+var system: r.platform2.abi.R4XStartR4Sys2 = .{};
+var imports: [7]r.abi.R4XStartImport = undefined;
+var context: r.platform2.abi.R4XStartContext2 = undefined;
+fn keepOpen(_: *const r.platform2.abi.R4XStartContext2) callconv(.c) u32 {
+    return 0;
+}
+export fn r4desk_standard_context2() callconv(.c) *const r.platform2.abi.R4XStartContext2 {
+    imports[0] = .{ .group_id = @intFromEnum(r.abi.R4LGroup.r4sys), .min_version = 2, .resolved_version = 2, .flags = r.abi.r4xstart_import_flag_group_interface, .module_name = @intFromPtr(@as([:0]const u8, "R4SYS").ptr), .symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr), .table = @intFromPtr(&system) };
     const names = [_][:0]const u8{ "TEXT_V1", "SETTINGS_V1", "DATE_V1", "TIME_V1", "CONFIG_V1" };
     const tables = [_]usize{ @intFromPtr(&provider.r4std_text_v1), @intFromPtr(&provider.r4std_settings_v1), @intFromPtr(&provider.r4std_date_v1), @intFromPtr(&provider.r4std_time_v1), @intFromPtr(&provider.r4std_config_v1) };
     for (names, tables, 0..) |name, table, i| imports[i + 1] = .{ .group_id = 0, .min_version = 1, .resolved_version = 1, .module_name = @intFromPtr(@as([:0]const u8, "R4STD").ptr), .symbol_name = @intFromPtr(name.ptr), .table = table };
-    context = .{ .app_class = @intFromEnum(r.abi.R4XStartAppClass.console), .instance_id = 86, .flags = r.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&imports), .import_count = imports.len };
+    imports[6] = .{ .group_id = 0, .min_version = 2, .resolved_version = 2, .module_name = @intFromPtr(@as([:0]const u8, "R4STD").ptr), .symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr), .table = @intFromPtr(&provider.r4std_query2) };
+    context = .{ .app_class = @intFromEnum(r.abi.R4XStartAppClass.console), .instance_id = 86, .flags = r.abi.r4xstart_flag_imports_valid | r.abi.r4xstart_flag_close_supported, .imports = @intFromPtr(&imports), .import_count = imports.len, .should_close = @intFromPtr(&keepOpen) };
     return &context;
 }
 

@@ -5,7 +5,7 @@ use alloc::alloc::{alloc, alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr::NonNull};
 use r4gfx as g;
 use r4os_library_helpers::{Error, raw as c};
-use r4os_sdk::{App, path::FilePath};
+use r4os_sdk::{App2, path::FilePath};
 struct Native {
     memory: c::R4LibraryMemory,
     allocator: c::R4LibraryAllocator,
@@ -33,7 +33,7 @@ impl Profile {
     /// # Safety
     /// The actual library/provider/callback code remains resident until Close.
     pub unsafe fn open_file(
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         path: &[u8],
         intent: u32,
@@ -56,7 +56,13 @@ impl Profile {
             )
         })?;
         required(unsafe { c::R4LibraryMemory_allocator(0, &mut n.memory, &mut n.allocator) })?;
-        required(unsafe { c::R4Library_colorClient(0, app.start_context(), &mut n.colors) })?;
+        required(unsafe {
+            c::R4Library_colorClient2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                &mut n.colors,
+            )
+        })?;
         required(unsafe {
             c::R4Media_profileOpenFile(
                 0,

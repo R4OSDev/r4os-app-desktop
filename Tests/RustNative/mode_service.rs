@@ -2,7 +2,8 @@
 //! original addresses until exact Close ACK while main-task input progresses.
 use super::*;
 use crate::{diagnostics::wire as diagnostic, runtime::launch_wire as launch};
-use r4os_sdk::{App, ImportSpec, StartupInfo};
+use r4os_sdk::App2;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -77,6 +78,9 @@ unsafe extern "C" fn precise(out: *mut a::MonotonicClockInfo) -> i32 {
     unsafe {
         out.write(a::MonotonicClockInfo {
             flags: a::monotonic_clock_flag_valid,
+            source: a::monotonic_clock_source_tsc,
+            generation: 1,
+            resolution_ns: 1,
             instant_ns: 1,
             event_requested_hz: 1000,
             event_effective_hz: 1000,
@@ -138,12 +142,30 @@ unsafe extern "C" fn call(
                     },
                     ..Default::default()
                 }),
-                (&mut out[size + diagnostic::WORK_SIZE..size + diagnostic::WORK_SIZE + launch::SIZE])
+                (&mut out
+                    [size + diagnostic::WORK_SIZE..size + diagnostic::WORK_SIZE + launch::SIZE])
                     .try_into()
                     .unwrap(),
             );
-            let link = a::DesktopLinkReply { request: a::DesktopLinkRequest { token: a::DesktopLinkToken { service: a::ProgramProcessHandle { instance_id: 31, generation: 9, reserved: 0 }, ..Default::default() }, ..Default::default() }, flags: a::desktop_link_capabilities, ..Default::default() };
-            wire::encode(&link, &mut out[size + diagnostic::WORK_SIZE + launch::SIZE..]);
+            let link = a::DesktopLinkReply {
+                request: a::DesktopLinkRequest {
+                    token: a::DesktopLinkToken {
+                        service: a::ProgramProcessHandle {
+                            instance_id: 31,
+                            generation: 9,
+                            reserved: 0,
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                flags: a::desktop_link_capabilities,
+                ..Default::default()
+            };
+            wire::encode(
+                &link,
+                &mut out[size + diagnostic::WORK_SIZE + launch::SIZE..],
+            );
         }
         launch::RECEIVED | launch::COMPLETE => {
             let value = launch::decode(source).unwrap();
@@ -356,8 +378,11 @@ fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
             ..Default::default()
         };
         host.tray(&request).unwrap();
-        STATE.lock().unwrap().next_error =
-            Some((a::desktop_link_op_exchange, a::service_api_result_timeout, 0));
+        STATE.lock().unwrap().next_error = Some((
+            a::desktop_link_op_exchange,
+            a::service_api_result_timeout,
+            0,
+        ));
         assert!(host.tray(&request).is_err());
         assert!(
             host.claimed(),
@@ -374,8 +399,11 @@ fn copied_mailbox_timeout_keeps_claim_work_and_exact_launch_receipt() {
             "no reopen or two-second recovery"
         );
         // A retired provider still invalidates the common connection.
-        STATE.lock().unwrap().next_error =
-            Some((a::desktop_link_op_exchange, a::service_api_result_not_running, 0));
+        STATE.lock().unwrap().next_error = Some((
+            a::desktop_link_op_exchange,
+            a::service_api_result_not_running,
+            0,
+        ));
         assert!(host.tray(&request).is_err());
         assert!(!host.claimed());
     });
@@ -558,52 +586,52 @@ unsafe extern "C" fn io_close(id: u32) -> i32 {
 }
 fn with(case: impl FnOnce(&Services<'_>, &Resources<'_>, a::ProgramProcessHandle)) {
     let _case = CASE.lock().unwrap();
-    let table = a::R4XStartR4Sys {
-        service_open: open as *const () as usize,
-        service_close: close as *const () as usize,
-        service_call: call as *const () as usize,
-        monotonic_clock: precise as *const () as usize,
-        io_service_call: submit as *const () as usize,
-        io_status: status as *const () as usize,
-        io_close: io_close as *const () as usize,
+    let table = a::generation2::R4XStartR4Sys2 {
+        service_open: open as *const () as _,
+        service_close: close as *const () as _,
+        service_call: call as *const () as _,
+        monotonic_clock: precise as *const () as _,
+        io_service_call: submit as *const () as _,
+        io_status: status as *const () as _,
+        io_close: io_close as *const () as _,
         ..Default::default()
     };
     let imports = [a::R4XStartImport {
         group_id: 1,
-        min_version: 1,
-        resolved_version: 1,
+        min_version: 2,
+        resolved_version: 2,
         flags: a::r4xstart_import_flag_group_interface,
         module_name: c"R4SYS".as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
+        symbol_name: c"Query2".as_ptr() as u64,
         table: &table as *const _ as u64,
         ..Default::default()
     }];
-    let raw = a::R4XStartContext {
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::console.0,
         instance_id: 88,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
         import_count: 1,
         ..Default::default()
     };
     let specs = [ImportSpec {
-        module_name: b"R4SYS",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+        module_name: (c"R4SYS").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 1,
-        magic: table.magic,
-        version: table.abi_version,
-        size: table.size,
+        reserved: 0,
     }];
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
         required_groups: 2,
         imports: &specs,
     };
-    let app = unsafe { App::from_raw(&raw, &expected, c"MODEFIX") }.unwrap();
-    let services = Services::new(&app).unwrap();
-    let resources = Resources::new(&app).unwrap();
+    let app = unsafe { App2::from_raw(&raw, &expected, c"MODEFIX") }.unwrap();
+    let services = Services::new2(&app).unwrap();
+    let resources = Resources::new2(&app).unwrap();
     case(
         &services,
         &resources,
@@ -714,7 +742,14 @@ fn d088_owned_mode_delay_late_ack_retirement_reconnect_and_queue_bound() {
         assert!(host.mode_poll().unwrap().is_none());
         let answer = host.mode_poll().unwrap().unwrap();
         assert_eq!(answer.reply.mode.identity.serial, 19);
-        assert!(answer.request.previous.mode.identity.same(&request.previous.mode.identity));
+        assert!(
+            answer
+                .request
+                .previous
+                .mode
+                .identity
+                .same(&request.previous.mode.identity)
+        );
         assert!(!host.mode_busy());
         let delayed = start.elapsed().as_nanos();
         assert!(delayed >= 20_000_000);

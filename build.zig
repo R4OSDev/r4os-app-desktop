@@ -51,6 +51,9 @@ pub fn build(b: *std.Build) void {
     r4gfx_implementation.addImport("r4os", host_r4os);
     const r4gfx_provider = b.createModule(.{ .root_source_file = libraries_dep.path("R4GFX/Source/device.zig"), .target = test_target });
     r4gfx_provider.addImport("r4os", host_r4os);
+    const library_caller = b.createModule(.{ .root_source_file = libraries_dep.path("Shared/Native/caller.zig"), .target = test_target });
+    library_caller.addImport("r4os", host_r4os);
+    r4gfx_provider.addImport("library_caller", library_caller);
     r4gfx_provider.addImport("r4l_contract", r4gfx_implementation);
     r4gfx_provider.addImport("r4nv_binding", r4nv_binding);
     r4gfx_provider.addImport("r4amd_binding", r4amd_binding);

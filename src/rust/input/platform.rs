@@ -4,12 +4,15 @@
 use crate::outputs::{NativeResult, OutputCatalog, same_id};
 use r4os_contract as a;
 const SECOND: u64 = 1_000_000_000;
-pub fn snapshot(app: &r4os_sdk::App<'_>) -> Option<a::PlatformInputSnapshot> {
-    let sys = app
-        .system_api()
-        .filter(|s| s.platform_input_snapshot != 0)?;
-    let call: a::R4SysFns::platform_input_snapshot =
-        unsafe { core::mem::transmute(sys.platform_input_snapshot) };
+pub fn snapshot(app: &r4os_sdk::App2<'_>) -> Option<a::PlatformInputSnapshot> {
+    let address = app
+        .context()
+        .lookup(
+            1,
+            core::mem::offset_of!(a::generation2::R4XStartR4Sys2, platform_input_snapshot) as u32,
+        )
+        .ok()?;
+    let call: a::R4SysFns::platform_input_snapshot = unsafe { core::mem::transmute(address) };
     let mut out = a::PlatformInputSnapshot::default();
     (unsafe { call(&mut out) } == 0).then_some(out)
 }

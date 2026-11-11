@@ -12,7 +12,8 @@ use crate::runtime::{
 use alloc::vec::Vec;
 use core::{marker::PhantomData, mem::MaybeUninit};
 use r4os_library_helpers::{raw as c, standard::Standard};
-use r4os_sdk::{App, StartupInfo, resources::Resources};
+use r4os_sdk::app2::StartupInfo;
+use r4os_sdk::{App2, resources::Resources};
 struct Save {
     raw: usize,
     expected: &'static StartupInfo<'static>,
@@ -21,7 +22,7 @@ struct Save {
 }
 impl Task for Save {
     fn run(&mut self, _: &Control) -> i32 {
-        let app = match unsafe { App::from_raw(self.raw as *const _, self.expected, c"R4DESK") } {
+        let app = match unsafe { App2::from_raw(self.raw as *const _, self.expected, c"R4DESK") } {
             Ok(v) => v,
             Err(_) => return c::R4StdConfig_error_write_failed,
         };
@@ -83,7 +84,7 @@ impl<'a> Owner<'a> {
     pub fn busy(&self) -> bool {
         self.worker.is_some()
     }
-    fn complete(&mut self, app: &App<'_>, tick: u64, code: i32) -> bool {
+    fn complete(&mut self, app: &App2<'_>, tick: u64, code: i32) -> bool {
         let mut outcome = MaybeUninit::uninit();
         if required(unsafe {
             c::R4StdSettingsWriteback_complete(
@@ -115,7 +116,7 @@ impl<'a> Owner<'a> {
         scalar(unsafe { c::R4StdSettingsWritebackFlush_attempted(0, &outcome) })
             .is_ok_and(|v| v != 0)
     }
-    pub fn poll(&mut self, app: &App<'_>, tick: u64) -> bool {
+    pub fn poll(&mut self, app: &App2<'_>, tick: u64) -> bool {
         let Some(worker) = self.worker.as_mut() else {
             return false;
         };
@@ -135,7 +136,7 @@ impl<'a> Owner<'a> {
     /// becomes false after an actual successful native join.
     pub unsafe fn flush(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,
         standard: &Standard<'_>,

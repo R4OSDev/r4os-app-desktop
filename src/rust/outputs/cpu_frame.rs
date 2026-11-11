@@ -21,7 +21,7 @@ impl Output {
     /// by the ordinary SDK. No scene/map slice survives this transaction.
     pub unsafe fn render<'f>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         colors: &impl Colors,
         scene: &Scene<'_>,
@@ -56,7 +56,7 @@ impl Output {
 impl State {
     unsafe fn render_frame<'f>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         colors: &impl Colors,
         scene: &Scene<'_>,
@@ -191,7 +191,7 @@ impl State {
         self.pending = true;
         self.reported[frame.slot as usize - 1] = false;
         self.stats.last_submitted = Some(frame.slot - 1);
-        if let Ok(ended) = r4os_sdk::time::Clock::new(app).instant() {
+        if let Ok(ended) = r4os_sdk::time::Clock::new2(app).instant() {
             if time != 0 && ended.nanoseconds >= time {
                 self.stats.frame_submit_last_ns = ended.nanoseconds - time;
                 self.stats.frame_submit_max_ns = self
@@ -204,7 +204,7 @@ impl State {
     }
     fn begin_frame(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         input_ns: u64,
         time: u64,

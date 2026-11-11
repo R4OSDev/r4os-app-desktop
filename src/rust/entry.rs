@@ -1,9 +1,9 @@
 //! Normal SDK application entry; the manifest supplies all runtime imports.
 use crate::runtime::{bootstrap, desktop::Coordinator};
 use r4os_sdk as __r4os_startup;
-static EXPECTED: r4os_sdk::StartupInfo<'static> = include!(env!("R4OS_STARTUP_INFO_FILE"));
-r4os_sdk::app!(run);
-fn run(app: &mut r4os_sdk::App<'_>) -> i32 {
+static EXPECTED: r4os_sdk::app2::StartupInfo<'static> = include!(env!("R4OS_STARTUP_INFO_FILE"));
+r4os_sdk::app2!(run);
+fn run(app: &mut r4os_sdk::App2<'_>) -> i32 {
     if !bootstrap::arguments_supported(app.args()) {
         app.write("Desktop: unsupported arguments; use Spectra for diagnostics\n");
         return 2;

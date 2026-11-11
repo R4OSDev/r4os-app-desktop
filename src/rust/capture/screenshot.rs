@@ -6,8 +6,9 @@ use super::{
 };
 use crate::runtime::worker::{Control, Task, Worker};
 use core::fmt::Write;
+use r4os_sdk::app2::StartupInfo;
 use r4os_sdk::{
-    App, StartupInfo, abi as a, path::FilePath, resources::Resources, storage::System, time::Clock,
+    App2, abi as a, path::FilePath, resources::Resources, storage::System, time::Clock,
 };
 pub const DIRECTORY: &[u8] = b"C:\\SCREENSHOTS";
 pub const USAGE: u32 = 0x46;
@@ -36,7 +37,7 @@ impl Result {
     pub fn retained(&self) -> bool {
         self.file.is_some() || self.loans.retained()
     }
-    pub fn retry_close(&mut self, app: &App<'_>) -> bool {
+    pub fn retry_close(&mut self, app: &App2<'_>) -> bool {
         if let Some(file) = &mut self.file {
             if file.abort(app) {
                 self.file = None;
@@ -58,7 +59,7 @@ impl Screenshot {
     /// The exact loader context and code remain resident until the returned
     /// worker is joined. `expected` is the manifest-generated static record.
     pub unsafe fn start<'a>(
-        app: &App<'_>,
+        app: &App2<'_>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,
         path: &[u8],
@@ -85,10 +86,10 @@ impl Screenshot {
 }
 impl Task for Screenshot {
     fn run(&mut self, control: &Control) -> i32 {
-        // No App, SDK mutable context, writer or pixel borrow crosses threads.
+        // No App2, SDK mutable context, writer or pixel borrow crosses threads.
         let app = match unsafe {
-            App::from_raw(
-                self.raw as *const a::R4XStartContext,
+            App2::from_raw(
+                self.raw as *const a::generation2::R4XStartContext2,
                 self.expected,
                 c"R4DESK",
             )
@@ -115,13 +116,13 @@ impl Task for Screenshot {
         if self.result.error.is_none() { 0 } else { -1 }
     }
 }
-fn save(app: &App<'_>, control: &Control, result: &mut Result) -> core::result::Result<(), Error> {
+fn save(app: &App2<'_>, control: &Control, result: &mut Result) -> core::result::Result<(), Error> {
     let source = Source::new(app).map_err(|_| Error::Capture)?;
     let work = (|| {
         source
             .demand(&mut result.loans)
             .map_err(|_| Error::Capture)?;
-        let clock = Clock::new(app);
+        let clock = Clock::new2(app);
         let deadline = clock
             .precise_instant()
             .map_err(|_| Error::Clock)?
@@ -154,7 +155,7 @@ fn save(app: &App<'_>, control: &Control, result: &mut Result) -> core::result::
             return Err(Error::ImageSize);
         }
         let header = bitmap_header(info.width, info.height)?;
-        let system = System::new(app).map_err(|_| Error::Open)?;
+        let system = System::new2(app).map_err(|_| Error::Open)?;
         let files = system.files();
         if result.path[0] == 0 {
             let dir = FilePath::parse(DIRECTORY).map_err(|_| Error::Path)?;

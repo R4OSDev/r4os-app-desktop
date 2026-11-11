@@ -6,7 +6,7 @@ use crate::{
     hosted::{window_image::Memory, window_set::Set},
     render::gpu::{device::Device, receipt::Consumer},
 };
-use r4os_sdk::{App, c_facades as c, graphics::Graphics};
+use r4os_sdk::{App2, c_facades as c, graphics::Graphics};
 enum State<'a> {
     Empty,
     Native(Output<'a>),
@@ -59,7 +59,7 @@ impl<'a> Primary<'a> {
     /// The actual loader/providers remain resident through `close`.
     pub unsafe fn poll<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         windows: &mut Set<M, Consumer>,
         managed: bool,
@@ -102,7 +102,7 @@ impl<'a> Primary<'a> {
     }
     pub fn admit(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         revision: u64,
         time: u64,
@@ -144,7 +144,7 @@ impl<'a> Primary<'a> {
     }
     pub fn close<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         windows: &mut Set<M, Consumer>,
         time: u64,

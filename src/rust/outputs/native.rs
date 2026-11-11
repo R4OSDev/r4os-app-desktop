@@ -27,9 +27,9 @@ use crate::{
 use alloc::sync::Arc;
 use core::mem;
 use r4gfx as g;
+use r4os_sdk::app2::StartupInfo;
 use r4os_sdk::{
-    App, StartupInfo, abi as a, c_facades as c, graphics::Graphics, resources::Resources,
-    time::Clock,
+    App2, abi as a, c_facades as c, graphics::Graphics, resources::Resources, time::Clock,
 };
 #[path = "native_recording.rs"]
 mod recording;
@@ -99,8 +99,8 @@ struct Preparation {
 impl Task for Preparation {
     fn run(&mut self, control: &Control) -> i32 {
         let app = match unsafe {
-            App::from_raw(
-                self.raw as *const a::R4XStartContext,
+            App2::from_raw(
+                self.raw as *const a::generation2::R4XStartContext2,
                 self.expected,
                 c"R4DESK",
             )
@@ -183,8 +183,8 @@ impl Task for Preparation {
         }
     }
 }
-fn now(app: &App<'_>) -> Option<u64> {
-    Clock::new(app)
+fn now(app: &App2<'_>) -> Option<u64> {
+    Clock::new2(app)
         .precise_instant()
         .ok()
         .map(|v| v.nanoseconds)
@@ -236,7 +236,7 @@ impl<'a> Output<'a> {
     /// The actual loader/provider tables remain resident through successful
     /// close, including all cold tasks and broker consumer receipts.
     pub unsafe fn open(
-        app: &App<'_>,
+        app: &App2<'_>,
         adapter: u32,
         head: Option<u32>,
         encoding: Option<a::GfxOutputColorState>,
@@ -464,7 +464,7 @@ impl<'a> Output<'a> {
                 .as_ref()
                 .is_some_and(|s| s.engine.active() || s.engine.pending())
     }
-    pub fn admission(&mut self, app: &App<'_>, additional: u32) -> super::selection::Decision {
+    pub fn admission(&mut self, app: &App2<'_>, additional: u32) -> super::selection::Decision {
         use super::selection::{Decision, Reason};
         let Some(state) = self.state.as_deref_mut() else {
             return Decision::new(Reason::NativeState);
@@ -530,7 +530,7 @@ impl<'a> Output<'a> {
             .as_ref()
             .map_or(limit, |s| s.engine.capture_wait_ticks(time, hz, limit))
     }
-    pub fn available(&mut self, app: &App<'_>, revision: u64, time: u64, input_ns: u64) -> bool {
+    pub fn available(&mut self, app: &App2<'_>, revision: u64, time: u64, input_ns: u64) -> bool {
         if self.blocks_capture(time) || self.failed_revision == Some(revision) {
             return false;
         }
@@ -724,7 +724,7 @@ impl<'a> Output<'a> {
     /// from the module entry. Only immutable owned capture moves to the task.
     pub unsafe fn start(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,
         time: u64,
@@ -869,7 +869,7 @@ impl<'a> Output<'a> {
             }
         }
     }
-    fn collect(&mut self, app: &App<'_>, resume: bool) -> bool {
+    fn collect(&mut self, app: &App2<'_>, resume: bool) -> bool {
         let Some(worker) = self.preparation.as_mut() else {
             return true;
         };
@@ -915,7 +915,7 @@ impl<'a> Output<'a> {
     }
     pub fn poll<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         windows: &mut Set<M, Consumer>,
         graphics: &Graphics<'_, '_>,
         time: u64,
@@ -963,7 +963,7 @@ impl<'a> Output<'a> {
             }
         }
         // An old broker receipt may call this same device's job_release.
-        // No Session/device-call gate or exclusive App loan spans this call.
+        // No Session/device-call gate or exclusive App2 loan spans this call.
         let failed = state.engine.fault.is_some();
         let _ = state
             .engine
@@ -1073,7 +1073,7 @@ impl<'a> Output<'a> {
             Progress::Idle
         }
     }
-    pub fn reject(&mut self, app: &App<'_>) {
+    pub fn reject(&mut self, app: &App2<'_>) {
         if let Some(state) = self.state.as_deref_mut() {
             if let Ok(session) = state.device.bind(app) {
                 state.engine.cancel(&session, gpu::Error::State);
@@ -1112,7 +1112,7 @@ impl<'a> Output<'a> {
     /// Retry from the event loop; timeout or a stop request never frees backing.
     pub fn close<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         windows: &mut Set<M, Consumer>,
         graphics: &Graphics<'_, '_>,
         time: u64,

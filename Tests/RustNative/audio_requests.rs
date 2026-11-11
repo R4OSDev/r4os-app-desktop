@@ -2,7 +2,8 @@
 //! peer is controlled; no physical audio or cursor latency is claimed.
 use super::*;
 use crate::runtime::wire;
-use r4os_sdk::{App, ImportSpec, StartupInfo, resources::Resources, services::Services};
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
+use r4os_sdk::{App2, resources::Resources, services::Services};
 use std::sync::Mutex;
 #[derive(Clone, Copy)]
 struct Pending {
@@ -309,53 +310,53 @@ unsafe extern "C" fn io_close(id: u32) -> i32 {
 fn with(case: impl FnOnce(&Services<'_>, &Resources<'_>, a::ProgramProcessHandle)) {
     let _case = CASE.lock().unwrap();
     *STATE.lock().unwrap() = Some(Peer::default());
-    let table = a::R4XStartR4Sys {
-        service_open: open as *const () as usize,
-        service_close: close as *const () as usize,
-        service_call: call as *const () as usize,
-        program_open_handle: process as *const () as usize,
-        program_handle_status: process_status as *const () as usize,
-        io_service_call: submit as *const () as usize,
-        io_status: status as *const () as usize,
-        io_close: io_close as *const () as usize,
+    let table = a::generation2::R4XStartR4Sys2 {
+        service_open: open as *const () as _,
+        service_close: close as *const () as _,
+        service_call: call as *const () as _,
+        program_open_handle: process as *const () as _,
+        program_handle_status: process_status as *const () as _,
+        io_service_call: submit as *const () as _,
+        io_status: status as *const () as _,
+        io_close: io_close as *const () as _,
         ..Default::default()
     };
     let imports = [a::R4XStartImport {
         group_id: 1,
-        min_version: 1,
-        resolved_version: 1,
+        min_version: 2,
+        resolved_version: 2,
         flags: a::r4xstart_import_flag_group_interface,
         module_name: c"R4SYS".as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
+        symbol_name: c"Query2".as_ptr() as u64,
         table: &table as *const _ as u64,
         ..Default::default()
     }];
-    let raw = a::R4XStartContext {
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::console.0,
         instance_id: 88,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
         import_count: 1,
         ..Default::default()
     };
     let specs = [ImportSpec {
-        module_name: b"R4SYS",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+        module_name: (c"R4SYS").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 1,
-        magic: table.magic,
-        version: table.abi_version,
-        size: table.size,
+        reserved: 0,
     }];
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
         required_groups: 2,
         imports: &specs,
     };
-    let app = unsafe { App::from_raw(&raw, &expected, c"AUDIOFIX") }.unwrap();
-    let services = Services::new(&app).unwrap();
-    let resources = Resources::new(&app).unwrap();
+    let app = unsafe { App2::from_raw(&raw, &expected, c"AUDIOFIX") }.unwrap();
+    let services = Services::new2(&app).unwrap();
+    let resources = Resources::new2(&app).unwrap();
     case(
         &services,
         &resources,

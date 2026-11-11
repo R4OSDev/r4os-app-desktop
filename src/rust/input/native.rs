@@ -3,21 +3,21 @@
 use r4os_contract as a;
 use r4os_sdk::gui::{Session, raw as c};
 pub fn push_console(
-    app: &r4os_sdk::App<'_>,
+    app: &r4os_sdk::App2<'_>,
     owner: a::ProgramProcessHandle,
     events: &[a::ConsoleInputEvent],
 ) -> i32 {
-    let Some(table) = app.desktop_api() else {
-        return a::err_no_group;
+    let address = match app.context().lookup(
+        2,
+        core::mem::offset_of!(a::generation2::R4XStartR4Desk2, console_push_events) as u32,
+    ) {
+        Ok(address) => address,
+        Err(code) => return code,
     };
-    if table.console_push_events == 0 {
-        return a::err_no_fn;
-    }
     let Ok(count) = u32::try_from(events.len()) else {
         return -1;
     };
-    let call: a::R4DeskFns::console_push_events =
-        unsafe { core::mem::transmute(table.console_push_events) };
+    let call: a::R4DeskFns::console_push_events = unsafe { core::mem::transmute(address) };
     // The native contract copies only an accepted prefix during this call.
     unsafe { call(&owner, events.as_ptr(), count) }
 }

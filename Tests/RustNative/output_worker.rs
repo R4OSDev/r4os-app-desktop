@@ -3,6 +3,7 @@
 use super::*;
 use crate::{hosted::window_image::NativeMemory, render::gpu::engine::tests as fixture};
 use core::pin::pin;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 use std::{
     sync::{
         Mutex,
@@ -13,61 +14,60 @@ use std::{
 static THREAD: Mutex<Option<std::thread::JoinHandle<i32>>> = Mutex::new(None);
 static ALLOW: AtomicBool = AtomicBool::new(true);
 static MODE: AtomicI32 = AtomicI32::new(0);
-static SPECS: [r4os_sdk::ImportSpec; 5] = [
-    r4os_sdk::ImportSpec {
-        module_name: b"R4SYS",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+static SPECS: [ImportSpec; 6] = [
+    r4os_sdk::app2::ImportSpec {
+        module_name: (c"R4SYS").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 1,
-        magic: a::r4xstart_r4sys_magic,
-        version: a::r4xstart_r4sys_version,
-        size: core::mem::size_of::<a::R4XStartR4Sys>() as u32,
+        reserved: 0,
     },
-    r4os_sdk::ImportSpec {
-        module_name: b"R4DRAW",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+    r4os_sdk::app2::ImportSpec {
+        module_name: (c"R4DRAW").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 3,
-        magic: a::r4xstart_r4draw_magic,
-        version: a::r4xstart_r4draw_version,
-        size: core::mem::size_of::<a::R4XStartR4Draw>() as u32,
+        reserved: 0,
     },
-    r4os_sdk::ImportSpec {
-        module_name: b"R4GFX",
-        symbol_name: b"DEVICE_V1",
+    r4os_sdk::app2::ImportSpec {
+        module_name: (c"R4GFX").as_ptr().cast(),
+        symbol_name: (c"DEVICE_V1").as_ptr().cast(),
         minimum: 10,
-        optional: false,
+        optional: 0,
         group_id: 0,
-        magic: 0,
-        version: 0,
-        size: 0,
+        reserved: 0,
     },
-    r4os_sdk::ImportSpec {
-        module_name: b"R4NV",
-        symbol_name: b"BACKEND_V1",
+    r4os_sdk::app2::ImportSpec {
+        module_name: (c"R4NV").as_ptr().cast(),
+        symbol_name: (c"BACKEND_V1").as_ptr().cast(),
         minimum: 3,
-        optional: true,
+        optional: 1,
         group_id: 0,
-        magic: 0,
-        version: 0,
-        size: 0,
+        reserved: 0,
     },
-    r4os_sdk::ImportSpec {
-        module_name: b"R4GFX",
-        symbol_name: b"COLOR_V1",
+    r4os_sdk::app2::ImportSpec {
+        module_name: (c"R4GFX").as_ptr().cast(),
+        symbol_name: (c"COLOR_V1").as_ptr().cast(),
         minimum: 4,
-        optional: false,
+        optional: 0,
         group_id: 0,
-        magic: 0,
-        version: 0,
-        size: 0,
+        reserved: 0,
+    },
+    ImportSpec {
+        module_name: c"R4GFX".as_ptr().cast(),
+        symbol_name: c"Query2".as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
+        group_id: 0,
+        reserved: 0,
     },
 ];
 static EXPECTED: StartupInfo<'static> = StartupInfo {
-    app_class: a::R4XStartAppClass::console,
-    required_groups: 10,
+    profile: 0,
+    app_class: a::R4XStartAppClass::console.0,
+    required_groups: 2,
     imports: &SPECS,
 };
 unsafe extern "C" fn create(
@@ -149,7 +149,7 @@ fn until(phase: &str, mut complete: impl FnMut() -> bool) {
     }
 }
 fn scene<M: Memory>(
-    app: &App<'_>,
+    app: &App2<'_>,
     owner: &mut Output<'_>,
     windows: &mut Set<M, Consumer>,
     primary: bool,
@@ -261,17 +261,18 @@ fn newest_scene_replaces_unsent_input_while_real_worker_and_gpu_are_held() {
             )
         }
         .to_vec();
-        let mut sys = Box::new(unsafe { *(imports[0].table as *const a::R4XStartR4Sys) });
-        sys.thread_create_handle = create as *const () as usize;
-        sys.thread_handle_join = join as *const () as usize;
-        sys.monotonic_clock = precise as *const () as usize;
+        let mut sys =
+            Box::new(unsafe { *(imports[0].table as *const a::generation2::R4XStartR4Sys2) });
+        sys.thread_create_handle = create as *const () as _;
+        sys.thread_handle_join = join as *const () as _;
+        sys.monotonic_clock = precise as *const () as _;
         imports[0].table = &*sys as *const _ as u64;
         let mut raw = *parent_raw;
         raw.imports = imports.as_ptr() as u64;
-        let app = unsafe { App::from_raw(&raw, &EXPECTED, c"OUTLATEST") }.unwrap();
-        let resources = Resources::new(&app).unwrap();
+        let app = unsafe { App2::from_raw(&raw, &EXPECTED, c"OUTLATEST") }.unwrap();
+        let resources = Resources::new2(&app).unwrap();
         let mut storage = pin!(r4os_sdk::graphics::GraphicsStorage::new());
-        let graphics = Graphics::open(storage.as_mut(), &app).unwrap();
+        let graphics = Graphics::open2(storage.as_mut(), &app).unwrap();
         let mut windows = Set::<_, Consumer>::new(NativeMemory(&graphics));
         for primary in [false, true] {
             {
@@ -404,17 +405,18 @@ fn actual_cold_output_join_cancel_and_creation_refusal_keep_complete_state() {
             core::slice::from_raw_parts((*parent_raw).imports as *const a::R4XStartImport, count)
         }
         .to_vec();
-        let mut sys = Box::new(unsafe { *(imports[0].table as *const a::R4XStartR4Sys) });
-        sys.thread_create_handle = create as *const () as usize;
-        sys.thread_handle_join = join as *const () as usize;
-        sys.monotonic_clock = precise as *const () as usize;
+        let mut sys =
+            Box::new(unsafe { *(imports[0].table as *const a::generation2::R4XStartR4Sys2) });
+        sys.thread_create_handle = create as *const () as _;
+        sys.thread_handle_join = join as *const () as _;
+        sys.monotonic_clock = precise as *const () as _;
         imports[0].table = &*sys as *const _ as u64;
         let mut raw = *parent_raw;
         raw.imports = imports.as_ptr() as u64;
-        let app = unsafe { App::from_raw(&raw, &EXPECTED, c"OUTWORK") }.unwrap();
-        let resources = Resources::new(&app).unwrap();
+        let app = unsafe { App2::from_raw(&raw, &EXPECTED, c"OUTWORK") }.unwrap();
+        let resources = Resources::new2(&app).unwrap();
         let mut storage = pin!(r4os_sdk::graphics::GraphicsStorage::new());
-        let graphics = Graphics::open(storage.as_mut(), &app).unwrap();
+        let graphics = Graphics::open2(storage.as_mut(), &app).unwrap();
         let mut windows = Set::<_, Consumer>::new(NativeMemory(&graphics));
         let mut owner = unsafe { Output::open(&app, 0, None, None, g::format_xrgb8888) }
             .unwrap_or_else(|_| panic!("original device open"));

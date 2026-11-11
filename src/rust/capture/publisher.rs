@@ -10,33 +10,38 @@ use crate::{
         scene::{CpuScene, intersect},
     },
 };
-use r4os_sdk::{App, abi as a};
+use r4os_sdk::{App2, abi as a};
 #[derive(Default)]
 pub struct Publisher {
     pub consumers: u32,
     pub cursor_damage: Dirty,
     pub suppressed: bool,
 }
-fn consumers(app: &App<'_>) -> u32 {
-    let Some(table) = app.desktop_api().filter(|t| t.remote_frame_consumers != 0) else {
+fn consumers(app: &App2<'_>) -> u32 {
+    let Ok(address) = app.context().lookup(
+        2,
+        core::mem::offset_of!(a::generation2::R4XStartR4Desk2, remote_frame_consumers) as u32,
+    ) else {
         return 0;
     };
-    let call: a::R4DeskFns::remote_frame_consumers =
-        unsafe { core::mem::transmute(table.remote_frame_consumers) };
+    let call: a::R4DeskFns::remote_frame_consumers = unsafe { core::mem::transmute(address) };
     unsafe { call() }
 }
 fn publish(
-    app: &App<'_>,
+    app: &App2<'_>,
     pixels: &[u32],
     width: i32,
     height: i32,
     regions: &[Rect],
     pointer: super::remote::Cursor,
 ) -> i32 {
-    let Some(table) = app
-        .desktop_api()
-        .filter(|t| t.remote_frame_publish_regions != 0)
-    else {
+    let Ok(address) = app.context().lookup(
+        2,
+        core::mem::offset_of!(
+            a::generation2::R4XStartR4Desk2,
+            remote_frame_publish_regions
+        ) as u32,
+    ) else {
         return a::err_no_fn;
     };
     if width <= 0
@@ -90,8 +95,7 @@ fn publish(
         },
         ..Default::default()
     };
-    let call: a::R4DeskFns::remote_frame_publish_regions =
-        unsafe { core::mem::transmute(table.remote_frame_publish_regions) };
+    let call: a::R4DeskFns::remote_frame_publish_regions = unsafe { core::mem::transmute(address) };
     unsafe {
         call(
             &info,
@@ -103,7 +107,7 @@ fn publish(
     }
 }
 impl Publisher {
-    pub fn refresh(&mut self, app: &App<'_>) -> bool {
+    pub fn refresh(&mut self, app: &App2<'_>) -> bool {
         let next = consumers(app);
         let became = self.consumers == 0 && next != 0;
         self.consumers = next;
@@ -137,16 +141,20 @@ impl Publisher {
     }
     pub fn reset(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         outputs: &mut Manager<'_>,
         legacy: Option<&mut Output<'_>>,
     ) -> i32 {
         let code = app
-            .desktop_api()
-            .filter(|t| t.remote_frame_source_reset != 0)
-            .map_or(a::err_no_fn, |table| {
+            .context()
+            .lookup(
+                2,
+                core::mem::offset_of!(a::generation2::R4XStartR4Desk2, remote_frame_source_reset)
+                    as u32,
+            )
+            .map_or(a::err_no_fn, |address| {
                 let call: a::R4DeskFns::remote_frame_source_reset =
-                    unsafe { core::mem::transmute(table.remote_frame_source_reset) };
+                    unsafe { core::mem::transmute(address) };
                 unsafe { call() }
             });
         if let Some(owner) = legacy {
@@ -170,7 +178,7 @@ impl Publisher {
     }
     pub fn primary(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         frames: &mut Frames,
         regions: &[Rect],
         pointer: super::remote::Cursor,
@@ -216,7 +224,7 @@ impl Publisher {
     }
     pub fn image(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         frames: &mut Frames,
         image: super::remote::Image<'_>,
         width: i32,

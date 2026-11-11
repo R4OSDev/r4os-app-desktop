@@ -1,11 +1,11 @@
 //! Stable caller-owned R4GFX storage. Thread handoff moves opaque identities,
-//! never an App/Interface loan. A refused Close retains the actual allocation.
+//! never an App2/Interface loan. A refused Close retains the actual allocation.
 use super::receipt::{Call, Consumer, Loans};
 use alloc::alloc::{alloc_zeroed, dealloc};
 use alloc::sync::Arc;
 use core::{alloc::Layout, ptr::NonNull};
 use r4gfx as g;
-use r4os_sdk::App;
+use r4os_sdk::App2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Unavailable,
@@ -36,7 +36,7 @@ pub struct Device {
     loans: Arc<Loans>,
     release_job: g::DeviceV1_job_releaseFn,
 }
-// R4GFX declares handle-serialized operations. Device contains no Rust App or
+// R4GFX declares handle-serialized operations. Device contains no Rust App2 or
 // Interface loan or borrowed caller buffers. Only its owner moves
 // between tasks; bind() needs exclusive access and creates a local Interface.
 // The enclosing R4X keeps loader providers resident until every task joins.
@@ -55,14 +55,14 @@ impl Device {
     /// The actual loader context, provider tables and callbacks remain
     /// resident until successful Close, including across serialized task
     /// handoff. Drain the owning transaction before its R4X entry returns.
-    pub unsafe fn open(app: &App<'_>, adapter: u32) -> Result<Self, OpenError> {
+    pub unsafe fn open(app: &App2<'_>, adapter: u32) -> Result<Self, OpenError> {
         let fail = |error| OpenError {
             error,
             retained: None,
         };
-        let client = g::DeviceV1Client::init(app).map_err(|_| fail(Error::Unavailable))?;
-        let _ = g::ColorV1Client::init(app).map_err(|_| fail(Error::Unavailable))?;
-        let interface = r4os_sdk::r4l::Interface::new(
+        let client = g::DeviceV1Client::init2(app).map_err(|_| fail(Error::Unavailable))?;
+        let _ = g::ColorV1Client::init2(app).map_err(|_| fail(Error::Unavailable))?;
+        let interface = r4os_sdk::r4l::Interface::new2(
             app,
             g::MODULE_NAME,
             g::device_v1_export_name,
@@ -121,15 +121,15 @@ impl Device {
         }
         Ok(owner)
     }
-    pub fn bind<'o, 'a>(&'o mut self, app: &'a App<'_>) -> Result<Session<'o, 'a>, Error> {
+    pub fn bind<'o, 'a>(&'o mut self, app: &'a App2<'_>) -> Result<Session<'o, 'a>, Error> {
         if self.context != app.start_context() as *const _ as usize {
             return Err(Error::WrongOwner);
         }
         if self.handle.is_none() {
             return Err(Error::Closed);
         }
-        let client = g::DeviceV1Client::init(app).map_err(|_| Error::Unavailable)?;
-        let colors = g::ColorV1Client::init(app).map_err(|_| Error::Unavailable)?;
+        let client = g::DeviceV1Client::init2(app).map_err(|_| Error::Unavailable)?;
+        let colors = g::ColorV1Client::init2(app).map_err(|_| Error::Unavailable)?;
         let call = self.loans.enter().ok_or(Error::Native(g::status_busy))?;
         Ok(Session {
             owner: self,
@@ -138,7 +138,7 @@ impl Device {
             _call: call,
         })
     }
-    pub fn close(&mut self, app: &App<'_>) -> Result<bool, Error> {
+    pub fn close(&mut self, app: &App2<'_>) -> Result<bool, Error> {
         let Some(handle) = self.handle else {
             return Ok(true);
         };
@@ -151,7 +151,7 @@ impl Device {
         let Some(_call) = self.loans.enter() else {
             return Ok(false);
         };
-        let client = g::DeviceV1Client::init(app).map_err(|_| Error::Unavailable)?;
+        let client = g::DeviceV1Client::init2(app).map_err(|_| Error::Unavailable)?;
         let rc = unsafe { client.device_close(&handle) };
         if rc == g::status_busy {
             return Ok(false);

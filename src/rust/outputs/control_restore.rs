@@ -4,7 +4,7 @@ use super::*;
 impl Owner {
     pub(super) fn restore(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         owner: a::ProgramProcessHandle,
@@ -89,7 +89,7 @@ impl Owner {
     }
     pub(super) fn restore_color(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         context: &Context<'_, '_>,
         manager: &mut Manager<'_>,
         owner: a::ProgramProcessHandle,

@@ -4,7 +4,7 @@ use super::file::Output;
 use crate::runtime::worker::Control;
 use r4enc as e;
 use r4os_library_helpers::media::{Mux, Nv12};
-use r4os_sdk::{App, abi as a, c_facades as c, graphics::Graphics, time::Clock};
+use r4os_sdk::{App2, abi as a, c_facades as c, graphics::Graphics, time::Clock};
 pub const INTERVAL: u64 = 1_000_000_000 / 30;
 pub const WORK_NS: u64 = 5_000_000_000;
 pub const MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
@@ -26,7 +26,7 @@ pub enum Error {
     Drain,
 }
 pub struct Codec<'a, 's> {
-    app: &'a App<'a>,
+    app: &'a App2<'a>,
     graphics: &'a Graphics<'s, 'a>,
     api: &'a e::EncodeV1Client<'a>,
     encoder: Option<e::R4EncEncoder>,
@@ -52,15 +52,15 @@ fn status(slot: c::R4SdkGuiSlot) -> i32 {
         slot.bits as i32
     }
 }
-pub fn now(app: &App<'_>) -> Result<u64, Error> {
-    Clock::new(app)
+pub fn now(app: &App2<'_>) -> Result<u64, Error> {
+    Clock::new2(app)
         .precise_instant()
         .map(|i| i.nanoseconds)
         .map_err(|_| Error::Clock)
 }
 impl<'a, 's> Codec<'a, 's> {
     pub fn new(
-        app: &'a App<'a>,
+        app: &'a App2<'a>,
         graphics: &'a Graphics<'s, 'a>,
         api: &'a e::EncodeV1Client<'a>,
     ) -> Self {

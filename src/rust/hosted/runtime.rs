@@ -22,7 +22,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::ffi::CStr;
 use r4os_sdk::{
-    App, abi as a,
+    App2, abi as a,
     gui::Session,
     resources::Resources,
     storage::{Error, Result},
@@ -164,7 +164,7 @@ impl<'input> State<'input> {
         &mut self,
         change: &Changes,
         session: &mut Session<'_, '_>,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         tick: u64,
         dirty: &mut Dirty,
     ) {
@@ -326,7 +326,7 @@ impl<'input> State<'input> {
     /// process/resource retirement in `graphics` through every detach.
     pub unsafe fn synchronize(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         resources: &Resources<'_>,
         programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
@@ -342,11 +342,13 @@ impl<'input> State<'input> {
     ) -> bool {
         self.poll_failed_spawns(programs);
         let last = app
-            .system_api()
-            .filter(|s| s.program_status != 0)
-            .map_or(0, |s| {
-                let call: a::R4SysFns::program_status =
-                    unsafe { core::mem::transmute(s.program_status) };
+            .context()
+            .lookup(
+                1,
+                core::mem::offset_of!(a::generation2::R4XStartR4Sys2, program_status) as u32,
+            )
+            .map_or(0, |address| {
+                let call: a::R4SysFns::program_status = unsafe { core::mem::transmute(address) };
                 let mut status = a::ProgramStatus::default();
                 unsafe { call(&mut status) };
                 status.last_exit_code
@@ -475,7 +477,7 @@ impl<'input> State<'input> {
         &mut self,
         index: usize,
         session: &mut Session<'_, '_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         tick: u64,
         dirty: &mut Dirty,
     ) {
@@ -485,7 +487,7 @@ impl<'input> State<'input> {
     pub fn launch(
         &mut self,
         programs: &Programs<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         path: &[u8],
         args: &[u8],
@@ -501,7 +503,7 @@ impl<'input> State<'input> {
     pub fn launch_observed(
         &mut self,
         programs: &Programs<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         path: &[u8],
         args: &[u8],
@@ -584,7 +586,7 @@ impl<'input> State<'input> {
     pub(crate) fn accept_spawned(
         &mut self,
         programs: &Programs<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         index: usize,
         handle: a::ProgramProcessHandle,
@@ -670,7 +672,7 @@ impl<'input> State<'input> {
     pub fn enter_terminal(
         &mut self,
         programs: &Programs<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         tick: u64,
         dirty: &mut Dirty,
@@ -680,7 +682,7 @@ impl<'input> State<'input> {
     pub fn enter_terminal_with_args(
         &mut self,
         programs: &Programs<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         tick: u64,
         dirty: &mut Dirty,
@@ -770,7 +772,7 @@ impl<'input> State<'input> {
         index: usize,
         programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         tick: u64,
         dirty: &mut Dirty,
     ) {

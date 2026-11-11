@@ -156,7 +156,7 @@ impl<'input> State<'input> {
         }
         self.clock.set_visible(self.config.taskbar_clock);
         if self.config.taskbar_clock {
-            if let Ok(state) = r4os_sdk::time::Clock::new(env.app).state() {
+            if let Ok(state) = r4os_sdk::time::Clock::new2(env.app).state() {
                 if !self.clock.load(&env.store, &state) {
                     env.app.write("Time config unreadable; file retained\n");
                 }

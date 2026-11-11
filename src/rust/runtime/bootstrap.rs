@@ -6,7 +6,7 @@ use core::pin::pin;
 use r4gfx::ColorV1Client;
 use r4os_library_helpers::standard::Standard;
 use r4os_sdk::{
-    App, abi as a,
+    App2, abi as a,
     graphics::{Graphics, GraphicsStorage},
     gui::{Role, Session, SessionStorage},
     resources::Resources,
@@ -58,7 +58,7 @@ pub enum Error {
 pub trait Body {
     fn run(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         graphics: &Graphics<'_, '_>,
         host: &mut Host<'_>,
@@ -67,9 +67,16 @@ pub trait Body {
         colors: &ColorV1Client<'_>,
     ) -> i32;
 }
-pub fn admitted(app: &App<'_>, body: &mut impl Body) -> core::result::Result<i32, Error> {
-    let resources = Resources::new(app).map_err(Error::Resources)?;
-    if app.system_api().is_none_or(|table| table.sleep_ticks == 0) {
+pub fn admitted(app: &App2<'_>, body: &mut impl Body) -> core::result::Result<i32, Error> {
+    let resources = Resources::new2(app).map_err(Error::Resources)?;
+    if app
+        .context()
+        .lookup(
+            1,
+            core::mem::offset_of!(a::generation2::R4XStartR4Sys2, sleep_ticks) as u32,
+        )
+        .is_err()
+    {
         return Err(Error::Resources(SdkError::Raw(a::err_no_fn)));
     }
     let process = resources
@@ -83,9 +90,9 @@ pub fn admitted(app: &App<'_>, body: &mut impl Body) -> core::result::Result<i32
     {
         return Err(Error::InvalidSelf);
     }
-    let services = Services::new(app).map_err(Error::Resources)?;
+    let services = Services::new2(app).map_err(Error::Resources)?;
     let mut host = Host::new(&services, &resources, owner).map_err(Error::Host)?;
-    let clock = Clock::new(app);
+    let clock = Clock::new2(app);
     let deadline = clock
         .precise_instant()
         .map_err(Error::Clock)?
@@ -125,7 +132,7 @@ pub fn admitted(app: &App<'_>, body: &mut impl Body) -> core::result::Result<i32
     // graphics/frame/cursor owners may only be created after this boundary.
     let mut session_storage = pin!(SessionStorage::new());
     let mut timers = [];
-    let mut session = Session::open(
+    let mut session = Session::open2(
         session_storage.as_mut(),
         app,
         Role::DesktopHost,
@@ -133,9 +140,9 @@ pub fn admitted(app: &App<'_>, body: &mut impl Body) -> core::result::Result<i32
     )
     .map_err(Error::Session)?;
     let mut graphics_storage = pin!(GraphicsStorage::new());
-    let graphics = Graphics::open(graphics_storage.as_mut(), app).map_err(Error::Graphics)?;
-    let standard = Standard::open(app).map_err(Error::Standard)?;
-    let colors = ColorV1Client::init(app).map_err(Error::Color)?;
+    let graphics = Graphics::open2(graphics_storage.as_mut(), app).map_err(Error::Graphics)?;
+    let standard = Standard::open2(app).map_err(Error::Standard)?;
+    let colors = ColorV1Client::init2(app).map_err(Error::Color)?;
     let result = body.run(
         app,
         &mut session,

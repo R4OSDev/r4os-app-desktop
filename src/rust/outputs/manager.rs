@@ -23,7 +23,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use r4os_library_helpers::Error as LibraryError;
-use r4os_sdk::{App, abi as a, graphics::Graphics, storage::Error as ApiError};
+use r4os_sdk::{App2, abi as a, graphics::Graphics, storage::Error as ApiError};
 const SECOND: u64 = 1_000_000_000;
 #[derive(Debug)]
 pub enum Error {
@@ -140,7 +140,7 @@ impl<'a> Slot<'a> {
     }
     fn close<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         windows: &mut Set<M, Consumer>,
         graphics: &Graphics<'_, '_>,
         now: u64,
@@ -308,7 +308,7 @@ impl<'a> Manager<'a> {
     pub fn native_failures(&self) -> (u64, [Option<super::selection::NativeFailure>; 4]) {
         (self.native_failure_count, self.native_failures)
     }
-    pub fn color_ready(&mut self, app: &App<'_>, entry: Entry) -> bool {
+    pub fn color_ready(&mut self, app: &App2<'_>, entry: Entry) -> bool {
         if self.software_only(entry.target)
             || entry.presentation.flags & a::display_presentation_info_native == 0
         {
@@ -500,7 +500,7 @@ impl<'a> Manager<'a> {
         &mut self,
         entry: Entry,
         view: Viewport,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         context: &Context<'_, '_>,
         windows: &mut Set<M, Consumer>,
@@ -614,7 +614,7 @@ impl<'a> Manager<'a> {
     pub unsafe fn refresh<M: Memory>(
         &mut self,
         revision: u64,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         context: &Context<'_, '_>,
         windows: &mut Set<M, Consumer>,
@@ -862,7 +862,7 @@ impl<'a> Manager<'a> {
     }
     pub fn poll<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         context: &Context<'_, '_>,
         windows: &mut Set<M, Consumer>,
@@ -1011,7 +1011,7 @@ impl<'a> Manager<'a> {
     }
     pub fn close<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         graphics: &Graphics<'_, '_>,
         context: &Context<'_, '_>,
         windows: &mut Set<M, Consumer>,

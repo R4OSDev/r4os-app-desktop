@@ -29,7 +29,16 @@ impl Entry {
             color.ptr = (value as *const a::GfxOutputColorState).cast_mut().cast();
         }
         const {
-            assert!(core::mem::size_of::<[u8; 14]>() == core::mem::size_of::<c::R4Lib_Value386>());
+            const fn check_name<T>(
+                _: unsafe extern "C" fn(
+                    *const c::R4GfxDesktopOutputsEntry,
+                    *mut T,
+                ) -> c::R4LibrariesSlot,
+            ) {
+                assert!(core::mem::size_of::<[u8; 14]>() == core::mem::size_of::<T>());
+                assert!(core::mem::align_of::<[u8; 14]>() == core::mem::align_of::<T>());
+            }
+            check_name(c::R4GfxDesktopOutputsEntry_get_name);
         }
         let mut out = MaybeUninit::uninit();
         required(unsafe {

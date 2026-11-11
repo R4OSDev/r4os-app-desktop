@@ -1,6 +1,7 @@
 //! Calls the actual ordinary Desktop router with a native SDK host session.
 //! It does not replace routing with a second transition model.
 use super::*;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 use std::sync::Mutex;
 static GUI_EVENTS: Mutex<Vec<a::GuiEvent>> = Mutex::new(Vec::new());
 static GUI_BLOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -33,19 +34,16 @@ unsafe extern "C" fn gui_host_input(
     unsafe { *out = identity };
     0
 }
-use r4os_sdk::{
-    ImportSpec, StartupInfo,
-    gui::{Role, SessionStorage},
-};
+use r4os_sdk::gui::{Role, SessionStorage};
 fn with_router(
-    case: impl FnOnce(&App<'_>, &mut Session<'_, '_>, &mut Shell<'_>, &mut Hosted<'_>, &Manager<'_>),
+    case: impl FnOnce(&App2<'_>, &mut Session<'_, '_>, &mut Shell<'_>, &mut Hosted<'_>, &Manager<'_>),
 ) {
     crate::standard_fixture::with(|_| {
-        let sys = a::R4XStartR4Sys::default();
-        let mut desk = a::R4XStartR4Desk::default();
+        let sys = a::generation2::R4XStartR4Sys2::default();
+        let mut desk = a::generation2::R4XStartR4Desk2::default();
         desk.gui_push_event = gui_push as *const () as _;
         desk.gui_host_input = gui_host_input as *const () as _;
-        let draw = a::R4XStartR4Draw::default();
+        let draw = a::generation2::R4XStartR4Draw2::default();
         let headers = [
             (
                 1u32,
@@ -76,47 +74,47 @@ fn with_router(
             let h = headers[i];
             a::R4XStartImport {
                 group_id: h.0,
-                min_version: 1,
-                resolved_version: h.2,
+                min_version: 2,
+                resolved_version: 2,
                 flags: a::r4xstart_import_flag_group_interface,
                 module_name: h.4 as _,
-                symbol_name: c"Query".as_ptr() as _,
+                symbol_name: c"Query2".as_ptr() as _,
                 table: h.5 as _,
                 ..Default::default()
             }
         });
-        let names: [&[u8]; 3] = [b"R4SYS", b"R4DESK", b"R4DRAW"];
+        let names = [c"R4SYS", c"R4DESK", c"R4DRAW"];
         let specs: [ImportSpec; 3] = core::array::from_fn(|i| {
             let h = headers[i];
             ImportSpec {
-                module_name: names[i],
-                symbol_name: b"Query",
-                minimum: 1,
-                optional: false,
+                module_name: (names[i]).as_ptr().cast(),
+                symbol_name: (c"Query2").as_ptr().cast(),
+                minimum: 2,
+                optional: 0,
                 group_id: h.0,
-                magic: h.1,
-                version: h.2,
-                size: h.3,
+                reserved: 0,
             }
         });
-        let raw = a::R4XStartContext {
+        let raw = a::generation2::R4XStartContext2 {
             instance_id: 30,
             app_class: a::R4XStartAppClass::console.0 as _,
-            flags: a::r4xstart_flag_imports_valid,
+            flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+            should_close: crate::standard_fixture::keep_open as *const () as u64,
             imports: imports.as_ptr() as _,
             import_count: 3,
             ..Default::default()
         };
         let expected = StartupInfo {
-            app_class: a::R4XStartAppClass::console,
-            required_groups: 14,
+            profile: 0,
+            app_class: a::R4XStartAppClass::console.0,
+            required_groups: 2,
             imports: &specs,
         };
-        let app = unsafe { App::from_raw(&raw, &expected, c"POINTER30") }.unwrap();
+        let app = unsafe { App2::from_raw(&raw, &expected, c"POINTER30") }.unwrap();
         let mut storage = std::pin::pin!(SessionStorage::new());
         let mut timers = [];
         let mut session =
-            Session::open(storage.as_mut(), &app, Role::DesktopHost, &mut timers).unwrap();
+            Session::open2(storage.as_mut(), &app, Role::DesktopHost, &mut timers).unwrap();
         let mut shell_input = [0; 128];
         let mut shell = Shell::new(&mut shell_input).unwrap();
         let mut console_input =

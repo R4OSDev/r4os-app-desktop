@@ -18,7 +18,7 @@ use crate::{
     },
     windows::{controller::Controller, layout},
 };
-use r4os_sdk::{App, abi as a, gui::Session};
+use r4os_sdk::{App2, abi as a, gui::Session};
 #[derive(Clone, Copy)]
 struct ItemDrag {
     index: usize,
@@ -150,7 +150,7 @@ impl Router {
         shell: &mut Shell<'_>,
         hosted: &mut Hosted<'_>,
         outputs: &Manager<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         dirty: &mut Dirty,
         target: Target,

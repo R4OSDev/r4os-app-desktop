@@ -1,8 +1,9 @@
 //! Same original output-manager Source; real shared R4GFX snapshot algorithm.
 use super::*;
-use r4os_sdk::{App, ImportSpec, StartupInfo};
+use r4os_sdk::App2;
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
 unsafe extern "C" {
-    fn r4desk_catalog_context() -> *const a::R4XStartContext;
+    fn r4desk_catalog_context2() -> *const a::generation2::R4XStartContext2;
     fn r4desk_catalog_control(op: u32, value: u64) -> i32;
 }
 fn control(op: u32, value: u64) {
@@ -10,39 +11,33 @@ fn control(op: u32, value: u64) {
 }
 #[test]
 fn original_complete_catalog_generation_encoding_and_failed_discovery() {
-    let raw = unsafe { r4desk_catalog_context() };
-    let imports =
-        unsafe { core::slice::from_raw_parts((*raw).imports as *const a::R4XStartImport, 2) };
-    let sys = unsafe { &*(imports[0].table as *const a::R4XStartR4Sys) };
-    let draw = unsafe { &*(imports[1].table as *const a::R4XStartR4Draw) };
+    let raw = unsafe { r4desk_catalog_context2() };
+    assert_eq!(unsafe { (*raw).import_count }, 2);
     let specs = [
         ImportSpec {
-            module_name: b"R4SYS",
-            symbol_name: b"Query",
-            minimum: 1,
-            optional: false,
+            module_name: (c"R4SYS").as_ptr().cast(),
+            symbol_name: (c"Query2").as_ptr().cast(),
+            minimum: 2,
+            optional: 0,
             group_id: 1,
-            magic: sys.magic,
-            version: sys.abi_version,
-            size: sys.size,
+            reserved: 0,
         },
         ImportSpec {
-            module_name: b"R4DRAW",
-            symbol_name: b"Query",
-            minimum: 1,
-            optional: false,
+            module_name: (c"R4DRAW").as_ptr().cast(),
+            symbol_name: (c"Query2").as_ptr().cast(),
+            minimum: 2,
+            optional: 0,
             group_id: 3,
-            magic: draw.magic,
-            version: draw.abi_version,
-            size: draw.size,
+            reserved: 0,
         },
     ];
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
-        required_groups: 10,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
+        required_groups: 2,
         imports: &specs,
     };
-    let app = unsafe { App::from_raw(raw, &expected, c"CATFIX") }.unwrap();
+    let app = unsafe { App2::from_raw(raw, &expected, c"CATFIX") }.unwrap();
     let context = Context::new(&app).unwrap();
     let initial = Snapshot::read(&context).unwrap();
     assert_eq!((initial.revision(), initial.entries().len()), (1, 1));

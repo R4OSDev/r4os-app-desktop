@@ -1,7 +1,8 @@
 //! Real parallel task through the ordinary SDK C resource facade; completion,
 //! timeout and refusal must not move/free its resident payload before join.
 use super::*;
-use r4os_sdk::{App, ImportSpec, StartupInfo, abi as a};
+use r4os_sdk::app2::{ImportSpec, StartupInfo};
+use r4os_sdk::{App2, abi as a};
 use std::{
     sync::{
         Arc, Mutex,
@@ -83,46 +84,46 @@ impl Task for Work {
 }
 #[test]
 fn actual_parallel_payload_requires_join_after_timeout_and_refusal() {
-    let table = a::R4XStartR4Sys {
-        thread_create_handle: create as *const () as usize,
-        thread_handle_join: join as *const () as usize,
+    let table = a::generation2::R4XStartR4Sys2 {
+        thread_create_handle: create as *const () as _,
+        thread_handle_join: join as *const () as _,
         ..Default::default()
     };
     let imports = [a::R4XStartImport {
         group_id: 1,
-        min_version: 1,
-        resolved_version: 1,
+        min_version: 2,
+        resolved_version: 2,
         flags: a::r4xstart_import_flag_group_interface,
         module_name: c"R4SYS".as_ptr() as u64,
-        symbol_name: c"Query".as_ptr() as u64,
+        symbol_name: c"Query2".as_ptr() as u64,
         table: &table as *const _ as u64,
         ..Default::default()
     }];
-    let raw = a::R4XStartContext {
+    let raw = a::generation2::R4XStartContext2 {
         app_class: a::R4XStartAppClass::console.0,
         instance_id: 86,
-        flags: a::r4xstart_flag_imports_valid,
+        flags: a::r4xstart_flag_imports_valid | a::r4xstart_flag_close_supported,
+        should_close: crate::standard_fixture::keep_open as *const () as u64,
         imports: imports.as_ptr() as u64,
         import_count: 1,
         ..Default::default()
     };
     let spec = [ImportSpec {
-        module_name: b"R4SYS",
-        symbol_name: b"Query",
-        minimum: 1,
-        optional: false,
+        module_name: (c"R4SYS").as_ptr().cast(),
+        symbol_name: (c"Query2").as_ptr().cast(),
+        minimum: 2,
+        optional: 0,
         group_id: 1,
-        magic: table.magic,
-        version: table.abi_version,
-        size: table.size,
+        reserved: 0,
     }];
     let expected = StartupInfo {
-        app_class: a::R4XStartAppClass::console,
+        profile: 0,
+        app_class: a::R4XStartAppClass::console.0,
         required_groups: 2,
         imports: &spec,
     };
-    let app = unsafe { App::from_raw(&raw, &expected, c"WORKFIX") }.unwrap();
-    let resources = Resources::new(&app).unwrap();
+    let app = unsafe { App2::from_raw(&raw, &expected, c"WORKFIX") }.unwrap();
+    let resources = Resources::new2(&app).unwrap();
     let drops = Arc::new(AtomicUsize::new(0));
     let mut worker = unsafe {
         Worker::start(

@@ -180,20 +180,25 @@ impl Retained {
     pub fn stage(&self) -> &r4os_sdk::path::FilePath {
         self.paths.stage.as_path()
     }
-    pub fn abort(&mut self, app: &r4os_sdk::App<'_>) -> bool {
+    pub fn abort(&mut self, app: &r4os_sdk::App2<'_>) -> bool {
         if self.retired {
             return true;
         }
-        let Some(table) = app.system_api() else {
-            self.cleanup_error = Some(SdkError::Unavailable);
-            return false;
+        let address = match app.context().lookup(
+            1,
+            core::mem::offset_of!(
+                r4os_sdk::abi::generation2::R4XStartR4Sys2,
+                file_stream_abort
+            ) as u32,
+        ) {
+            Ok(address) => address,
+            Err(code) => {
+                self.cleanup_error = Some(SdkError::Raw(code));
+                return false;
+            }
         };
-        if table.file_stream_abort == 0 {
-            self.cleanup_error = Some(SdkError::Unavailable);
-            return false;
-        }
         let abort: unsafe extern "C" fn(*const u8) -> i32 =
-            unsafe { core::mem::transmute(table.file_stream_abort) };
+            unsafe { core::mem::transmute(address) };
         let raw = unsafe { abort(self.paths.stage.as_path().as_c_str().as_ptr().cast()) };
         if raw == 0 {
             self.retired = true;

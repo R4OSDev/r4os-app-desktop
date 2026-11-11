@@ -13,7 +13,8 @@ use crate::{
     shell::launch::Launch,
 };
 use core::ffi::CStr;
-use r4os_sdk::{App, StartupInfo, abi as a, resources::Resources, storage::Error, time::Clock};
+use r4os_sdk::app2::StartupInfo;
+use r4os_sdk::{App2, abi as a, resources::Resources, storage::Error, time::Clock};
 
 pub struct Loaded {
     pub handle: a::ProgramProcessHandle,
@@ -38,8 +39,8 @@ impl Task for Load {
             return 0;
         }
         let app = match unsafe {
-            App::from_raw(
-                self.raw as *const a::R4XStartContext,
+            App2::from_raw(
+                self.raw as *const a::generation2::R4XStartContext2,
                 self.expected,
                 c"R4DESK",
             )
@@ -79,17 +80,25 @@ impl Task for Load {
                 return Ok(None);
             }
             if let Some(link) = self.link {
-                let path = r4os_sdk::path::FilePath::parse(super::launch_wire::text(&link.link_path)).map_err(Failure::Path)?;
-                let system = r4os_sdk::storage::System::new(&app).map_err(Failure::Loader)?;
+                let path =
+                    r4os_sdk::path::FilePath::parse(super::launch_wire::text(&link.link_path))
+                        .map_err(Failure::Path)?;
+                let system = r4os_sdk::storage::System::new2(&app).map_err(Failure::Loader)?;
                 let mut bytes = [0; 1025];
-                let n = system.files().read(&path, &mut bytes).map_err(Failure::Loader)?.unwrap_or(0);
+                let n = system
+                    .files()
+                    .read(&path, &mut bytes)
+                    .map_err(Failure::Loader)?
+                    .unwrap_or(0);
                 if n != link.link_length as usize || bytes[..n] != link.link_bytes[..n] {
                     return Err(Failure::Loader(Error::Raw(a::desktop_link_result_changed)));
                 }
             }
-            if control.stopped() { return Ok(None); }
+            if control.stopped() {
+                return Ok(None);
+            }
             if let Some(deadline) = self.deadline {
-                if Clock::new(&app)
+                if Clock::new2(&app)
                     .ticks()
                     .ok()
                     .is_none_or(|now| now >= deadline)
@@ -189,7 +198,7 @@ impl<'a> Owner<'a> {
     pub unsafe fn start(
         &mut self,
         resources: &'a Resources<'a>,
-        app: &App<'_>,
+        app: &App2<'_>,
         expected: &'static StartupInfo<'static>,
         index: usize,
         ticket: u64,
@@ -203,7 +212,7 @@ impl<'a> Owner<'a> {
         }
         let task = Load {
             request: request.clone(),
-            raw: app.start_context() as *const a::R4XStartContext as usize,
+            raw: app.start_context() as *const a::generation2::R4XStartContext2 as usize,
             expected,
             index,
             terminal_mode,
@@ -236,9 +245,18 @@ impl<'a> Owner<'a> {
         }
     }
     pub fn pending_single(&self, path: &[u8]) -> bool {
-        if !crate::hosted::runtime::single_instance_name(path) { return false; }
-        fn name(p: &[u8]) -> &[u8] { p.rsplit(|b| *b == b'/' || *b == b'\\').next().unwrap_or(&[]) }
-        self.jobs.iter().flatten().any(|job| name(job.request.path()).eq_ignore_ascii_case(name(path)))
+        if !crate::hosted::runtime::single_instance_name(path) {
+            return false;
+        }
+        fn name(p: &[u8]) -> &[u8] {
+            p.rsplit(|b| *b == b'/' || *b == b'\\')
+                .next()
+                .unwrap_or(&[])
+        }
+        self.jobs
+            .iter()
+            .flatten()
+            .any(|job| name(job.request.path()).eq_ignore_ascii_case(name(path)))
     }
     pub fn pending_path(
         &mut self,

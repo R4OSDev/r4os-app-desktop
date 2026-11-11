@@ -10,7 +10,7 @@ use crate::{
     windows::{controller::Controller, window::Kind},
 };
 use r4os_sdk::{
-    App, abi as a,
+    App2, abi as a,
     gui::{Session, raw as key},
 };
 impl State<'_> {
@@ -87,7 +87,7 @@ impl State<'_> {
     }
     pub fn console_key(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         value: u32,
         dirty: &mut Dirty,
@@ -160,7 +160,7 @@ impl State<'_> {
     }
     pub fn gui_key(
         &mut self,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         session: &mut Session<'_, '_>,
         value: u32,
         tick: u64,
@@ -186,7 +186,7 @@ impl State<'_> {
     }
     pub fn gui_physical(
         &mut self,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         session: &mut Session<'_, '_>,
         input: a::PhysicalKeyEvent,
     ) -> bool {
@@ -201,7 +201,7 @@ impl State<'_> {
     }
     pub fn gui_mouse(
         &mut self,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         session: &mut Session<'_, '_>,
         i: usize,
         kind: a::GuiEventKind,

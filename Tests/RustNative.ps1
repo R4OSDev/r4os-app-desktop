@@ -61,7 +61,7 @@ try {
     }finally{Pop-Location}
     $facades=Join-Path $native 'lib/r4sdk_facades.o'
     $textOracle=Join-Path $work 'text-boundaries.o'
-    InvokeChecked $zig @('cc','-O1','-fPIC','-Werror','-I',(Join-Path $sdk 'Shared/C/include'),'-I',(Join-Path $contract 'Generated/SDK/C/include'),'-c',(Join-Path $sdk 'Tests/Conformance/BoundedGraphemeChecks.c'),'-o',$textOracle)
+    InvokeChecked $zig @('cc','-O1','-fPIC','-Werror','-I',(Join-Path $sdk 'Shared/C/include'),'-I',(Join-Path $contract 'Generated/SDK/C/include'),'-I',(Join-Path $contract 'Generated/Generation2/C/include'),'-c',(Join-Path $sdk 'Tests/Conformance/BoundedGraphemeChecks.c'),'-o',$textOracle)
     $external=Join-Path $libraries 'R4ACO/ThirdParty/Mesa26.2.2/Original/src/util/blake3'
     $cSources=@((Join-Path $moduleRoot 'src/rust/render/content_hash.c'))+@(foreach($name in @('blake3.c','blake3_portable.c','blake3_dispatch.c')){Join-Path $external $name})
     $object=Join-Path $work 'content.o'

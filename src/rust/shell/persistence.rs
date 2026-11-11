@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::{ffi::CStr, mem::MaybeUninit};
 use r4os_library_helpers::{raw as c, standard::Standard};
 use r4os_sdk::{
-    App, abi as a,
+    App2, abi as a,
     path::{FilePath, RegistryPath},
     storage::{Error as SdkError, Registry, System},
 };
@@ -55,18 +55,22 @@ fn scalar(v: c::R4LibrariesSlot) -> Result<u64> {
 /// Its private allocation never grows or moves after openSession initializes
 /// native self-pointers. No context pointer escapes an individual owner call.
 pub struct Store<'app, 'start> {
-    app: &'app App<'start>,
+    app: &'app App2<'start>,
     session: Vec<MaybeUninit<c::R4LibrarySession>>,
 }
 impl<'app, 'start> Store<'app, 'start> {
-    pub fn new(app: &'app App<'start>) -> Result<Self> {
+    pub fn new(app: &'app App2<'start>) -> Result<Self> {
         let mut session = Vec::new();
         session
             .try_reserve_exact(1)
             .map_err(|_| Error::OutOfMemory)?;
         session.push(MaybeUninit::uninit());
         if scalar(unsafe {
-            c::R4Library_openSession(0, session[0].as_mut_ptr(), app.start_context())
+            c::R4Library_openSession2(
+                0,
+                session[0].as_mut_ptr(),
+                core::ptr::from_ref(app.start_context()).cast(),
+            )
         })? == 0
         {
             return Err(Error::InvalidLibrary);
@@ -86,7 +90,7 @@ impl<'app, 'start> Store<'app, 'start> {
         // precise native error. Configuration loading needs a distinct
         // optional-document result, without turning other IO failures into
         // defaults or overwriting an existing empty document.
-        match System::new(self.app)?.files().read(&path(name)?, out) {
+        match System::new2(self.app)?.files().read(&path(name)?, out) {
             Ok(Some(count)) => Ok(Some(count)),
             Ok(None) => Ok(Some(0)),
             Err(SdkError::Raw(a::file_stream_error_not_found)) => Ok(None),
@@ -118,7 +122,7 @@ impl<'app, 'start> Store<'app, 'start> {
         if rc < 0 { Err(Error::Raw(rc)) } else { Ok(rc) }
     }
     pub fn save_config(&self, standard: &Standard<'_>, config: &Config) -> Result<i32> {
-        let system = System::new(self.app)?;
+        let system = System::new2(self.app)?;
         let files = system.files();
         for name in [
             b"C:\\R4OS".as_slice(),
@@ -179,7 +183,7 @@ impl<'app, 'start> Store<'app, 'start> {
         self.save(LAYOUT, layout.write(standard, &mut bytes)?)
     }
     pub fn repair_defaults(&self, standard: &Standard<'_>) -> Result<()> {
-        let system = System::new(self.app)?;
+        let system = System::new2(self.app)?;
         let files = system.files();
         let _ = files.create_directory(&path(desktop_folder::DIRECTORY)?);
         let mut name = [0; desktop_folder::MAX_LINK_PATH + 1];
@@ -209,7 +213,7 @@ impl<'app, 'start> Store<'app, 'start> {
         Ok(())
     }
     pub fn load_quick(&self) -> Result<Bar> {
-        let system = System::new(self.app)?;
+        let system = System::new2(self.app)?;
         let registry = system.registry();
         let root = RegistryPath::parse(quick_launch::REGISTRY_ROOT).map_err(|_| Error::Path)?;
         let mut bar = Bar::defaults();
@@ -303,7 +307,7 @@ impl Folder {
         width: i32,
         height: i32,
     ) -> Result<(Items, usize, bool)> {
-        let system = System::new(store.app)?;
+        let system = System::new2(store.app)?;
         let files = system.files();
         let name = path(desktop_folder::DIRECTORY)?;
         let mut iterator = files.iterate(&name);

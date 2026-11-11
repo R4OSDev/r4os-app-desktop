@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use r4gfx as g;
 use r4os_library_helpers::{Error, raw as c};
-use r4os_sdk::{App, path::FilePath, storage::Files};
+use r4os_sdk::{App2, path::FilePath, storage::Files};
 pub const MAX_FILE: usize = 32 * 1024 * 1024;
 pub fn dimensions_allowed(w: u32, h: u32) -> bool {
     w != 0 && h != 0 && w <= 4096 && h <= 2160
@@ -90,7 +90,7 @@ impl State {
 // These native clients contain only their already resolved resident table
 // identity. Unlike resource/session owners they carry no pointer to self.
 pub struct Loader<'app, 'start> {
-    _app: &'app App<'start>,
+    _app: &'app App2<'start>,
     images: c::R4ImgHelpersContext,
     png: c::R4ImgHelpersPngContext,
     raster: c::R4ImgHelpersRasterContext,
@@ -103,21 +103,39 @@ struct Sources<'a> {
     colors: &'a c::R4LibraryColorClient,
 }
 impl<'app, 'start> Loader<'app, 'start> {
-    pub fn new(app: &'app App<'start>) -> Result<Self, Error> {
+    pub fn new(app: &'app App2<'start>) -> Result<Self, Error> {
         let mut images = MaybeUninit::uninit();
         let mut png = MaybeUninit::uninit();
         let mut raster = MaybeUninit::uninit();
         let mut colors = MaybeUninit::uninit();
         required(unsafe {
-            c::R4ImgHelpersContext_init(0, app.start_context(), images.as_mut_ptr())
+            c::R4ImgHelpersContext_init2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                images.as_mut_ptr(),
+            )
         })?;
         required(unsafe {
-            c::R4ImgHelpersPngContext_init(0, app.start_context(), png.as_mut_ptr())
+            c::R4ImgHelpersPngContext_init2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                png.as_mut_ptr(),
+            )
         })?;
         required(unsafe {
-            c::R4ImgHelpersRasterContext_init(0, app.start_context(), raster.as_mut_ptr())
+            c::R4ImgHelpersRasterContext_init2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                raster.as_mut_ptr(),
+            )
         })?;
-        required(unsafe { c::R4Library_colorClient(0, app.start_context(), colors.as_mut_ptr()) })?;
+        required(unsafe {
+            c::R4Library_colorClient2(
+                0,
+                core::ptr::from_ref(app.start_context()).cast(),
+                colors.as_mut_ptr(),
+            )
+        })?;
         Ok(Self {
             _app: app,
             images: unsafe { images.assume_init() },

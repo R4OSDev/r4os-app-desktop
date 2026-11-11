@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use r4os_contract as a;
-use r4os_sdk::{App, gui::Session, resources::Resources};
+use r4os_sdk::{App2, gui::Session, resources::Resources};
 pub trait GraphicsRetirement {
     fn retire(&mut self, index: usize, handle: a::ProgramProcessHandle) -> bool;
 }
@@ -97,7 +97,7 @@ impl Model {
         handle: a::ProgramProcessHandle,
         index: usize,
         session: &mut Session<'_, '_>,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         now: u64,
         work: Rect,
         dirty: &mut Dirty,
@@ -155,8 +155,8 @@ impl Model {
     /// Diagnostic children remain explicitly owned by their controller.
     pub unsafe fn synchronize(
         &mut self,
-        _app: &App<'_>,
-        resources: &Resources<'_>,
+        app: &App2<'_>,
+        _resources: &Resources<'_>,
         programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
         graphics: &mut impl GraphicsRetirement,
@@ -168,12 +168,10 @@ impl Model {
         work_areas: &[Rect; SLOT_COUNT],
     ) -> Report {
         let mut report = Report::default();
-        if !self.inventory.refresh(
-            resources,
-            diagnostics,
-            now,
-            u64::from(tick_hz).div_ceil(4).max(1),
-        ) {
+        if !self
+            .inventory
+            .refresh(app, diagnostics, now, u64::from(tick_hz).div_ceil(4).max(1))
+        {
             return report;
         }
         let Some(current) = self.inventory.current() else {
@@ -350,7 +348,7 @@ impl Model {
     }
     pub fn refresh_frames(
         &mut self,
-        _app: &App<'_>,
+        _app: &App2<'_>,
         session: &mut Session<'_, '_>,
         work_areas: &[Rect; SLOT_COUNT],
         dirty: &mut Dirty,

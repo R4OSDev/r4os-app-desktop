@@ -9,7 +9,7 @@ use crate::{
     runtime::{service::Host, wire::Wire},
     windows::{layout, window::Kind},
 };
-use r4os_sdk::{App, abi as a, gui::Session};
+use r4os_sdk::{App2, abi as a, gui::Session};
 #[derive(Clone, Copy, Default)]
 struct Slot {
     exchange: a::WindowModeExchange,
@@ -164,7 +164,7 @@ impl Modes {
         hosted: &mut State<'_>,
         manager: &Manager<'_>,
         host: &mut Host<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         programs: &Programs<'_>,
         session: &mut Session<'_, '_>,
         dirty: &mut Dirty,
@@ -263,11 +263,16 @@ impl Modes {
         let controller = &hosted.model.windows;
         let active = controller.active();
         let window = &controller.windows()[active];
-        let current_focus = (window.kind() == Kind::App && window.visible()
-            && !window.minimized() && !focus_blocked && !hosted.terminal_mode
-            && controller.keyboard_focus() == crate::windows::controller::Controller::window_target(active))
-            .then_some(active);
-        let current_input_revision = input_revision.saturating_add(u64::from(current_focus != focus_index));
+        let current_focus = (window.kind() == Kind::App
+            && window.visible()
+            && !window.minimized()
+            && !focus_blocked
+            && !hosted.terminal_mode
+            && controller.keyboard_focus()
+                == crate::windows::controller::Controller::window_target(active))
+        .then_some(active);
+        let current_input_revision =
+            input_revision.saturating_add(u64::from(current_focus != focus_index));
         for offset in 0..4 {
             let i = (self.cursor + offset) % 4;
             let owner = hosted.model.clients.slots()[i].handle();

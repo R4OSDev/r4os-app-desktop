@@ -22,7 +22,8 @@ use crate::{
     render::gpu::receipt::Consumer,
 };
 use alloc::vec::Vec;
-use r4os_sdk::{App, StartupInfo, graphics::Graphics, gui::Session, resources::Resources};
+use r4os_sdk::app2::StartupInfo;
+use r4os_sdk::{App2, graphics::Graphics, gui::Session, resources::Resources};
 #[derive(Default)]
 pub struct Stats {
     pub redraws: u64,
@@ -120,7 +121,7 @@ impl Frames {
     /// and immutable through painting. No lifecycle pump runs in this scope.
     pub unsafe fn primary<M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         graphics: &Graphics<'_, '_>,
         colors: &impl software::Colors,
@@ -235,7 +236,7 @@ impl Frames {
     /// command/cache state until their actual join and consumer retirement.
     pub unsafe fn outputs<'a, M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         graphics: &Graphics<'_, '_>,
         resources: &'a Resources<'a>,
@@ -389,7 +390,7 @@ impl Frames {
     /// single-display route without a connector viewport transformation.
     pub unsafe fn native_primary<'a, M: Memory>(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         resources: &'a Resources<'a>,
         expected: &'static StartupInfo<'static>,

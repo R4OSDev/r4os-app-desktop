@@ -12,7 +12,7 @@ use crate::render::{
 };
 use alloc::vec::Vec;
 use r4gfx as g;
-use r4os_sdk::App;
+use r4os_sdk::App2;
 #[derive(Clone, Copy, Default)]
 pub struct Cursor {
     pub x: i32,
@@ -127,7 +127,7 @@ impl Capture {
     /// including handoff of this owning capture to a preparation task.
     pub unsafe fn prepare(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &Session<'_, '_>,
         view: Viewport,
         format: u32,

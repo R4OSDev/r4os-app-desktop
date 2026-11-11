@@ -1,19 +1,17 @@
 //! Instance-local process operations through the normal SDK resource owner.
 //! Every operation carries the exact handle generation. No display-slot ID
 //! or inventory-row ID is promoted into a lifecycle identity.
-use core::{ffi::CStr, marker::PhantomData};
+use core::ffi::CStr;
 use r4os_contract as a;
 use r4os_sdk::{
-    App, c_facades as c,
+    App2, c_facades as c,
     path::FilePath,
-    resources::Wait,
+    resources::{Resources, Wait},
     storage::{Error, Result},
 };
 
 pub struct Programs<'app> {
-    facade: c::R4App,
-    _app: PhantomData<&'app App<'app>>,
-    _local: PhantomData<*mut ()>,
+    native: Resources<'app>,
 }
 pub fn valid(handle: a::ProgramProcessHandle) -> bool {
     handle.instance_id != 0 && handle.generation != 0 && handle.reserved == 0
@@ -32,21 +30,15 @@ fn exact(code: i32) -> Result<()> {
     }
 }
 impl<'app> Programs<'app> {
-    pub fn new(app: &'app App<'_>) -> Result<Self> {
-        let mut facade = unsafe { core::mem::zeroed() };
-        exact(unsafe { c::R4SdkAppFacade(app.start_context(), &mut facade) })?;
+    pub fn new(app: &'app App2<'_>) -> Result<Self> {
         Ok(Self {
-            facade,
-            _app: PhantomData,
-            _local: PhantomData,
+            native: Resources::new2(app)?,
         })
     }
     fn resources(&self) -> c::R4Resources {
-        // Native SDK calls read this admitted App facade. They do not retain
-        // the resources temporary or this Rust reference after the call.
-        c::R4Resources {
-            app: core::ptr::from_ref(&self.facade).cast_mut(),
-        }
+        // Calls borrow this admitted SDK owner synchronously. Its application
+        // and native descriptor remain resident throughout each operation.
+        unsafe { self.native.native() }
     }
     pub fn retain_evidence(
         &self,

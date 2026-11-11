@@ -1,4 +1,4 @@
-R4DESK.R4X - modularer Rust-Desktop ab0.86.86 /0.1.147
+﻿R4DESK.R4X - modularer Rust-Desktop ab0.86.86 /0.1.147
 ===================================================
 
 Der produktive Einstieg liegt in src/rust/entry.rs. module.R4MF und der
@@ -75,7 +75,7 @@ Arbeitsplatte; lange Terminal-Repaintzeilen sind kein JSON-Bytevertrag.
 Fruehere private /SMOKE- und /COMPOSITION*-Einstiege werden nicht erneut
 als parallele Rust-Sammelsuite gebaut. Nuetzliche unabhaengige Originalpixel-,
 Native-/Offscreen-/Farb-/Cursor-/Power-/Fehlerorakel liegen unter Tests/Original
-und Tests/RustNative. Build.sh rust-native-test prueft aktuelle Rustbesitzer;
+und Tests/RustNative. pwsh -NoLogo -NoProfile -File Tests/RustNative.ps1 prueft aktuelle Rustbesitzer;
 originale explizite Zigziele brauchen -Dhost-tests=true und erzeugen keinen
 alten Desktop. Tests/RunInput, Tests/CaptureFile und Tests/RustCore bleiben
 kleine wiederverwendbare Quellfixtures, keine archivierten Testumgebungen.
@@ -508,3 +508,27 @@ Alle18vorherigen Fehler plus Q1CaptureStats bleiben unabhaengig fuer66 offen.
 Die veroeffentlichten Full-/Slim-Pakete0.87.51 werden hier nicht ersetzt.
 Recovery wird als eigene Komponente versioniert; seine Versionsnummer
 bezeichnet keine zusaetzliche Aufgabe fuer Unterversion0.87.65.
+
+Generation2 ab Desktop0.1.208 (R4OS0.90.65)
+-----------------------------------------
+Der normale Rust-Appstart verwendet R4XStart2 und geordnete Query2-Importe.
+SDK-Grafik, GUI, Ressourcen, Services, Systemzeit und Library-Helfer erhalten
+den wirklichen App2-Kontext. R4STD, Bild-, Grafik- und Encoderinterfaces
+werden zusaetzlich mit ihrem libraryeigenen technischen Query2-Nachweis
+gebunden. Worker rekonstruieren ihren tasklokalen Kontext aus residenten
+Startdaten und teilen ausschliesslich die unveraenderlichen Metadaten.
+Das Prozessinventar verwendet den gemeinsamen vollstaendigen SDK-Leser
+fuer Lifecycle und Tasks. Desktop besitzt Puffergroesse, UI-Snapshot und
+Epochencache. Jeder Refresh besitzt ein gemeinsames500ms-Budget, verwirft
+unvollstaendige Arbeit und versucht hoechstens acht explizite Restarts.
+Der Main-Thread wartet ueber die Query2-Desktop-Aktivitaetsquelle auf globale
+physische Eingabe und seine berechnete Frist. Die anwendungsgebundene GUI-
+Quelle von WaitSet besitzt einen anderen Ereignisumfang. Frame-, I/O- und
+Workerbesitzer bestaetigen ihre eigenen Abschluesse.
+Run kopiert ueber atomare Clipboardangebote. Ein ungeklaerter Commit laesst
+den Eingabetext bestehen. Paste liest eine genaue unveraenderliche Snapshot-
+Leihe, prueft den vollstaendigen Text und gibt sie vor der Editormutation frei.
+Die vorhandenen Pixelorakel erhalten explizite historische Menue-Fixdaten.
+Die aktuellen Spectra-/Portex-Menueeintraege haben eigene Fachpruefungen.
+
+Der Packager und Kernel476 nehmen die22 benoetigten Imports vollstaendig auf. Ihre endliche32er-Kapazitaet wird ueber die gesamte Start- und Codebindungslebensdauer erhalten. Der Software-KVM4-Gast pruefte den regulaeren208-Desktop mit echtem PS2-Maus-/Tastatureingang, gestartetem Calculator, Verschieben um40/30Pixel und Alt-F4. Run kopierte, schnitt und fuegte den Text R4OS-Ä中-65 bytegleich ueber die typisierten Clipboardangebote ein. Ein eigener Beobachter bestaetigte den Desktopabschluss0 und sein urspruenglicher Parent dessen Reap. Die Cursorprobe aenderte187sichtbare Pixel, das anschliessende ruhige Bild blieb bytegleich. Diese Bildbeobachtung misst keine physische Cursorlatenz oder interne Presentflaeche.

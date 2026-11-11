@@ -28,17 +28,9 @@ pub(crate) fn source_pixel(i: usize) -> u32 {
 }
 type Result<T> = core::result::Result<T, ()>;
 fn clock(env: &Environment<'_>) -> Result<a::MonotonicClockInfo> {
-    let table = env
-        .app
-        .system_api()
-        .filter(|s| s.monotonic_clock != 0)
-        .ok_or(())?;
-    let call: a::R4SysFns::monotonic_clock = unsafe { core::mem::transmute(table.monotonic_clock) };
-    let mut out = a::MonotonicClockInfo::default();
-    if unsafe { call(&mut out) } <= 0 {
-        return Err(());
-    }
-    Ok(out)
+    r4os_sdk::time::Clock::new2(env.app)
+        .monotonic()
+        .map_err(|_| ())
 }
 fn now(env: &Environment<'_>) -> Result<u64> {
     environment::precise(env.app).ok_or(())

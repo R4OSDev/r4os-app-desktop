@@ -11,7 +11,7 @@ use crate::{
     runtime::wire::Wire,
     windows::{layout, window::Kind},
 };
-use r4os_sdk::{App, abi as a, gui::Session};
+use r4os_sdk::{App2, abi as a, gui::Session};
 #[derive(Clone, Copy)]
 pub(super) struct Receipt {
     pub request: a::DesktopActionRequest,
@@ -180,7 +180,7 @@ impl Actions {
         reply: a::DesktopActionReply,
         hosted: &mut Hosted<'_>,
         manager: &Manager<'_>,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         programs: &Programs<'_>,
         dirty: &mut Dirty,
@@ -247,9 +247,14 @@ impl Actions {
             dirty.invalidate(hosted.model.windows.windows()[index].client_surface().rect);
         }
         if request_is_pointer(reply.request.kind)
-            && [a::desktop_action_phase_expired, a::desktop_action_phase_released,
-                a::desktop_action_phase_ended, a::desktop_action_phase_rejected,
-                a::desktop_action_phase_unknown].contains(&reply.phase)
+            && [
+                a::desktop_action_phase_expired,
+                a::desktop_action_phase_released,
+                a::desktop_action_phase_ended,
+                a::desktop_action_phase_rejected,
+                a::desktop_action_phase_unknown,
+            ]
+            .contains(&reply.phase)
         {
             self.pointer_cancel = Some(reply.request.token);
         }
@@ -267,7 +272,7 @@ impl Actions {
                 return;
             }
         }
-        let now = r4os_sdk::time::Clock::new(app)
+        let now = r4os_sdk::time::Clock::new2(app)
             .ticks()
             .unwrap_or(fallback_tick);
         if !request.token.window.same(&identity)
@@ -302,7 +307,7 @@ impl Actions {
                 return;
             }
         }
-        let now = match r4os_sdk::time::Clock::new(app).ticks() {
+        let now = match r4os_sdk::time::Clock::new2(app).ticks() {
             Ok(v) => v,
             Err(_) => {
                 self.reject(index, request, now, a::desktop_action_result_unavailable);
@@ -435,6 +440,10 @@ impl Actions {
     }
 }
 fn request_is_pointer(kind: u32) -> bool {
-    [a::desktop_action_kind_pointer_down, a::desktop_action_kind_pointer_move,
-        a::desktop_action_kind_pointer_up].contains(&kind)
+    [
+        a::desktop_action_kind_pointer_down,
+        a::desktop_action_kind_pointer_move,
+        a::desktop_action_kind_pointer_up,
+    ]
+    .contains(&kind)
 }

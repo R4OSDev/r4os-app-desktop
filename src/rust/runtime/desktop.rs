@@ -58,8 +58,9 @@ use alloc::vec::Vec;
 use core::pin::pin;
 use r4gfx::ColorV1Client;
 use r4os_library_helpers::standard::Standard;
+use r4os_sdk::app2::StartupInfo;
 use r4os_sdk::{
-    App, StartupInfo, abi as a,
+    App2, abi as a,
     graphics::Graphics,
     gui::{Session, raw as key},
     path::FilePath,
@@ -500,7 +501,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             && !window.minimized()
             && !self.shell.blocked()
             && controller.keyboard_focus() == Windows::window_target(active))
-            .then_some(active);
+        .then_some(active);
         if self.focus_observed != focus_index {
             self.input.revision = self.input.revision.saturating_add(1).max(1);
             self.focus_observed = focus_index;
@@ -524,32 +525,45 @@ impl<'a, 'input> Desktop<'a, 'input> {
         let controller = &self.hosted.model.windows;
         let active = controller.active();
         let window = &controller.windows()[active];
-        let current_focus = (window.kind() == Kind::App && window.visible()
-            && !window.minimized() && !self.shell.blocked() && !self.hosted.terminal_mode
+        let current_focus = (window.kind() == Kind::App
+            && window.visible()
+            && !window.minimized()
+            && !self.shell.blocked()
+            && !self.hosted.terminal_mode
             && controller.keyboard_focus() == Windows::window_target(active))
-            .then_some(active);
+        .then_some(active);
         if self.focus_observed != current_focus {
             self.input.revision = self.input.revision.saturating_add(1).max(1);
             self.focus_observed = current_focus;
         }
         if let Some(token) = self.modes.actions.take_pointer_cancel() {
-            if self.delegated_pointer.is_some_and(|held| held.token.same(&token)) {
+            if self
+                .delegated_pointer
+                .is_some_and(|held| held.token.same(&token))
+            {
                 self.cancel_delegated_pointer(session, time.tick);
             }
         }
         if self.delegated_pointer.is_some_and(|held| {
             let window = &self.hosted.model.windows.windows()[held.index];
             let owner = self.hosted.model.clients.slots()[held.index].handle();
-            !host.claimed() || !crate::hosted::process::same(owner, held.token.window.owner)
-                || window.kind() != Kind::App || !window.visible() || window.minimized()
-                || window.close_requested().is_some() || self.shell.blocked()
+            !host.claimed()
+                || !crate::hosted::process::same(owner, held.token.window.owner)
+                || window.kind() != Kind::App
+                || !window.visible()
+                || window.minimized()
+                || window.close_requested().is_some()
+                || self.shell.blocked()
                 || self.hosted.model.windows.keyboard_focus() != Windows::window_target(held.index)
         }) {
             self.cancel_delegated_pointer(session, time.tick);
         }
         if let Some((index, request)) = self.modes.actions.take_pointer() {
-            let result = self.route_delegated_pointer(index, request, env, session, host, programs, time);
-            self.modes.actions.finish_pointer(index, request, time.tick.max(1), result);
+            let result =
+                self.route_delegated_pointer(index, request, env, session, host, programs, time);
+            self.modes
+                .actions
+                .finish_pointer(index, request, time.tick.max(1), result);
         }
         self.poll_loads(env, session, programs, time, false);
         let bindings = core::array::from_fn(|i| {
@@ -1099,7 +1113,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     }),
                 ) {
                     let ticks = if self.cursor_queued_tick != 0 {
-                        r4os_sdk::time::Clock::new(env.app)
+                        r4os_sdk::time::Clock::new2(env.app)
                             .ticks()
                             .ok()
                             .map(|now| now.saturating_sub(self.cursor_queued_tick))
@@ -1239,7 +1253,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 }
             }
             Action::RunPaste => {
-                if !super::shell_io::paste(&mut self.shell, session) {
+                if !super::shell_io::paste(&mut self.shell, env.app) {
                     self.message(
                         MessageKind::Error,
                         b"Run",
@@ -1247,7 +1261,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     );
                 }
             }
-            Action::RunCopy { cut } => super::shell_io::copy(&mut self.shell, session, cut),
+            Action::RunCopy { cut } => super::shell_io::copy(&mut self.shell, env.app, cut),
             Action::RunInvalid => {
                 self.message(MessageKind::Error, b"Run", b"Invalid command or path.")
             }
@@ -1377,7 +1391,12 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             Action::Desktop(i) => {
                 if let Some(item) = self.shell.folder.items.entries().get(i) {
-                    match if item.kind == shell::desktop_items::Kind::Shortcut { self.associations.shortcut(env.standard, &env.store, item.path(), None) } else { self.associations.item(item) } {
+                    match if item.kind == shell::desktop_items::Kind::Shortcut {
+                        self.associations
+                            .shortcut(env.standard, &env.store, item.path(), None)
+                    } else {
+                        self.associations.item(item)
+                    } {
                         Ok(request) => self.launch(request, env, session, programs, time),
                         Err(_) => self.message(
                             MessageKind::Error,
@@ -1533,15 +1552,24 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.full();
     }
     fn cancel_delegated_pointer(&mut self, session: &mut Session<'_, '_>, tick: u64) {
-        let Some(held) = self.delegated_pointer.take() else { return; };
+        let Some(held) = self.delegated_pointer.take() else {
+            return;
+        };
         let owner = held.token.window.owner;
         let _ = self.input.pointer_capture.cancel_for_window(
-            &mut input::pointer_capture::Native(session), held.index, owner, tick,
-            &mut self.input.cursor, self.hosted.bounds,
+            &mut input::pointer_capture::Native(session),
+            held.index,
+            owner,
+            tick,
+            &mut self.input.cursor,
+            self.hosted.bounds,
         );
         let _ = self.hosted.model.gui_pending[held.index].cancel_for(
-            &mut crate::hosted::gui_pending::Native(session), owner, held.index as i32,
-            a::gui_input_reset_reason_focus_lost, tick,
+            &mut crate::hosted::gui_pending::Native(session),
+            owner,
+            held.index as i32,
+            a::gui_input_reset_reason_focus_lost,
+            tick,
         );
         self.input.remote_buttons = 0;
         self.pointer_ownership_changed();
@@ -1558,9 +1586,13 @@ impl<'a, 'input> Desktop<'a, 'input> {
     ) -> i32 {
         let window = &self.hosted.model.windows.windows()[index];
         let owner = self.hosted.model.clients.slots()[index].handle();
-        if !host.claimed() || !crate::hosted::process::same(owner, request.token.window.owner)
-            || window.kind() != Kind::App || !window.visible() || window.minimized()
-            || window.close_requested().is_some() || self.shell.blocked()
+        if !host.claimed()
+            || !crate::hosted::process::same(owner, request.token.window.owner)
+            || window.kind() != Kind::App
+            || !window.visible()
+            || window.minimized()
+            || window.close_requested().is_some()
+            || self.shell.blocked()
             || self.hosted.terminal_mode
         {
             self.cancel_delegated_pointer(session, time.tick);
@@ -1569,15 +1601,17 @@ impl<'a, 'input> Desktop<'a, 'input> {
         let down = request.kind == a::desktop_action_kind_pointer_down;
         let up = request.kind == a::desktop_action_kind_pointer_up;
         if down {
-            if self.delegated_pointer.is_some() || self.input.physical_buttons & 1 != 0
+            if self.delegated_pointer.is_some()
+                || self.input.physical_buttons & 1 != 0
                 || self.input.remote_buttons != 0
                 || !window.client_surface().rect.contains(request.x, request.y)
             {
                 return a::desktop_action_result_busy;
             }
-        } else if !self.delegated_pointer.is_some_and(|held| {
-            held.index == index && held.token.same(&request.token)
-        }) {
+        } else if !self
+            .delegated_pointer
+            .is_some_and(|held| held.index == index && held.token.same(&request.token))
+        {
             return a::desktop_action_result_stale;
         }
         self.sync_pointer_capture(session, host, time.tick);
@@ -1590,31 +1624,52 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         if down {
             let scene = views::scene(
-                self.width, self.height, &self.hosted, &self.shell, &self.input,
-                &self.tray, &self.status, &self.frames.stats,
-                self.cursor.software(), self.capture.recording_state(), self.blink,
+                self.width,
+                self.height,
+                &self.hosted,
+                &self.shell,
+                &self.input,
+                &self.tray,
+                &self.status,
+                &self.frames.stats,
+                self.cursor.software(),
+                self.capture.recording_state(),
+                self.blink,
             );
             if input::hit::target(&scene, request.x, request.y) != Windows::window_target(index) {
                 return a::desktop_action_result_stale;
             }
         }
         let routed = self.route_mouse(
-            env, session, host, programs, time,
+            env,
+            session,
+            host,
+            programs,
+            time,
             a::Mouse {
-                x: request.x, y: request.y,
+                x: request.x,
+                y: request.y,
                 dx: request.x.saturating_sub(self.input.cursor.x),
                 dy: request.y.saturating_sub(self.input.cursor.y),
-                wheel: 0, buttons: if up { 0 } else { 1 }, present: 1,
-                reserved: 0, packets: 0,
+                wheel: 0,
+                buttons: if up { 0 } else { 1 },
+                present: 1,
+                reserved: 0,
+                packets: 0,
             },
-            true, None, a::remote_input_kind_mouse_buttons,
+            true,
+            None,
+            a::remote_input_kind_mouse_buttons,
         );
         if !routed {
             self.cancel_delegated_pointer(session, time.tick);
             return a::desktop_action_result_unavailable;
         }
         if down {
-            self.delegated_pointer = Some(DelegatedPointer { index, token: request.token });
+            self.delegated_pointer = Some(DelegatedPointer {
+                index,
+                token: request.token,
+            });
         } else if up {
             self.delegated_pointer = None;
         }
@@ -1725,12 +1780,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.pointer_ownership_changed();
             }
             if before != self.input.cursor {
-                self.input.stats.cursor_moves =
-                    self.input.stats.cursor_moves.wrapping_add(1);
+                self.input.stats.cursor_moves = self.input.stats.cursor_moves.wrapping_add(1);
                 self.cursor_queued_tick = time.tick;
                 for point in [before, self.input.cursor] {
-                    let rect =
-                        output_geometry::cursor_rect(self.hosted.bounds, point);
+                    let rect = output_geometry::cursor_rect(self.hosted.bounds, point);
                     self.publisher.cursor_damage.invalidate(rect);
                     if self.cursor.software() {
                         self.dirty.invalidate(rect);
@@ -1784,10 +1837,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.cursor_queued_tick = time.tick;
             self.publisher
                 .cursor_damage
-                .invalidate(output_geometry::cursor_rect(
-                    self.hosted.bounds,
-                    before,
-                ));
+                .invalidate(output_geometry::cursor_rect(self.hosted.bounds, before));
             self.publisher
                 .cursor_damage
                 .invalidate(output_geometry::cursor_rect(
@@ -1795,8 +1845,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     self.input.cursor,
                 ));
         }
-        if let Some(index) = captured
-            .filter(|_| self.hosted.model.windows.pointer_window().is_none())
+        if let Some(index) =
+            captured.filter(|_| self.hosted.model.windows.pointer_window().is_none())
         {
             self.hosted.flush_geometry(index, host, time.tick, time.hz);
         }
@@ -1893,7 +1943,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
                         remote_kind,
                     } => {
                         let _ = self.route_mouse(
-                            env, session, host, programs, time, value, remote, motion, remote_kind,
+                            env,
+                            session,
+                            host,
+                            programs,
+                            time,
+                            value,
+                            remote,
+                            motion,
+                            remote_kind,
                         );
                     }
                 }
@@ -2130,7 +2188,7 @@ pub struct Coordinator {
 impl bootstrap::Body for Coordinator {
     fn run(
         &mut self,
-        app: &App<'_>,
+        app: &App2<'_>,
         session: &mut Session<'_, '_>,
         graphics: &Graphics<'_, '_>,
         host: &mut Host<'_>,
@@ -2138,10 +2196,14 @@ impl bootstrap::Body for Coordinator {
         standard: &Standard<'_>,
         colors: &ColorV1Client<'_>,
     ) -> i32 {
-        if !app.desktop_api().is_some_and(|table| {
-            table.size as usize >= core::mem::size_of::<a::R4XStartR4Desk>()
-                && table.gui_host_input != 0
-        }) {
+        if app
+            .context()
+            .lookup(
+                2,
+                core::mem::offset_of!(a::generation2::R4XStartR4Desk2, gui_host_input) as u32,
+            )
+            .is_err()
+        {
             app.write("Desktop: exact GUI host input API unavailable\n");
             return 2;
         }
@@ -2172,7 +2234,7 @@ impl bootstrap::Body for Coordinator {
             a::ConsoleInputEvent::default(),
         );
         let mut run = [0; 128];
-        let services = match Services::new(app) {
+        let services = match Services::new2(app) {
             Ok(v) => v,
             Err(_) => return 2,
         };
@@ -2200,7 +2262,7 @@ impl bootstrap::Body for Coordinator {
         };
         let desktop = &mut *desktop_owner;
         let mut platform_storage = pin!(PlatformStorage::new());
-        let platform = Platform::open(platform_storage.as_mut(), app).ok();
+        let platform = Platform::open2(platform_storage.as_mut(), app).ok();
         let audio = platform.as_ref().and_then(|p| p.audio().ok());
         let programs = match Programs::new(app) {
             Ok(v) => v,
