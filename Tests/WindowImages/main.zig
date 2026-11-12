@@ -358,7 +358,7 @@ pub fn r4_app_main(app: *r.App) i32 {
 
 /// Existing exact two-image/Return/reuse/Close-chain oracle on the actual
 /// published native backend. Spectra owns the GUI child and its exact reap.
-pub fn nativeProducer(app: *r.App, status_path: [*:0]const u8) i32 {
+pub fn nativeProducer(app: anytype, status_path: [*:0]const u8) i32 {
     const sys = app.system();
     var service: a.ServiceInfo = .{};
     if (sys.serviceOpen("WINSVC", &service) != 0) return 2;
