@@ -98,7 +98,7 @@ C companion also needs the five pinned Mesa BLAKE3 files described by
 `R4ACO/ThirdParty/Sources.json`; materialize and verify these upstream inputs
 below the selected Libraries root before building.
 
-`./Build.sh rust-native-test` compares the current Rust owners against the
+`pwsh -NoProfile -File Tests/RustNative.ps1` compares the current Rust owners against the
 retained independent original pixel, input, geometry, resource and failure
 oracles. A focused run can use `pwsh -NoProfile -File Tests/RustNative.ps1 -Filter <scope>`;
 comma-separated literal scopes must each select at least one case. Native models are separate from real guest and physical evidence.
