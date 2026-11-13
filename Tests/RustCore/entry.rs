@@ -1,7 +1,7 @@
-//! Source-only freestanding consumer of the actual current ported owners.
-//! The runner appends this entry to a temporary copy of their crate root;
-//! no Desktop host, display/Present, input-latency or performance claim.
-use r4os_sdk::{App,path::FilePath,storage::System};
+// Source-only freestanding consumer of the actual current ported owners.
+// The runner appends this entry to a temporary copy of their crate root;
+// no Desktop host, display/Present, input-latency or performance claim.
+use r4os_sdk::{App2 as App,path::FilePath,storage::System};
 use crate::render::{geometry::Rect,pixels::PixelBytes,primitive_assets::Cache,primitive_image::{Format,View},scene::{CpuScene,Mapping,Xrgb32Nearest}};
 fn exercise()->Result<(),i32> {
     let mut pixels=alloc::vec![0x5a123456u32;2050];
@@ -32,7 +32,7 @@ fn r4_core_main(app:&mut App<'_>)->i32 {
     let code=exercise().err().unwrap_or(0);
     let mut report=*b"RUST86 core result=000 wide-clear/NN/hash/SDK-graphemes/shapes\r\n";
     report[19]=b'0'+(code/100) as u8;report[20]=b'0'+((code/10)%10) as u8;report[21]=b'0'+(code%10) as u8;
-    let Ok(system)=System::new(app) else{return 91;};let Ok(path)=FilePath::parse(b"C:\\TEMP\\D86CORE.TXT") else{return 92;};
+    let Ok(system)=System::new2(app) else{return 91;};let Ok(path)=FilePath::parse(b"C:\\TEMP\\D86CORE.TXT") else{return 92;};
     match system.files().write(&path,&report) {Ok(n) if n==report.len()=>code,_=>93}
 }
-r4os_sdk::app!(r4_core_main);
+r4os_sdk::app2!(r4_core_main);

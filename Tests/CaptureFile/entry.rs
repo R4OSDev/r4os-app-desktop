@@ -7,7 +7,7 @@ extern crate alloc;
 mod capture_file;
 mod render { pub mod content_hash; }
 use capture_file::{names, FinishError, Output, Phase};
-use r4os_sdk::{App, path::FilePath, storage::{AtomicReplace, Files, Presence, System}};
+use r4os_sdk::{App2 as App, path::FilePath, storage::{AtomicReplace, Files, Presence, System}};
 
 fn absent(files: &Files<'_>, path: &FilePath) -> Result<(), &'static str> {
     match files.info(path) {
@@ -24,7 +24,7 @@ fn exact(files: &Files<'_>, path: &FilePath, expected: &[u8]) -> Result<(), &'st
     Ok(())
 }
 fn exercise(app: &App<'_>) -> Result<(), &'static str> {
-    let system = System::new(app).map_err(|_| "system")?;
+    let system = System::new2(app).map_err(|_| "system")?;
     let files = system.files();
     let conflict = names(b"C:\\TEMP\\C86F-CONFLICT.BMP").map_err(|_| "conflict-names")?;
     let foreign = names(b"C:\\TEMP\\C86F-FOREIGN.BMP").map_err(|_| "foreign-names")?;
@@ -75,4 +75,4 @@ fn run(app: &mut App<'_>) -> i32 {
         Err(reason) => { app.write("CAPTURE86 FAILED: "); app.write(reason); app.write("\n"); 1 }
     }
 }
-r4os_sdk::app!(run);
+r4os_sdk::app2!(run);
