@@ -1,3 +1,4 @@
+#include <r4os/app2.h>
 /* Explicit test producer. Pacing belongs only to the adverse consumer case. */
 #include <r4os/r4os.h>
 static void number(R4App *a,uint64_t value){uint8_t b[24];uint32_t n=0;do{b[n++]=(uint8_t)('0'+value%10);value/=10;}while(value);while(n)(void)r4sys_write(&a->system,&b[--n],1);}
@@ -17,7 +18,8 @@ static int host(R4App *a){
  }
  return 7;
 }
-int32_t r4_app_main(R4App *a){
+int32_t r4_app_main(R4App2 *entry) {
+ R4App facade; if(r4_app2_facade(entry,&facade)!=0)return 96; R4App *a=&facade;
  uint64_t length=0;const uint8_t *args=r4_app_args(a,&length);if(!length)return 2;
  if(args[0]=='H')return host(a);
  uint32_t count=args[0]=='B'?300:1,key=args[0]=='E'?27:args[0]=='Z'?'z':'x';

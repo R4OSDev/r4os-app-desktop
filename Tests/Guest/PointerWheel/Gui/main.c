@@ -1,10 +1,12 @@
+#include <r4os/app2.h>
 #include <r4os/r4os.h>
 #include <r4os/app_gui.h>
 static void text(R4App*a,const char*s){r4sys_write_cstr(&a->system,s);}
 static void number(R4App*a,int64_t v){uint8_t b[24];uint32_t n=0;if(v<0){text(a,"-");v=-v;}do{b[n++]=(uint8_t)('0'+v%10);v/=10;}while(v);while(n)r4sys_write(&a->system,&b[--n],1);}
 static void field(R4App*a,const char*s,int64_t n){text(a,s);number(a,n);}
 static int info(R4App*a,R4Window*w,uint32_t down,uint32_t up){R4GuiWindowInfo i={0};int rc=r4desk_gui_window_info(&a->desktop,&i);if(rc<0)return rc;text(a,"W30 info");field(a," window=",i.window_id);field(a," x=",i.client_x);field(a," y=",i.client_y);field(a," w=",i.client_w);field(a," h=",i.client_h);field(a," down=",down);field(a," up=",up);text(a,"\n");(void)w;return 0;}
-int32_t r4_app_main(R4App*a){
+int32_t r4_app_main(R4App2 *entry) {
+ R4App facade; if(r4_app2_facade(entry,&facade)!=0)return 96; R4App *a=&facade;
  R4Window w;if(!r4_window_open(a,0,0,&w)||r4_window_set_title(&w,"Wheel snapshot30")<0)return 1;
  uint32_t down=0,up=0;int dirty=1;if(info(a,&w,down,up))return 2;
  for(;;){

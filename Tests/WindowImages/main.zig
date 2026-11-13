@@ -328,7 +328,7 @@ fn producer(c: *Context) !void {
     }
     trace(c, if (c.native) "WINIMAGE two real native frames leased, empty-wake progress, exact reuse and closed-chain ACK: OK" else "WINIMAGE two real CPU frames leased, empty-wake progress, exact reuse and closed-chain ACK: OK");
 }
-pub fn r4_app_main(app: *r.App) i32 {
+pub fn r4_app_main(app: *r.App2) i32 {
     const sys = app.system();
     const child_mode = std.mem.eql(u8, app.args(), "/PRODUCER");
     var service: a.ServiceInfo = .{};

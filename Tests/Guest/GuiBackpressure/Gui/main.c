@@ -1,3 +1,4 @@
+#include <r4os/app2.h>
 /* Public GUI consumer for native queue retention and cancellation. No provider
  * replacement: self-push fills the real ring; Remote/PS2 supplies real input. */
 #include <r4os/app_gui.h>
@@ -6,13 +7,14 @@ static void number(R4App *a,uint64_t value){uint8_t b[24];uint32_t n=0;do{b[n++]
 static void field(R4App *a,const char *s,uint64_t value){text(a,s);number(a,value);}
 static uint32_t held_keys(const uint8_t *held){uint32_t n=0;for(uint32_t i=0;i<512;++i)n+=held[i]!=0;return n;}
 static int fill(R4App *a,int32_t id,uint32_t *count){
- if(!a->desktop.table->gui_push_event)return 0;
- R4DeskGuiPushEventFn push=(R4DeskGuiPushEventFn)(uintptr_t)a->desktop.table->gui_push_event;
+ if(!R4DESK_SLOT(&a->desktop, gui_push_event))return 0;
+ R4DeskGuiPushEventFn push=(R4DeskGuiPushEventFn)(uintptr_t)R4DESK_SLOT(&a->desktop, gui_push_event);
  R4GuiEvent e={.kind=R4_GUI_RAW_EVENT_KEY_DOWN,.window_id=id,.key='~',.tick=r4_app_ticks(a)};
- int32_t code=0;for(uint32_t i=0;i<65 && code==0;++i){code=push(a->context->instance_id,&e);if(code==0)++*count;}
+ int32_t code=0;for(uint32_t i=0;i<65 && code==0;++i){code=push(r4_app_instance_id(a),&e);if(code==0)++*count;}
  return code==-3 && *count==63;
 }
-int32_t r4_app_main(R4App *a){
+int32_t r4_app_main(R4App2 *entry) {
+ R4App facade; if(r4_app2_facade(entry,&facade)!=0)return 96; R4App *a=&facade;
  uint64_t arg_length=0;const uint8_t *args=r4_app_args(a,&arg_length);char mode=arg_length?(char)args[0]:'D';
  if(mode!='D'&&mode!='O'&&mode!='F'&&mode!='C'&&mode!='B'&&mode!='K'&&mode!='R'&&mode!='P'&&mode!='S'&&mode!='T')return 2;
  R4Window window;if(!r4_window_open(a,0,0,&window)||r4_window_set_title(&window,"GUI backpressure32")<0)return 3;
