@@ -164,9 +164,7 @@ impl<'p> CpuScene<'p> {
         if !self.premultiplied {
             source.copy_to(first, target);
         } else {
-            for (i, out) in target.iter_mut().enumerate() {
-                *out = source.word(first + i) | 0xff000000;
-            }
+            source.copy_masked_to(first, target, u32::MAX, 0xff000000);
         }
     }
     pub fn blit_xrgb32(&mut self, x: i32, y: i32, w: u32, h: u32, source: PixelBytes<'_>) {
@@ -1031,6 +1029,49 @@ mod tests {
                     "{{\"schema\":\"r4os.desktop-work\",\"case\":\"d090-fractional\",\"indexed\":{indexed},\"batches\":{batches},\"frames_per_batch\":{frames},\"viewport_pixels\":482300,\"source_width\":256,\"source_height\":224,\"raster_batch_ns\":{sums:?}}}"
                 );
             }
+        }
+    }
+    #[test]
+    fn admitted_masked_rows_preserve_unaligned_words_odd_tails_and_padding() {
+        let words: alloc::vec::Vec<u32> = (0..67u32)
+            .map(|i| i.wrapping_mul(0x1739a5c7) ^ 0xa57b39d1)
+            .collect();
+        for alignment in 0..8 {
+            let mut raw = alloc::vec![0x93; alignment + words.len()*4 + 3];
+            for (i, word) in words.iter().enumerate() {
+                raw[alignment + i * 4..alignment + (i + 1) * 4]
+                    .copy_from_slice(&word.to_ne_bytes());
+            }
+            let source = PixelBytes::new(&raw[alignment..alignment + words.len() * 4]).unwrap();
+            for first in [0, 1, 3, 31, 66, 67] {
+                for count in 0..=words.len() - first {
+                    for (mask, set) in [(0x00ffffff, 0), (u32::MAX, 0xff000000)] {
+                        let mut actual = alloc::vec![0x615293b7; count+5];
+                        let mut expected = actual.clone();
+                        for i in 0..count {
+                            expected[i + 1] = (words[first + i] & mask) | set;
+                        }
+                        source.copy_masked_to(first, &mut actual[1..count + 1], mask, set);
+                        assert_eq!(
+                            actual, expected,
+                            "alignment={alignment} first={first} count={count}"
+                        );
+                    }
+                }
+            }
+        }
+        let words = [0x31u32; 4];
+        let source = PixelBytes::from_words(&words);
+        for first in [usize::MAX, 3] {
+            let mut target = [0x84u32; 2];
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                source.copy_masked_to(first, &mut target, 0xffffff, 0)
+            }));
+            assert!(outcome.is_err());
+            assert_eq!(
+                target, [0x84; 2],
+                "rejected row cannot partially write the target"
+            );
         }
     }
 }

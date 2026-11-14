@@ -278,3 +278,12 @@ actual reads; unavailable watches retain the five-second fallback. Epochs
 reject results after folder invalidation or clock rollback. Exit drains the
 worker before releasing code/context. Existing ICO pixel/alpha/budget oracles
 remain in the focused `render::icons` selection of RustNative.ps1.
+
+## Opaque CPU rows (0.91.4)
+
+CPU copy paths validate a complete row before masking or setting its high byte,
+using unaligned 64-bit integer transfers and an odd-pixel tail. The layer cache
+retains a conservative whole-layer opacity proof from actual copied pixels;
+unknown or partial transparent content keeps its original alpha checks. The
+qualified Rust target-default feature policy stays unchanged. Existing software,
+scene and layer owner cases retain their full pixel/color/budget references.

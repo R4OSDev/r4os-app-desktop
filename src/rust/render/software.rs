@@ -409,6 +409,9 @@ fn opaque(entry: &Entry, area: Rect) -> bool {
     if entry.external {
         return false;
     }
+    if entry.opaque {
+        return true;
+    }
     let start = offset(entry, area);
     (0..area.h as usize).all(|row| {
         entry.pixels()[start + row * entry.bounds.w as usize..][..area.w as usize]
@@ -497,7 +500,10 @@ fn copy_opaque(
         let pitch = source.image.pitch as usize / 4;
         let bounds = target.full_rect();
         let first = (area.y - entry.bounds.y) as usize * pitch + (area.x - entry.bounds.x) as usize;
-        if !opaque_alpha && source.image.format != g::format_xrgb8888 {
+        if !opaque_alpha
+            && source.image.format != g::format_xrgb8888
+            && (entry.external || !entry.opaque)
+        {
             for row in 0..area.h as usize {
                 if (0..area.w as usize).any(|x| pixels.word(first + row * pitch + x) >> 24 != 255) {
                     return false;
@@ -509,9 +515,7 @@ fn copy_opaque(
         for row in 0..area.h as usize {
             let destination =
                 &mut target.pixels[output + row * bounds.w as usize..][..area.w as usize];
-            for (x, destination) in destination.iter_mut().enumerate() {
-                *destination = pixels.word(first + row * pitch + x) & 0xffffff;
-            }
+            pixels.copy_masked_to(first + row * pitch, destination, 0xffffff, 0);
         }
         return true;
     }

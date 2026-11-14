@@ -22,6 +22,7 @@ pub struct Entry {
     pub dirty: Option<Rect>,
     pub initialized: bool,
     pub(crate) external: bool,
+    pub(crate) opaque: bool,
     solid_background: Option<u32>,
     pub(crate) background_applied: bool,
 }
@@ -116,6 +117,7 @@ impl Cache {
                 dirty: from.dirty,
                 initialized: from.initialized,
                 external: from.external,
+                opaque: from.opaque,
                 solid_background: from.solid_background,
                 background_applied: from.background_applied,
             };
@@ -560,6 +562,7 @@ impl Cache {
         entry.frame = self.frame;
         let generation = entry.generation.checked_add(1).ok_or(Error::Overflow)?;
         if !mirror {
+            entry.opaque = false;
             entry.generation = generation;
             entry.initialized = true;
             entry.dirty = None;
@@ -570,6 +573,8 @@ impl Cache {
             return Ok(true);
         }
         let source = scene.as_ref().ok_or(Error::State)?.pixels();
+        let previously_opaque = entry.initialized && entry.opaque;
+        let mut opaque = !entry.initialized || repaint == entry.bounds || previously_opaque;
         let mut changed = None::<Rect>;
         for row in 0..repaint.h as usize {
             let offset = ((repaint.y - entry.bounds.y) as usize + row) * entry.bounds.w as usize
@@ -578,13 +583,20 @@ impl Cache {
             let source = &source[row * width..row * width + width];
             let destination = &mut entry.pixels[offset..offset + width];
             if entry.initialized && source == destination {
+                // Unknown unchanged rows cannot upgrade a partly transparent
+                // layer. Known opaque rows retain their existing proof.
+                opaque &= previously_opaque;
                 continue;
             }
+            // Reuse the changed-row traversal, never a per-composition tile
+            // scan, to certify a complete opaque layer conservatively.
+            opaque = opaque && source.iter().fold(u32::MAX, |bits, pixel| bits & *pixel) >> 24 == 255;
             destination.copy_from_slice(source);
             self.changed_bytes = self.changed_bytes.saturating_add((width * 4) as u64);
             let line = Rect::new(repaint.x, repaint.y + row as i32, repaint.w, 1);
             changed = Some(changed.map_or(line, |old| old.merged(line)));
         }
+        entry.opaque = opaque;
         if let Some(rect) = changed {
             entry.generation = generation;
             entry.dirty = Some(entry.dirty.map_or(rect, |old| old.merged(rect)));
@@ -666,5 +678,55 @@ mod tests {
         cache.finish(None).unwrap();
         assert_eq!(cache.entries[0].pixels()[0], 0xff000002);
         assert_eq!(cache.reserved(), 128);
+    }
+    #[test]
+    fn cached_opacity_never_upgrades_unknown_or_partially_transparent_rows() {
+        let full = Rect::new(0, 0, 17, 5);
+        let mut cache = Cache::new(8192).unwrap();
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache
+            .paint(1, full, full, None, None, |p| p.fill(full, 0x173954))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(cache.entries[0].opaque);
+        // Unchanged warm rows keep the earlier proof, without rescanning alpha.
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache
+            .paint(1, full, full, None, None, |p| p.fill(full, 0x173954))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(cache.entries[0].opaque);
+        let hole = Rect::new(2, 1, 1, 1);
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache.paint(1, full, hole, None, None, |_| Ok(())).unwrap();
+        cache.finish(None).unwrap();
+        assert!(!cache.entries[0].opaque);
+        assert_eq!(cache.entries[0].pixels()[19], 0);
+        // A wholly unchanged full capture retains the unknown/transparent state.
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache
+            .paint(1, full, full, None, None, |p| {
+                p.fill(full, 0x173954)?;
+                p.clear(hole)
+            })
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(!cache.entries[0].opaque);
+        // An opaque partial region cannot certify the unpainted transparent hole.
+        let other = Rect::new(5, 3, 2, 1);
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache
+            .paint(1, full, other, None, None, |p| p.fill(other, 0x2468ac))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(!cache.entries[0].opaque);
+        assert_eq!(cache.entries[0].pixels()[19], 0);
+        // A fully changed opaque capture can establish a new whole-layer proof.
+        cache.start(Mode::Desktop(full), None).unwrap();
+        cache
+            .paint(1, full, full, None, None, |p| p.fill(full, 0xabcdef))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(cache.entries[0].opaque);
     }
 }
