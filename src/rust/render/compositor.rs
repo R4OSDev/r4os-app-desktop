@@ -132,6 +132,20 @@ pub(crate) trait Capture {
         damage: Rect,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool>;
+    /// An actual opaque base fill, distinct from a compositing-background hint.
+    fn paint_filled(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        rgb: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        self.paint(key, bounds, damage, |p| {
+            p.fill(bounds, rgb)?;
+            paint(p)
+        })
+    }
     fn paint_over_solid(
         &mut self,
         key: u32,
@@ -157,6 +171,16 @@ impl Capture for CpuCapture<'_, '_> {
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
         self.capture.paint(key, bounds, damage, paint)
+    }
+    fn paint_filled(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        rgb: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        self.capture.paint_filled(key, bounds, damage, rgb, paint)
     }
     fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()> {
         if let Some(frame) = self.external[window].take() {
@@ -383,9 +407,7 @@ pub(crate) unsafe fn draw(
                 d,
             );
             if cover.visible(d, desktop) {
-                layer(capture, 1, desktop, d, cache, fonts, shell.font, |ui| {
-                    ui.fill(desktop, shell.config.background)
-                })?;
+                capture.paint_filled(1, desktop, d, shell.config.background, |_| Ok(()))?;
             }
             let info = &shell.info[..shell.info.len().min(96)];
             let r = Rect::new(

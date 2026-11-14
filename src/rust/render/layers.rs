@@ -402,6 +402,7 @@ impl Cache {
             recording.as_deref_mut(),
             replay,
             background,
+            None,
             paint,
         );
         if let Err(error) = result {
@@ -409,6 +410,22 @@ impl Cache {
             if let Some(recording) = recording {
                 recording.reject(error);
             }
+        }
+        result
+    }
+    /// CPU-only explicit opaque base fill. It initializes every scratch pixel
+    /// before the content closure, so the transparent clear is redundant.
+    pub(crate) fn paint_filled(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        rgb: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        let result = self.paint_inner(key, bounds, damage, None, None, None, Some(rgb), paint);
+        if let Err(error) = result {
+            self.failure = Some(error);
         }
         result
     }
@@ -420,6 +437,7 @@ impl Cache {
         mut recording: Option<&mut Frame>,
         replay: Option<Replay<'_>>,
         background: Option<u32>,
+        initial_fill: Option<u32>,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
         if !self.collecting || self.failure.is_some() {
@@ -545,7 +563,12 @@ impl Cache {
             } else {
                 Painter::cpu(scene.as_mut().ok_or(Error::State)?)
             };
-            painter.clear(repaint).and_then(|()| paint(&mut painter))
+            let initialized = if let Some(rgb) = initial_fill {
+                painter.fill(repaint, rgb)
+            } else {
+                painter.clear(repaint)
+            };
+            initialized.and_then(|()| paint(&mut painter))
         };
         let mut background_applied = false;
         if let Some(recording) = recording.as_deref_mut() {
@@ -590,7 +613,8 @@ impl Cache {
             }
             // Reuse the changed-row traversal, never a per-composition tile
             // scan, to certify a complete opaque layer conservatively.
-            opaque = opaque && source.iter().fold(u32::MAX, |bits, pixel| bits & *pixel) >> 24 == 255;
+            opaque =
+                opaque && source.iter().fold(u32::MAX, |bits, pixel| bits & *pixel) >> 24 == 255;
             destination.copy_from_slice(source);
             self.changed_bytes = self.changed_bytes.saturating_add((width * 4) as u64);
             let line = Rect::new(repaint.x, repaint.y + row as i32, repaint.w, 1);
@@ -728,5 +752,43 @@ mod tests {
             .unwrap();
         cache.finish(None).unwrap();
         assert!(cache.entries[0].opaque);
+    }
+    #[test]
+    fn explicit_filled_capture_initializes_scratch_and_preserves_partial_damage() {
+        let bounds = Rect::new(-3, 5, 17, 5);
+        let mut cache = Cache::new(8192).unwrap();
+        cache.start(Mode::CpuOutput(bounds), None).unwrap();
+        cache
+            .paint_filled(1, bounds, bounds, 0x173954, |_| Ok(()))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert!(cache.entries[0].pixels().iter().all(|p| *p == 0xff173954));
+        assert!(cache.entries[0].opaque);
+        let damage = Rect::new(2, 7, 3, 1);
+        cache.start(Mode::CpuOutput(bounds), None).unwrap();
+        cache
+            .paint_filled(1, bounds, damage, 0x2468ac, |_| Ok(()))
+            .unwrap();
+        cache.finish(None).unwrap();
+        for y in 0..5 {
+            for x in 0..17 {
+                assert_eq!(
+                    cache.entries[0].pixels()[y * 17 + x],
+                    if damage.contains(bounds.x + x as i32, bounds.y + y as i32) {
+                        0xff2468ac
+                    } else {
+                        0xff173954
+                    }
+                );
+            }
+        }
+        // An ordinary empty paint still needs transparent clearing after reuse.
+        cache.start(Mode::CpuOutput(bounds), None).unwrap();
+        cache
+            .paint(1, bounds, damage, None, None, |_| Ok(()))
+            .unwrap();
+        cache.finish(None).unwrap();
+        assert_eq!(cache.entries[0].pixels()[2 * 17 + 5], 0);
+        assert!(!cache.entries[0].opaque);
     }
 }

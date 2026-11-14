@@ -287,3 +287,13 @@ retains a conservative whole-layer opacity proof from actual copied pixels;
 unknown or partial transparent content keeps its original alpha checks. The
 qualified Rust target-default feature policy stays unchanged. Existing software,
 scene and layer owner cases retain their full pixel/color/budget references.
+
+## Bulk layer clearing (0.91.5)
+
+Owned layer RAM uses ordinary slice clearing, coalescing full-width bands.
+The explicit CPU filled-capture path directly initializes an opaque Desktop
+base color; compositing-background hints keep their separate semantics.
+Ordinary/empty paints still clear transparently, including after scratch reuse.
+The native default retains clear/fill recording and the Rust feature policy is
+unchanged. Existing wide-clear, complete-scene and native owner cases qualify
+alignment, partial damage, pixels and actual lease lifetimes.

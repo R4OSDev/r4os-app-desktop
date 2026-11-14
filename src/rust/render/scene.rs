@@ -144,6 +144,11 @@ impl<'p> CpuScene<'p> {
         let Some(rect) = self.paint_clip(rect) else {
             return;
         };
+        if rect.x == self.bounds.x && rect.w == self.bounds.w {
+            let start = self.row(i64::from(rect.y));
+            clear_ram_pixels(&mut self.pixels[start..start + rect.w as usize * rect.h as usize]);
+            return;
+        }
         for y in rect.y..rect.bottom() {
             let start = self.row(i64::from(y)) + self.column(i64::from(rect.x));
             clear_ram_pixels(&mut self.pixels[start..start + rect.w as usize]);
@@ -496,28 +501,10 @@ fn blend(destination: u32, source: u32, alpha: u8, premultiplied: bool) -> u32 {
         rgb
     }
 }
-// Same local-RAM wide clear as current45. Alignment4 is intentional: a
-// layer's first u32 need not have u64 alignment. Volatile gives no publication
-// or hardware-retirement semantics.
-#[repr(C, packed(4))]
-struct RamWord {
-    value: u64,
-}
+// Owned layer RAM. Ordinary slice clearing permits a bulk operation; device
+// memory and presentation/retirement remain with the separate output owners.
 fn clear_ram_pixels(pixels: &mut [u32]) {
-    let mut i = 0;
-    while pixels.len() - i >= 2 {
-        // RamWord's alignment is4 and size8, exactly the checked two pixels.
-        unsafe {
-            core::ptr::write_volatile(
-                pixels.as_mut_ptr().add(i).cast::<RamWord>(),
-                RamWord { value: 0 },
-            );
-        }
-        i += 2;
-    }
-    if i != pixels.len() {
-        pixels[i] = 0;
-    }
+    pixels.fill(0);
 }
 
 #[cfg(test)]
@@ -1072,6 +1059,29 @@ mod tests {
                 target, [0x84; 2],
                 "rejected row cannot partially write the target"
             );
+        }
+    }
+    #[test]
+    fn bulk_clear_full_width_band_respects_signed_origin_and_guards() {
+        for alignment in 0..2 {
+            let mut pixels = [0xa1b2c3d4u32; 45];
+            let first = 2 + alignment;
+            let bounds = Rect::new(-7, 5, 7, 5);
+            {
+                let mut scene = CpuScene::layer(&mut pixels[first..first + 35], bounds).unwrap();
+                scene.set_paint_clip(Rect::new(-7, 6, 7, 3));
+                scene.clear_layer(bounds);
+            }
+            for (i, pixel) in pixels.iter().enumerate() {
+                assert_eq!(
+                    *pixel,
+                    if (first + 7..first + 28).contains(&i) {
+                        0
+                    } else {
+                        0xa1b2c3d4
+                    }
+                );
+            }
         }
     }
 }

@@ -68,6 +68,18 @@ impl Capture<'_, '_> {
             .cache
             .paint(key, bounds, damage, None, None, paint)
     }
+    pub(crate) fn paint_filled(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        rgb: u32,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        self.owner
+            .cache
+            .paint_filled(key, bounds, damage, rgb, paint)
+    }
 }
 impl<'o, 'f> Capture<'o, 'f> {
     pub fn external(
