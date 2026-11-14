@@ -600,9 +600,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.hosted.model.windows,
             &mut self.dirty,
         );
+        self.tray.activity(self.activity_sequence);
         if self
             .tray
-            .synchronize(transport.host, time.tick, u64::from(time.hz).div_ceil(20))
+            .synchronize(transport.host, time.tick, u64::from(time.hz).div_ceil(2).max(1))
             .changed
         {
             self.bar();
@@ -1982,7 +1983,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         delay = crate::windows::service_gate::deadline_delay(
             time.tick,
             delay,
-            &[self.tray.next_tick, self.status.next_tick],
+            &[self.tray.wait_tick(), self.status.next_tick],
         );
         delay = self
             .shell

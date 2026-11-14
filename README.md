@@ -258,3 +258,11 @@ are recorded in `Docs/Core/Parallelitaet.txt`, section0.87.60. The observerless
 native check proves new atlas content, completed unchanged-layer reuse, real
 GPU image returns and exact child reaps. Earlier failed originals remain
 separate evidence. Physical sight/hearing/latency checks were explicitly skipped.
+
+## Tray activity (0.91.2)
+
+Published Desktop activity advances the tray refresh deadline, with a 500-ms
+idle fallback and 50-ms coalescing under continuous input/GPU activity. Failed
+service retries retain their backoff; dirty visibility receipts keep their
+independent deadline. WINSVC publishes actual tray revisions before notifying
+Desktop. Read-only synchronization does not generate another notification.

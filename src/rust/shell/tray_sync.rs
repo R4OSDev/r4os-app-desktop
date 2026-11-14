@@ -57,6 +57,8 @@ pub struct Mirror {
     sync_revision: u64,
     cursor: u16,
     pub next_tick: u64,
+    activity_sequence: u64,
+    activity_after: u64,
     pub visibility_dirty: bool,
     acknowledged: [Option<Visibility>; tray::MAX_ITEMS],
     visibility_retry_tick: u64,
@@ -71,6 +73,8 @@ impl Mirror {
             sync_revision: 0,
             cursor: a::tray_desktop_cursor_poll,
             next_tick: 0,
+            activity_sequence: 0,
+            activity_after: 0,
             visibility_dirty: false,
             acknowledged: [None; tray::MAX_ITEMS],
             visibility_retry_tick: 0,
@@ -81,6 +85,13 @@ impl Mirror {
     }
     pub fn pending(&self) -> bool {
         self.cursor != a::tray_desktop_cursor_poll
+    }
+    pub fn wait_tick(&self) -> u64 {
+        if self.visibility_dirty && self.revision != 0 {
+            self.next_tick.min(self.visibility_retry_tick)
+        } else {
+            self.next_tick
+        }
     }
     pub fn reset(&mut self, now: u64, retry: u64) -> Change {
         let changed = self.active.registered_count != 0;
@@ -93,6 +104,7 @@ impl Mirror {
         self.acknowledged.fill(None);
         self.visibility_retry_tick = 0;
         self.next_tick = now.saturating_add(retry);
+        self.activity_after = self.next_tick;
         Change {
             changed,
             published: false,
@@ -103,6 +115,15 @@ impl Mirror {
         let changed = self.active.layout(layout);
         self.visibility_dirty |= changed;
         changed
+    }
+    /// Published Desktop activity includes tray changes as well as input and
+    /// GPU completion. Coalesce a burst at the former active poll cadence;
+    /// unchanged activity never shortens the idle or failed-provider deadline.
+    pub fn activity(&mut self, sequence: u64) {
+        if sequence != self.activity_sequence {
+            self.activity_sequence = sequence;
+            self.next_tick = self.next_tick.min(self.activity_after);
+        }
     }
     pub fn synchronize(&mut self, protocol: &mut impl Protocol, now: u64, interval: u64) -> Change {
         if self.cursor == a::tray_desktop_cursor_poll && now < self.next_tick {
@@ -143,6 +164,7 @@ impl Mirror {
             if response.flags & a::tray_desktop_flag_complete != 0 {
                 self.cursor = a::tray_desktop_cursor_poll;
                 self.next_tick = now.saturating_add(interval);
+                self.activity_after = now.saturating_add(interval.div_ceil(10).max(1));
                 if response.registered_count as usize != self.staging.registered_count
                     && response.registry_revision != self.revision
                 {
@@ -293,6 +315,69 @@ impl Mirror {
 mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
+    #[test]
+    fn idle_polling_is_sparse_activity_is_prompt_and_busy_or_failed_peers_stay_bounded() {
+        struct Quiet {
+            calls: u32,
+            revision: u64,
+            failed: bool,
+        }
+        impl Protocol for Quiet {
+            fn exchange(&mut self, op: u16, request: &a::TrayDesktopExchange,
+                out: &mut a::TrayDesktopExchange) -> bool {
+                assert_eq!(op, a::tray_service_op_desktop_sync);
+                self.calls += 1;
+                *out = a::TrayDesktopExchange {
+                    desktop_owner: request.desktop_owner,
+                    desktop_epoch: request.desktop_owner.generation,
+                    registry_revision: self.revision,
+                    flags: a::tray_desktop_flag_complete,
+                    ..Default::default()
+                };
+                !self.failed
+            }
+        }
+        let owner = a::ProgramProcessHandle { instance_id: 9, generation: 3, reserved: 0 };
+        for (interval, active, expected) in [(50, false, 20), (500, false, 2), (500, true, 20)] {
+            let mut mirror = Mirror::new(owner).unwrap();
+            let mut peer = Quiet { calls: 0, revision: 1, failed: false };
+            for now in 0..1000 {
+                if active { mirror.activity(now + 1); }
+                mirror.synchronize(&mut peer, now, interval);
+            }
+            assert_eq!(peer.calls, expected, "interval={interval} active={active}");
+        }
+        let mut mirror = Mirror::new(owner).unwrap();
+        let mut peer = Quiet { calls: 0, revision: 1, failed: false };
+        mirror.activity(1);
+        assert!(mirror.synchronize(&mut peer, 0, 500).published);
+        for now in 1..125 {
+            mirror.activity(1);
+            mirror.synchronize(&mut peer, now, 500);
+        }
+        assert_eq!(peer.calls, 1);
+        peer.revision = 2;
+        mirror.activity(2);
+        assert!(mirror.synchronize(&mut peer, 125, 500).published);
+        assert_eq!(peer.calls, 2, "a real wake after quiet bypasses the 500ms idle deadline");
+        peer.revision = 3;
+        mirror.activity(3);
+        mirror.synchronize(&mut peer, 174, 500);
+        assert_eq!(peer.calls, 2, "unrelated activity cannot flood the service");
+        assert!(mirror.synchronize(&mut peer, 175, 500).published);
+        peer.failed = true;
+        mirror.activity(4);
+        assert!(mirror.synchronize(&mut peer, 225, 500).service_lost);
+        let calls = peer.calls;
+        peer.failed = false;
+        for now in 226..725 {
+            mirror.activity(now + 100);
+            mirror.synchronize(&mut peer, now, 500);
+        }
+        assert_eq!(peer.calls, calls, "failed-provider retry retains its backoff despite activity");
+        assert!(mirror.synchronize(&mut peer, 725, 500).published);
+        assert_eq!(mirror.revision, 3);
+    }
     struct Peer {
         owner: a::ProgramProcessHandle,
         calls: u32,
@@ -571,18 +656,19 @@ mod tests {
     fn visibility_retries_only_unconfirmed_items_after_current_layout() {
         let mut mirror = mirror();
         let mut peer = VisibilityPeer::new();
-        assert!(mirror.synchronize(&mut peer, 10, 50).published);
+        assert!(mirror.synchronize(&mut peer, 10, 500).published);
         mirror.layout(layout(500));
         peer.fault = Some((2, 0));
         assert!(!mirror.publish_visibility(&mut peer, 10, 50));
         assert!(mirror.visibility_dirty);
+        assert_eq!(mirror.wait_tick(), 60, "visibility retry precedes the new idle poll");
         // A geometry-only change needs no repeated visibility for item1.
         assert!(mirror.layout(layout(450)));
         for tick in 11..60 {
             assert!(!mirror.publish_visibility(&mut peer, tick, 50));
         }
         assert_eq!(peer.calls.len(), 2);
-        mirror.synchronize(&mut peer, 60, 50);
+        mirror.synchronize(&mut peer, 60, 500);
         assert_eq!(peer.calls.len(), 2); // synchronize never publishes pre-layout
         assert!(mirror.publish_visibility(&mut peer, 60, 50));
         assert_eq!(
@@ -590,6 +676,7 @@ mod tests {
             vec![1, 2, 2]
         );
         assert!(!mirror.visibility_dirty);
+        assert_eq!(mirror.wait_tick(), 510);
         mirror.layout(layout(235)); // window reservation hides both items
         peer.fault = Some((2, 0)); // change may apply before its response is lost
         assert!(!mirror.publish_visibility(&mut peer, 61, 50));
