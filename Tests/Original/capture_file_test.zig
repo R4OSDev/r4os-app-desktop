@@ -44,9 +44,9 @@ fn abort(path: [*:0]const u8) callconv(.c) i32 {
     model.aborts += 1; return model.abort_code;
 }
 const Harness = struct {
-    table: r.abi.R4XStartR4Sys = .{},
+    table: @import("r4os").platform2.abi.R4XStartR4Sys2 = .{},
     imports: [1]r.abi.R4XStartImport = undefined,
-    start: r.abi.R4XStartContext = undefined,
+    start: @import("r4os").platform2.abi.R4XStartContext2 = undefined,
     app: r.App = undefined,
     fn init(self: *Harness) !r.r4sys.Context {
         model = .{};
@@ -55,9 +55,9 @@ const Harness = struct {
         self.table.file_stream_finish = @intFromPtr(&finish);
         self.table.file_stream_abort = @intFromPtr(&abort);
         self.table.file_replace_atomic = @intFromPtr(&publish);
-        self.imports = .{.{ .group_id = @intFromEnum(r.abi.R4LGroup.r4sys),
+        self.imports = .{.{ .group_id = @intFromEnum(r.abi.R4LGroup.r4sys), .resolved_version = 2,
             .flags = r.abi.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.table) }};
-        self.start = .{ .flags = r.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&self.imports), .import_count = 1 };
+        self.start = .{ .app_class = @intFromEnum(r.abi.R4XStartAppClass.console), .flags = r.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&self.imports), .import_count = 1 };
         self.app = switch (r.App.init(&self.start, .console)) { .value => |app| app, .failure => return error.App };
         return self.app.system();
     }

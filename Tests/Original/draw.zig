@@ -3192,7 +3192,7 @@ test "terminal incremental refresh falls back on ring scroll geometry font codep
 
 test "every UTF8 write split retains whole cells and actual full versus dirty pixels" {
     const rect = surface.Rect{ .x = 0, .y = 0, .w = 84, .h = 80 };
-    const raw: r4os.abi.R4XStartContext = .{};
+    const raw: @import("r4os").platform2.abi.R4XStartContext2 = .{};
     const bundle: r4os.program.Bundle = .{ .raw = &raw };
     var full_pixels: [84*80]u32 = @splat(0);
     var dirty_pixels: [84*80]u32 = @splat(0);

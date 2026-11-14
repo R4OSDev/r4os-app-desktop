@@ -41,10 +41,10 @@ pub const Worker = struct {
     completed_frame: u64 = 0,
     completed_status: ?gfx.R4GfxSwapchainFrameStatus = null,
 
-    pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context) ?*Worker {
+    pub fn create(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2, sys: r4os.r4sys.Context) ?*Worker {
         return createForOutput(allocator, raw, sys, 0, null, null, gfx.format_xrgb8888);
     }
-    pub fn createForOutput(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, sys: r4os.r4sys.Context,
+    pub fn createForOutput(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2, sys: r4os.r4sys.Context,
         adapter: u32, head: ?u32, encoding: ?r4os.abi.GfxOutputColorState, format: u32) ?*Worker
     {
 

@@ -506,7 +506,7 @@ fn nativeModelAllocator() std.mem.Allocator {
     return if (@import("builtin").is_test) t.allocator else std.heap.page_allocator;
 }
 var native_fixture: fixture.Fixture = .{};
-pub fn nativeContext() ?*const a.R4XStartContext {
+pub fn nativeContext() ?*const @import("r4os").platform2.abi.R4XStartContext2 {
     for (Model.buffers) |v| if (v != null) return null;
     for (Model.jobs) |v| if (v != null) return null;
     if (Model.retained_count != 0 or WindowMemory.count() != 0 or WindowMemory.mapped != 0) return null;
@@ -519,11 +519,12 @@ pub fn nativeContext() ?*const a.R4XStartContext {
     Model.staged=@splat(0); Model.clock=1; Model.chain=.{}; Model.chain_render=@splat(null); Model.chain_present=@splat(null);
     native_fixture=.{};
     native_fixture.imports=.{
-        .{.group_id=@intFromEnum(a.R4LGroup.r4sys),.min_version=1,.resolved_version=1,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4SYS"),.symbol_name=@intFromPtr("Query"),.table=@intFromPtr(&native_fixture.sys)},
-        .{.group_id=@intFromEnum(a.R4LGroup.r4draw),.min_version=1,.resolved_version=1,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4DRAW"),.symbol_name=@intFromPtr("Query"),.table=@intFromPtr(&native_fixture.draw)},
+        .{.group_id=@intFromEnum(a.R4LGroup.r4sys),.min_version = 2,.resolved_version = 2,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4SYS"),.symbol_name=@intFromPtr("Query2"),.table=@intFromPtr(&native_fixture.sys)},
+        .{.group_id=@intFromEnum(a.R4LGroup.r4draw),.min_version = 2,.resolved_version = 2,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4DRAW"),.symbol_name=@intFromPtr("Query2"),.table=@intFromPtr(&native_fixture.draw)},
         .{.module_name=@intFromPtr("R4GFX"),.symbol_name=@intFromPtr("DEVICE_V1"),.min_version=c.device_v1_header.abi_minor,.resolved_version=c.device_v1_header.abi_minor,.table=@intFromPtr(&Model.table)},
         .{.module_name=@intFromPtr("R4NV"),.symbol_name=@intFromPtr("BACKEND_V1"),.min_version=3},
         .{.module_name=@intFromPtr("R4GFX"),.symbol_name=@intFromPtr("COLOR_V1"),.min_version=c.color_v1_header.abi_minor,.resolved_version=c.color_v1_header.abi_minor,.table=@intFromPtr(&Model.colors)},
+        .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("Query2"), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&fixture.query2) },
     };
     native_fixture.raw=.{.app_class=@intFromEnum(a.R4XStartAppClass.console),.instance_id=86,.flags=a.r4xstart_flag_imports_valid,.imports=@intFromPtr(&native_fixture.imports),.import_count=native_fixture.imports.len};
     return &native_fixture.raw;
@@ -583,7 +584,7 @@ pub fn nativeWindowTransport(op:u32,input:usize,output:usize) i32 {
         else=>return -1,
     }
 }
-pub fn nativeCatalogContext() *const a.R4XStartContext {return @import("output_manager_test.zig").nativeContext();}
+pub fn nativeCatalogContext() *const @import("r4os").platform2.abi.R4XStartContext2 {return @import("output_manager_test.zig").nativeContext();}
 pub const NativeWallpaperCallback=@import("wallpaper_color_test.zig").NativeCallback;
 pub fn nativeWallpaperCheck(callback:NativeWallpaperCallback) i32{return @import("wallpaper_color_test.zig").nativeCheck(callback);}
 pub fn nativeCatalogControl(op:u32,value:u64) i32 {return @import("output_manager_test.zig").nativeControl(op,value);}
@@ -797,7 +798,7 @@ fn checkPreparationCancellation(graphics: *@import("gfx_renderer.zig").Renderer)
 fn checkWorkerSuspension(graphics: *@import("gfx_renderer.zig").Renderer) !void {
     const Worker = @import("composition_worker.zig").Worker;
     const device: *const c.R4GfxDevice = @ptrCast(&graphics.device);
-    const raw: a.R4XStartContext = .{};
+    const raw: @import("r4os").platform2.abi.R4XStartContext2 = .{};
     const bundle: r4os.program.Bundle = .{ .raw = &raw };
     var worker: Worker = .{ .graphics = graphics, .sys = r4os.r4sys.Context.init(&bundle),
         .cache = layers.Cache.init(t.allocator, 1024 * 1024),

@@ -56,11 +56,11 @@ const Source = struct {
 };
 
 // The Rust catalog adapter consumes the same Source functions as this test.
-var native_sys: a.R4XStartR4Sys = .{};
-var native_draw: a.R4XStartR4Draw = .{};
+var native_sys: @import("r4os").platform2.abi.R4XStartR4Sys2 = .{};
+var native_draw: @import("r4os").platform2.abi.R4XStartR4Draw2 = .{};
 var native_imports: [2]a.R4XStartImport = undefined;
-var native_raw: a.R4XStartContext = .{};
-pub fn nativeContext() *const a.R4XStartContext {
+var native_raw: @import("r4os").platform2.abi.R4XStartContext2 = .{};
+pub fn nativeContext() *const @import("r4os").platform2.abi.R4XStartContext2 {
     Source.revision=1;Source.present=1;Source.stale=false;Source.native_output=false;
     Source.bpc=8;Source.buffers=2;Source.connection=4;Source.display=5;Source.width=1920;Source.height=1080;
     native_sys=.{.monotonic_clock=@intFromPtr(&Source.clock)};
@@ -68,8 +68,8 @@ pub fn nativeContext() *const a.R4XStartContext {
         .gfx_output_color=@intFromPtr(&Source.color),.display_output_target=@intFromPtr(&Source.target),
         .display_output_presentation_info=@intFromPtr(&Source.presentation)};
     native_imports=.{
-        .{.group_id=@intFromEnum(a.R4LGroup.r4sys),.min_version=1,.resolved_version=1,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4SYS"),.symbol_name=@intFromPtr("Query"),.table=@intFromPtr(&native_sys)},
-        .{.group_id=@intFromEnum(a.R4LGroup.r4draw),.min_version=1,.resolved_version=1,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4DRAW"),.symbol_name=@intFromPtr("Query"),.table=@intFromPtr(&native_draw)},
+        .{.group_id=@intFromEnum(a.R4LGroup.r4sys),.min_version = 2,.resolved_version = 2,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4SYS"),.symbol_name=@intFromPtr("Query2"),.table=@intFromPtr(&native_sys)},
+        .{.group_id=@intFromEnum(a.R4LGroup.r4draw),.min_version = 2,.resolved_version = 2,.flags=a.r4xstart_import_flag_group_interface,.module_name=@intFromPtr("R4DRAW"),.symbol_name=@intFromPtr("Query2"),.table=@intFromPtr(&native_draw)},
     };
     native_raw=.{.app_class=@intFromEnum(a.R4XStartAppClass.console),.instance_id=86,.flags=a.r4xstart_flag_imports_valid,.imports=@intFromPtr(&native_imports),.import_count=native_imports.len};
     return &native_raw;
@@ -116,9 +116,9 @@ pub fn check() !void {
     Source.bpc = 8; Source.buffers = 2; Source.connection = 4;
     Source.display = 5;
     Source.width = 1920; Source.height = 1080;
-    const raw: a.R4XStartContext = .{};
-    const sys: a.R4XStartR4Sys = .{ .monotonic_clock = @intFromPtr(&Source.clock) };
-    const draw: a.R4XStartR4Draw = .{ .gfx_output_revision = @intFromPtr(&Source.catalog),
+    const raw: @import("r4os").platform2.abi.R4XStartContext2 = .{};
+    const sys: @import("r4os").platform2.abi.R4XStartR4Sys2 = .{ .monotonic_clock = @intFromPtr(&Source.clock) };
+    const draw: @import("r4os").platform2.abi.R4XStartR4Draw2 = .{ .gfx_output_revision = @intFromPtr(&Source.catalog),
         .gfx_output_info = @intFromPtr(&Source.output), .gfx_output_color = @intFromPtr(&Source.color),
         .display_output_target = @intFromPtr(&Source.target), .display_output_presentation_info = @intFromPtr(&Source.presentation) };
     const bundle: r4os.program.Bundle = .{ .raw = &raw, .sys = &sys, .draw = &draw };

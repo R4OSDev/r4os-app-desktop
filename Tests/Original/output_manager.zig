@@ -66,7 +66,7 @@ test "output layout normalization validates spans before changing candidates" {
 }
 pub const Manager = struct {
     allocator: std.mem.Allocator,
-    raw: *const a.R4XStartContext,
+    raw: *const @import("r4os").platform2.abi.R4XStartContext2,
     sys: r4os.r4sys.Context,
     draw: r4os.r4draw.Context,
     // At most eight current outputs plus one retained old set. A hotplug
@@ -90,7 +90,7 @@ pub const Manager = struct {
     motion: ?[2]u32 = null,
     cursor: topology.Point = .{},
 
-    pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, sys: r4os.r4sys.Context, draw: r4os.r4draw.Context) ?*Manager {
+    pub fn create(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2, sys: r4os.r4sys.Context, draw: r4os.r4draw.Context) ?*Manager {
 
         const self = allocator.create(Manager) catch return null;
         self.* = .{ .allocator = allocator, .raw = raw, .sys = sys, .draw = draw };

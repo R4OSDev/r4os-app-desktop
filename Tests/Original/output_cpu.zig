@@ -60,7 +60,7 @@ pub const Output = struct {
         self.profile = try Profile.openFile(self.graphics.allocator, self.graphics.colors, sys, choice.profilePath(), choice.intent, choice.flags);
     }
 
-    pub fn create(allocator: std.mem.Allocator, raw: *const a.R4XStartContext, draw: r4os.r4draw.Context, sys: r4os.r4sys.Context,
+    pub fn create(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2, draw: r4os.r4draw.Context, sys: r4os.r4sys.Context,
         view: geometry.topology.Viewport, target: a.GfxOutputTarget) ?*Output
     {
         const graphics = renderer.Renderer.createForAdapter(allocator, raw, target.adapter_id) orelse return null;

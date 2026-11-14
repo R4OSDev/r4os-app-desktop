@@ -45,8 +45,8 @@ fn fixturePush(handle: *const r4os.abi.ProgramProcessHandle, events: [*]const r4
 }
 test "desktop keeps zero/partial input suffix until acknowledgement and closes exact old binding" {
     const std = @import("std");
-    const raw: r4os.abi.R4XStartContext = .{};
-    const table: r4os.abi.R4XStartR4Desk = .{ .console_push_events = @intFromPtr(&fixturePush) };
+    const raw: @import("r4os").platform2.abi.R4XStartContext2 = .{};
+    const table: @import("r4os").platform2.abi.R4XStartR4Desk2 = .{ .console_push_events = @intFromPtr(&fixturePush) };
     const bundle: r4os.program.Bundle = .{ .raw = &raw, .desk = &table };
     const sys = r4os.r4sys.Context.init(&bundle);
     var pending: Pending = .{};

@@ -20,9 +20,9 @@ export fn r4desk_gpu_context2() callconv(.c) ?*const r.platform2.abi.R4XStartCon
     return gpu_context.init(gpu_model.nativeContext() orelse return null);
 }
 
-// The retained original scheduling and pixel oracles expose generation1
-// fixtures. Project their named callbacks into genuine generation2 tables at
-// this host-only boundary. The original algorithms and expected values stay
+// The retained scheduling and pixel oracles use actual generation2 fixtures.
+// Copy their named callbacks into stable current records at this host-only
+// boundary. The original algorithms and expected values stay
 // in Tests/Original. Native guest qualification uses the actual Kernel tables.
 const ModelContext2 = struct {
     system: r.platform2.abi.R4XStartR4Sys2 = .{},
@@ -40,19 +40,20 @@ const ModelContext2 = struct {
         return current;
     }
 
-    fn init(self: *ModelContext2, original: *const r.abi.R4XStartContext) *const r.platform2.abi.R4XStartContext2 {
+    fn init(self: *ModelContext2, original: *const @import("r4os").platform2.abi.R4XStartContext2) *const r.platform2.abi.R4XStartContext2 {
         const rows: [*]const r.abi.R4XStartImport = @ptrFromInt(original.imports);
         var count: usize = 0;
         var graphics = false;
+        var graphics_query = false;
         for (rows[0..original.import_count]) |item| {
             var row = item;
             switch (row.group_id) {
                 1 => {
-                    self.system = project(r.platform2.abi.R4XStartR4Sys2, @as(*const r.abi.R4XStartR4Sys, @ptrFromInt(item.table)));
+                    self.system = project(r.platform2.abi.R4XStartR4Sys2, @as(*const @import("r4os").platform2.abi.R4XStartR4Sys2, @ptrFromInt(item.table)));
                     row.table = @intFromPtr(&self.system);
                 },
                 3 => {
-                    self.draw = project(r.platform2.abi.R4XStartR4Draw2, @as(*const r.abi.R4XStartR4Draw, @ptrFromInt(item.table)));
+                    self.draw = project(r.platform2.abi.R4XStartR4Draw2, @as(*const @import("r4os").platform2.abi.R4XStartR4Draw2, @ptrFromInt(item.table)));
                     row.table = @intFromPtr(&self.draw);
                 },
                 else => {},
@@ -63,11 +64,12 @@ const ModelContext2 = struct {
                 row.symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr);
             } else if (r.runtime_r4l.importNameEquals(row.module_name, "R4GFX")) {
                 graphics = true;
+                if (r.runtime_r4l.importNameEquals(row.symbol_name, "Query2")) graphics_query = true;
             }
             self.imports[count] = row;
             count += 1;
         }
-        if (graphics) {
+        if (graphics and !graphics_query) {
             self.imports[count] = .{ .module_name = @intFromPtr(@as([:0]const u8, "R4GFX").ptr), .symbol_name = @intFromPtr(@as([:0]const u8, "Query2").ptr), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&model_query2) };
             count += 1;
         }

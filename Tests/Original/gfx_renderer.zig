@@ -31,10 +31,10 @@ pub const Renderer = struct {
     // R4GFX reuses their common immutable raster generation and BO import.
     rasters: [128]Raster = @splat(.{}),
 
-    pub fn create(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext) ?*Renderer {
+    pub fn create(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2) ?*Renderer {
         return createForAdapter(allocator, raw, 0);
     }
-    pub fn createForAdapter(allocator: std.mem.Allocator, raw: *const r4os.abi.R4XStartContext, adapter: u32) ?*Renderer {
+    pub fn createForAdapter(allocator: std.mem.Allocator, raw: *const @import("r4os").platform2.abi.R4XStartContext2, adapter: u32) ?*Renderer {
         const client = gfx.DeviceV1Client.init(raw) catch return failed(raw, "device-interface", 0);
         const colors = gfx.ColorV1Client.init(raw) catch return failed(raw, "color-interface", 0);
         const bytes = client.storage_size();
@@ -57,7 +57,7 @@ pub const Renderer = struct {
         }
         return self;
     }
-    fn failed(raw: *const r4os.abi.R4XStartContext, stage: []const u8, result: i32) ?*Renderer {
+    fn failed(raw: *const @import("r4os").platform2.abi.R4XStartContext2, stage: []const u8, result: i32) ?*Renderer {
 
         const bundle = r4os.program.bundleValueFromR4XStart(raw) orelse return null;
         const sys = r4os.r4sys.Context.init(&bundle);

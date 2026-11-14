@@ -8,6 +8,8 @@ const gfx = @import("r4gfx");
 const image_provider = @import("image_provider");
 const color_provider = @import("color_provider");
 const fixture = @import("png_fixture");
+const test_system: r4os.platform2.abi.R4XStartR4Sys2 = .{};
+const query2: r4os.platform2.abi.R4LQuery2 = .{};
 const allocator = if (@import("builtin").is_test) t.allocator else std.heap.page_allocator;
 pub const NativeCallback = *const fn (*const img.Context,*const img.PngContext,*const img.RasterContext,*const gfx.ColorV1Client,
     [*]const u8,usize,[*]u32,usize,u32,u32,u32) callconv(.c) i32;
@@ -28,8 +30,11 @@ pub fn check(comptime decode: anytype) !void {
         .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("PNG_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&image_provider.r4img_png_v1) },
         .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("RASTER_V1"), .min_version = 1, .resolved_version = 1, .table = @intFromPtr(&image_provider.r4img_raster_v1) },
         .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = gfx.color_v1_revision, .resolved_version = color_provider.c.color_v1_header.abi_minor, .table = @intFromPtr(&color_provider.color_api.table) },
+        .{ .group_id = 1, .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&test_system) },
+        .{ .module_name = @intFromPtr("R4IMG"), .symbol_name = @intFromPtr("Query2"), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&image_provider.r4img_query2) },
+        .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("Query2"), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&query2) },
     };
-    var raw: r4os.abi.R4XStartContext = .{ .flags = r4os.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&imports), .import_count = imports.len };
+    var raw: @import("r4os").platform2.abi.R4XStartContext2 = .{ .flags = r4os.abi.r4xstart_flag_imports_valid, .imports = @intFromPtr(&imports), .import_count = imports.len };
     const images = img.Context.init(&raw) orelse return error.Images;
     const png = img.PngContext.init(&raw) orelse return error.Png;
     const raster = img.RasterContext.init(&raw) orelse return error.Raster;

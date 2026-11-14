@@ -4,6 +4,7 @@ const gfx = @import("r4gfx");
 const provider = @import("r4gfx_device_provider");
 const renderer = @import("gfx_renderer.zig");
 const a = r4os.abi;
+pub const query2: @import("r4os").platform2.abi.R4LQuery2 = .{};
 pub const table: provider.c.DeviceV1 = .{
     .header = provider.c.device_v1_header,
     .storage_size = provider.storageSize,
@@ -44,17 +45,18 @@ pub const table: provider.c.DeviceV1 = .{
 pub const Fixture = struct {
     table_override: ?*const provider.c.DeviceV1 = null,
     color_override: ?*const provider.c.ColorV1 = null,
-    sys: a.R4XStartR4Sys = .{},
-    draw: a.R4XStartR4Draw = .{},
-    imports: [5]a.R4XStartImport = undefined,
-    raw: a.R4XStartContext = .{},
+    sys: @import("r4os").platform2.abi.R4XStartR4Sys2 = .{},
+    draw: @import("r4os").platform2.abi.R4XStartR4Draw2 = .{},
+    imports: [6]a.R4XStartImport = undefined,
+    raw: @import("r4os").platform2.abi.R4XStartContext2 = .{},
     pub fn open(self: *Fixture) !*renderer.Renderer {
         self.imports = .{
-            .{ .group_id = @intFromEnum(a.R4LGroup.r4sys), .flags = a.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.sys) },
-            .{ .group_id = @intFromEnum(a.R4LGroup.r4draw), .flags = a.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.draw) },
+            .{ .group_id = @intFromEnum(a.R4LGroup.r4sys), .resolved_version = 2, .flags = a.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.sys) },
+            .{ .group_id = @intFromEnum(a.R4LGroup.r4draw), .resolved_version = 2, .flags = a.r4xstart_import_flag_group_interface, .table = @intFromPtr(&self.draw) },
             .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("DEVICE_V1"), .min_version = provider.c.device_v1_header.abi_minor, .resolved_version = provider.c.device_v1_header.abi_minor, .table = @intFromPtr(self.table_override orelse &table) },
             .{ .module_name = @intFromPtr("R4NV"), .symbol_name = @intFromPtr("BACKEND_V1"), .min_version = 3 },
             .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("COLOR_V1"), .min_version = gfx.color_v1_revision, .resolved_version = provider.c.color_v1_header.abi_minor, .table = @intFromPtr(self.color_override orelse &provider.color_api.table) },
+            .{ .module_name = @intFromPtr("R4GFX"), .symbol_name = @intFromPtr("Query2"), .min_version = 2, .resolved_version = 2, .table = @intFromPtr(&query2) },
         };
         self.raw = .{ .flags = a.r4xstart_flag_imports_valid, .imports = @intFromPtr(&self.imports), .import_count = self.imports.len, .instance_id = 9 };
         return renderer.Renderer.create(@import("std").testing.allocator, &self.raw) orelse error.RendererUnavailable;
