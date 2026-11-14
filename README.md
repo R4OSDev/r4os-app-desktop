@@ -266,3 +266,15 @@ idle fallback and 50-ms coalescing under continuous input/GPU activity. Failed
 service retries retain their backoff; dirty visibility receipts keep their
 independent deadline. WINSVC publishes actual tray revisions before notifying
 Desktop. Read-only synchronization does not generate another notification.
+
+## Deferred icon loading (0.91.3)
+
+The painter borrows ready cache pixels and queues bounded copied requests;
+it has no file/resource loader. One worker validates the admitted parent
+change cursor or reads/decodes the source, and only a completed native join
+allows publication. Positive pixels survive expiry while work is pending.
+Directory history overflow, mount retirement and unavailable watches require
+actual reads; unavailable watches retain the five-second fallback. Epochs
+reject results after folder invalidation or clock rollback. Exit drains the
+worker before releasing code/context. Existing ICO pixel/alpha/budget oracles
+remain in the focused `render::icons` selection of RustNative.ps1.

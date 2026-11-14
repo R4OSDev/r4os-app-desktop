@@ -116,6 +116,7 @@ struct Desktop<'a, 'input> {
     shell: Owned<Shell<'input>>,
     audio_io: super::audio_io::AudioIo<'a>,
     file_checks: super::file_checks::Owner<'a>,
+    icon_io: super::icon_io::Owner<'a>,
     hosted: Owned<hosted::State<'input>>,
     frames: Owned<Frames>,
     outputs: Owned<Manager<'a>>,
@@ -192,6 +193,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 .map_err(|_| "audio requests")?,
             file_checks: super::file_checks::Owner::new(owner.instance_id)
                 .map_err(|_| "file checks")?,
+            icon_io: Default::default(),
             hosted,
             frames,
             outputs,
@@ -603,7 +605,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.tray.activity(self.activity_sequence);
         if self
             .tray
-            .synchronize(transport.host, time.tick, u64::from(time.hz).div_ceil(2).max(1))
+            .synchronize(
+                transport.host,
+                time.tick,
+                u64::from(time.hz).div_ceil(2).max(1),
+            )
             .changed
         {
             self.bar();
@@ -682,6 +688,17 @@ impl<'a, 'input> Desktop<'a, 'input> {
         {
             self.frames.icons.invalidate();
             let _ = self.shell.reload_folder(env, self.width, self.height);
+            self.full();
+        }
+        self.frames.icons.begin_frame(time.nanoseconds);
+        if unsafe {
+            self.icon_io.refresh(
+                env.app,
+                env.resources,
+                self.expected,
+                &mut self.frames.icons,
+            )
+        } {
             self.full();
         }
         if self.shell.folder.layout_rewrite {
@@ -2005,6 +2022,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             || self.modes.busy()
             || self.audio_io.busy()
             || self.file_checks.busy()
+            || self.icon_io.busy()
+            || self.frames.icons.busy()
             || self.hosted.pending.iter().any(|p| p.queued() != 0)
         {
             delay = 1;
@@ -2037,6 +2056,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
         self.windows.disconnect();
         self.shell.audio.stop();
+        self.frames.icons.invalidate();
         let mut reported = false;
         loop {
             let time = env.time().ok();
@@ -2102,6 +2122,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let modes = host.drain_modes();
             let audio = self.audio_io.drain();
             let files = self.file_checks.drain();
+            let icons = self.icon_io.drain(now);
             let capture = self.capture.drain(now);
             let controls = self
                 .control
@@ -2158,6 +2179,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 && modes
                 && audio
                 && files
+                && icons
                 && diagnostic
                 && primary
                 && controls
@@ -2310,6 +2332,7 @@ impl bootstrap::Body for Coordinator {
                 desktop.shell.audio.stop();
                 let _ = desktop.audio_io.drain();
                 let _ = desktop.file_checks.drain();
+                let _ = desktop.icon_io.drain(time.nanoseconds);
                 desktop.capture.poll();
                 unsafe {
                     desktop.layout.flush(

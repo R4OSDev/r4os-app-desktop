@@ -149,7 +149,7 @@ fn until(phase: &str, mut complete: impl FnMut() -> bool) {
     }
 }
 fn scene<M: Memory>(
-    app: &App2<'_>,
+    _app: &App2<'_>,
     owner: &mut Output<'_>,
     windows: &mut Set<M, Consumer>,
     primary: bool,
@@ -209,11 +209,7 @@ fn scene<M: Memory>(
     scene.path = crate::render::coverage::Path::Native;
     let mut fonts = FontCache::new().unwrap();
     let mut icons = icons::Cache::new().unwrap();
-    let mut loader = icons::Native { app };
-    let mut paint = icons::Paint {
-        cache: &mut icons,
-        loader: &mut loader,
-    };
+    let mut paint = icons::Paint { cache: &mut icons };
     let view = crate::render::output_geometry::topology::Viewport {
         pixel_w: 8,
         pixel_h: 8,

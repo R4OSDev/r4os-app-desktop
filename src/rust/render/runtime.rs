@@ -135,17 +135,14 @@ impl Frames {
         if regions.is_empty() {
             return Err(Error::Invalid);
         }
-        // Icon cache expiry/backoff needs this functional time even without a
-        // trace. Only the two composition/present detail reads are optional.
+        // Retain the original frame start instant; icon cache time is copied
+        // by the Desktop turn before asynchronous I/O completion and painting.
         let start = crate::runtime::environment::precise(app).ok_or(Error::State)?;
         let mut canvas =
             CpuScene::new(&mut self.pixels, self.width, self.height).ok_or(Error::State)?;
         let mut fonts = SessionFonts::new(session, app);
-        self.icons.begin_frame(start);
-        let mut loader = icons::Native { app };
         let mut icons = icons::Paint {
             cache: &mut self.icons,
-            loader: &mut loader,
         };
         let old = scene.path;
         scene.path = Path::PrimaryCpu;
@@ -288,11 +285,8 @@ impl Frames {
                 continue;
             }
             let mut fonts = SessionFonts::new(session, app);
-            self.icons.begin_frame(time);
-            let mut loader = icons::Native { app };
             let mut icons = icons::Paint {
                 cache: &mut self.icons,
-                loader: &mut loader,
             };
             let old = scene.path;
             let disabled = scene.disabled;
@@ -410,11 +404,8 @@ impl Frames {
             return started;
         }
         let mut fonts = SessionFonts::new(session, app);
-        self.icons.begin_frame(time);
-        let mut loader = icons::Native { app };
         let mut icons = icons::Paint {
             cache: &mut self.icons,
-            loader: &mut loader,
         };
         let previous = scene.path;
         scene.path = Path::Native;

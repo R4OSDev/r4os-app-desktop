@@ -1,5 +1,5 @@
 //! Desktop-folder pixels and drag grid read the same bounded item model used
-//! by selection and saved positions. File/resource access stays in Icons.
+//! by selection and saved positions. Icons only borrow cached pixels.
 use super::{
     desktop_items::{self as items, Grid, Item, Items, LaunchKind},
     desktop_layout::Position,
@@ -18,7 +18,7 @@ pub trait Icons {
         y: i32,
     ) -> Result<bool>;
 }
-impl<L: icons::Loader> Icons for icons::Paint<'_, L> {
+impl Icons for icons::Paint<'_> {
     fn item<F: Fonts>(
         &mut self,
         ui: &mut Ui<'_, '_, F>,

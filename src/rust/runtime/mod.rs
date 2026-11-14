@@ -6,6 +6,7 @@ pub mod bootstrap;
 pub mod desktop;
 pub mod environment;
 pub(crate) mod file_checks;
+pub(crate) mod icon_io;
 pub mod library;
 mod mode_io;
 pub mod owned;

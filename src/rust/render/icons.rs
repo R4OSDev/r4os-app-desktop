@@ -29,6 +29,12 @@ pub const PROGRAM_ICON: &[u8] = b"C:\\R4OS\\Media\\Icons\\Application.ico";
 pub const TEXT_ICON: &[u8] = b"C:\\R4OS\\Media\\Icons\\Textfile.ico";
 
 pub trait Loader {
+    fn watch(&mut self, _path: &[u8]) -> Option<Watch> {
+        None
+    }
+    fn changed(&mut self, _watch: &mut Watch) -> Option<bool> {
+        None
+    }
     fn file(&mut self, path: &[u8], output: &mut [u8]) -> Option<usize>;
     fn container(&mut self, path: &[u8], output: &mut [u8]) -> Option<usize>;
 }
@@ -36,6 +42,29 @@ pub struct Native<'a, 'start> {
     pub app: &'a App2<'start>,
 }
 impl Loader for Native<'_, '_> {
+    fn watch(&mut self, path: &[u8]) -> Option<Watch> {
+        let path = FilePath::parse(path).ok()?;
+        let bytes = path.as_bytes();
+        let separator = bytes
+            .iter()
+            .rposition(|byte| matches!(byte, b'/' | b'\\'))?;
+        let parent = FilePath::parse(&bytes[..=separator]).ok()?;
+        let mut cursor = r4os_sdk::abi::DirectoryChangeCursor::default();
+        System::new2(self.app)
+            .ok()?
+            .files()
+            .begin_directory_changes(&parent, &mut cursor)
+            .ok()?;
+        Some(Watch(cursor))
+    }
+    fn changed(&mut self, watch: &mut Watch) -> Option<bool> {
+        System::new2(self.app)
+            .ok()?
+            .files()
+            .poll_directory_changes(&mut watch.0)
+            .ok()
+            .map(|n| n > 0)
+    }
     fn file(&mut self, path: &[u8], output: &mut [u8]) -> Option<usize> {
         let path = FilePath::parse(path).ok()?;
         System::new2(self.app)
@@ -88,6 +117,7 @@ pub struct Entry {
     pixels: [u32; SIZE_MAX * SIZE_MAX],
     alpha: [u8; SIZE_MAX * SIZE_MAX],
     loaded_ns: Option<u64>,
+    watch: Option<Watch>,
 }
 impl Entry {
     fn empty() -> Self {
@@ -99,6 +129,7 @@ impl Entry {
             pixels: [0; 1024],
             alpha: [0; 1024],
             loaded_ns: None,
+            watch: None,
         }
     }
     pub fn paint<F: Fonts>(&self, ui: &mut Ui<'_, '_, F>, x: i32, y: i32) -> Result<()> {
@@ -135,57 +166,32 @@ impl Entry {
         Ok(())
     }
 }
-pub struct Cache {
-    entries: Vec<Entry>,
-    input: Vec<u8>,
-    next: usize,
-    now_ns: Option<u64>,
-    misses: misses::Ledger,
+#[derive(Clone, Copy)]
+pub struct Watch(r4os_sdk::abi::DirectoryChangeCursor);
+impl PartialEq for Watch {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        a.version == b.version
+            && a.size == b.size
+            && a.sequence == b.sequence
+            && a.node == b.node
+            && a.mount_generation == b.mount_generation
+            && a.mount_slot == b.mount_slot
+            && a.reserved == b.reserved
+    }
 }
-impl Cache {
-    pub fn new() -> Result<Self> {
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(CAPACITY)
-            .map_err(|_| Error::OutOfMemory)?;
-        entries.resize_with(CAPACITY, Entry::empty);
-        let mut input = Vec::new();
-        input
-            .try_reserve_exact(INPUT_MAX)
-            .map_err(|_| Error::OutOfMemory)?;
-        input.resize(INPUT_MAX, 0);
-        Ok(Self {
-            entries,
-            input,
-            next: 0,
-            now_ns: None,
-            misses: misses::Ledger::default(),
-        })
-    }
-    /// One copied current frame instant, supplied by the render owner.
-    pub fn begin_frame(&mut self, now_ns: u64) {
-        if self.now_ns.is_some_and(|prior| now_ns < prior) {
-            self.invalidate();
-        }
-        self.now_ns = Some(now_ns);
-    }
-    /// Existing folder/update hints discard only owned cache data. Buffer
-    /// reservations remain bounded and available for the next real paint.
-    pub fn invalidate(&mut self) {
-        for entry in &mut self.entries {
-            entry.used = false;
-            entry.loaded_ns = None;
-        }
-        self.next = 0;
-        self.misses.clear();
-    }
-    pub fn load(
-        &mut self,
-        loader: &mut impl Loader,
-        path: &[u8],
-        size: u16,
-        container: bool,
-    ) -> Option<&Entry> {
+impl Eq for Watch {}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Request {
+    key: [u8; PATH_MAX],
+    len: usize,
+    size: u16,
+    container: bool,
+    epoch: u64,
+    watch: Option<Watch>,
+}
+impl Request {
+    fn new(path: &[u8], size: u16, container: bool, epoch: u64) -> Option<Self> {
         if size == 0 || size > SIZE_MAX as u16 || path.is_empty() || path.contains(&0) {
             return None;
         }
@@ -201,83 +207,261 @@ impl Cache {
             0
         };
         key[start..len].copy_from_slice(path);
-        if let Some(index) = self.entries.iter().position(|e| {
-            e.used && e.size == size && e.path_len == len && e.path[..len] == key[..len]
-        }) {
-            let fresh = match (self.now_ns, self.entries[index].loaded_ns) {
-                (Some(now), Some(loaded)) => now >= loaded && now - loaded < 5_000_000_000,
-                (None, _) => true,
-                _ => false,
-            };
-            if fresh {
-                return Some(&self.entries[index]);
+        Some(Self {
+            key,
+            len,
+            size,
+            container,
+            epoch,
+            watch: None,
+        })
+    }
+    fn same_source(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+            && self.size == other.size
+            && self.len == other.len
+            && self.key[..self.len] == other.key[..other.len]
+    }
+    fn matches(&self, entry: &Entry) -> bool {
+        entry.used
+            && entry.size == self.size
+            && entry.path_len == self.len
+            && entry.path[..self.len] == self.key[..self.len]
+    }
+    /// Runs only in the copied I/O task (or the existing owner test adapter).
+    /// An admitted parent watch polls the existing bounded RAM history. Actual
+    /// changes, overflow, retired mounts and unavailable watches require a read.
+    pub(crate) fn read(&self, loader: &mut impl Loader) -> Refresh {
+        let path = &self.key[if self.container { 5 } else { 0 }..self.len];
+        if let Some(mut watch) = self.watch {
+            if loader.changed(&mut watch) == Some(false) {
+                return Refresh::Unchanged(watch);
             }
-            self.entries[index].used = false;
         }
-        if let Some(now) = self.now_ns
-            && self.misses.blocked(&key[..len], size, now)
-        {
-            return None;
+        // Admit before reading so a concurrent mutation cannot bless old bytes.
+        let mut watch = loader.watch(path);
+        let mut input = Vec::new();
+        if input.try_reserve_exact(INPUT_MAX).is_err() {
+            return Refresh::Retry;
         }
-        // Keep all original file/decode failures on one bounded admission path.
-        let loaded = (|| -> Option<usize> {
-            let n = if container {
-                loader.container(path, &mut self.input)
+        input.resize(INPUT_MAX, 0);
+        let loaded = (|| -> Option<Entry> {
+            let n = if self.container {
+                loader.container(path, &mut input)
             } else {
-                loader.file(path, &mut self.input)
+                loader.file(path, &mut input)
             }?;
-            if n == 0 || n > self.input.len() {
+            if n == 0 || n > input.len() {
                 return None;
             }
-            let bytes = &self.input[..n];
-            let image = r4os_sdk::data::Icon::open(bytes)
+            let image = r4os_sdk::data::Icon::open(&input[..n])
                 .ok()?
-                .best_bitmap(size)
+                .best_bitmap(self.size)
                 .ok()?;
             let (width, height) = image.dimensions().ok()?;
             if width == 0 || height == 0 {
                 return None;
             }
-            let index = if let Some(i) = self.entries.iter().position(|e| !e.used) {
-                i
-            } else {
-                let i = self.next;
-                self.next = (i + 1) % CAPACITY;
-                i
-            };
-            let e = &mut self.entries[index];
-            e.used = false;
-            e.path = key;
-            e.path_len = len;
-            e.size = size;
-            e.pixels.fill(0);
-            e.alpha.fill(0);
-            let w = u32::from(size).min(width);
-            let h = u32::from(size).min(height);
-            let ox = ((u32::from(size) - w) / 2) as usize;
-            let oy = ((u32::from(size) - h) / 2) as usize;
+            let mut entry = Entry::empty();
+            entry.path = self.key;
+            entry.path_len = self.len;
+            entry.size = self.size;
+            let w = u32::from(self.size).min(width);
+            let h = u32::from(self.size).min(height);
+            let ox = ((u32::from(self.size) - w) / 2) as usize;
+            let oy = ((u32::from(self.size) - h) / 2) as usize;
             let destination = oy * SIZE_MAX + ox;
             pixel_bridge!(image.copy_scaled_pixels(
-                &mut e.pixels[destination..],
-                &mut e.alpha[destination..],
+                &mut entry.pixels[destination..],
+                &mut entry.alpha[destination..],
                 w,
                 h,
                 SIZE_MAX,
             ))
             .ok()?;
-            e.used = true;
-            e.loaded_ns = self.now_ns;
-            Some(index)
+            entry.watch = watch.take().and_then(|mut watch| {
+                (loader.changed(&mut watch) == Some(false)).then_some(watch)
+            });
+            entry.used = true;
+            Some(entry)
         })();
-        if let Some(index) = loaded {
-            self.misses.forget(&key[..len], size);
-            Some(&self.entries[index])
-        } else {
-            if let Some(now) = self.now_ns {
-                self.misses.remember(&key[..len], size, now);
-            }
-            None
+        loaded.map_or(Refresh::Failed, Refresh::Loaded)
+    }
+}
+pub(crate) enum Refresh {
+    Unchanged(Watch),
+    Loaded(Entry),
+    Failed,
+    Retry,
+}
+pub struct Cache {
+    entries: Vec<Entry>,
+    next: usize,
+    now_ns: Option<u64>,
+    misses: misses::Ledger,
+    pending: Vec<Option<Request>>,
+    pending_next: usize,
+    in_flight: Option<Request>,
+    epoch: u64,
+}
+impl Cache {
+    pub fn new() -> Result<Self> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(CAPACITY)
+            .map_err(|_| Error::OutOfMemory)?;
+        entries.resize_with(CAPACITY, Entry::empty);
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(CAPACITY)
+            .map_err(|_| Error::OutOfMemory)?;
+        pending.resize(CAPACITY, None);
+        Ok(Self {
+            entries,
+            next: 0,
+            now_ns: None,
+            misses: misses::Ledger::default(),
+            pending,
+            pending_next: 0,
+            in_flight: None,
+            epoch: 0,
+        })
+    }
+    /// One copied current turn instant, supplied before I/O completion/painting.
+    pub fn begin_frame(&mut self, now_ns: u64) {
+        if self.now_ns.is_some_and(|prior| now_ns < prior) {
+            self.invalidate();
         }
+        self.now_ns = Some(now_ns);
+    }
+    /// Epoch invalidation also rejects a late joined result from the old folder.
+    pub fn invalidate(&mut self) {
+        for entry in &mut self.entries {
+            entry.used = false;
+            entry.loaded_ns = None;
+        }
+        self.next = 0;
+        self.misses.clear();
+        self.pending.fill(None);
+        self.pending_next = 0;
+        self.in_flight = None;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+    /// Paint only reads ready pixels and copies bounded requests. It never has
+    /// a file/resource/decoder capability. A stale positive stays visible until
+    /// its replacement or an actual failed read is joined and published.
+    pub fn request(&mut self, path: &[u8], size: u16, container: bool) -> Option<&Entry> {
+        let mut request = Request::new(path, size, container, self.epoch)?;
+        let index = self.entries.iter().position(|e| request.matches(e));
+        let fresh = index.is_some_and(|index| match (self.now_ns, self.entries[index].loaded_ns) {
+            (Some(now), Some(loaded)) => now >= loaded && now - loaded < 5_000_000_000,
+            (None, _) => true,
+            _ => false,
+        });
+        if !fresh
+            && !self
+                .now_ns
+                .is_some_and(|now| self.misses.blocked(&request.key[..request.len], size, now))
+            && !self.in_flight.is_some_and(|p| p.same_source(&request))
+            && !self
+                .pending
+                .iter()
+                .flatten()
+                .any(|p| p.same_source(&request))
+        {
+            request.watch = index.and_then(|i| self.entries[i].watch);
+            if let Some(slot) = self.pending.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(request);
+            }
+        }
+        index.map(|i| &self.entries[i])
+    }
+    pub fn busy(&self) -> bool {
+        self.in_flight.is_some() || self.pending.iter().any(Option::is_some)
+    }
+    pub(crate) fn take_request(&mut self) -> Option<Request> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        for offset in 0..CAPACITY {
+            let i = (self.pending_next + offset) % CAPACITY;
+            if let Some(request) = self.pending[i].take() {
+                self.pending_next = (i + 1) % CAPACITY;
+                self.in_flight = Some(request);
+                return Some(request);
+            }
+        }
+        None
+    }
+    /// The caller must hold the exact native join receipt before passing data.
+    pub(crate) fn complete(&mut self, request: Request, result: Refresh) -> bool {
+        if request.epoch != self.epoch || self.in_flight != Some(request) {
+            return false;
+        }
+        self.in_flight = None;
+        let prior = self.entries.iter().position(|e| request.matches(e));
+        match result {
+            Refresh::Unchanged(watch) => {
+                if let Some(i) = prior {
+                    self.entries[i].loaded_ns = self.now_ns;
+                    self.entries[i].watch = Some(watch);
+                }
+                self.misses
+                    .forget(&request.key[..request.len], request.size);
+                false
+            }
+            Refresh::Loaded(mut entry) => {
+                let changed = prior.is_none_or(|i| {
+                    self.entries[i].pixels != entry.pixels || self.entries[i].alpha != entry.alpha
+                });
+                let index = prior
+                    .or_else(|| self.entries.iter().position(|e| !e.used))
+                    .unwrap_or_else(|| {
+                        let i = self.next;
+                        self.next = (i + 1) % CAPACITY;
+                        i
+                    });
+                entry.loaded_ns = self.now_ns;
+                self.entries[index] = entry;
+                self.misses
+                    .forget(&request.key[..request.len], request.size);
+                changed
+            }
+            Refresh::Retry => {
+                if let Some(now) = self.now_ns {
+                    self.misses
+                        .remember(&request.key[..request.len], request.size, now);
+                }
+                false
+            }
+            Refresh::Failed => {
+                if let Some(i) = prior {
+                    self.entries[i].used = false;
+                }
+                if let Some(now) = self.now_ns {
+                    self.misses
+                        .remember(&request.key[..request.len], request.size, now);
+                }
+                prior.is_some()
+            }
+        }
+    }
+    // Existing synchronous owner oracles drive the same request/read/complete
+    // states; this adapter and its loader capability are absent from R4DESK.
+    #[cfg(test)]
+    pub fn load(
+        &mut self,
+        loader: &mut impl Loader,
+        path: &[u8],
+        size: u16,
+        container: bool,
+    ) -> Option<&Entry> {
+        let _ = self.request(path, size, container);
+        while let Some(request) = self.take_request() {
+            self.complete(request, request.read(loader));
+        }
+        let request = Request::new(path, size, container, self.epoch)?;
+        self.entries.iter().find(|entry| request.matches(entry))
     }
 }
 fn present(v: c::R4SdkDataSlot) -> bool {
@@ -286,11 +470,10 @@ fn present(v: c::R4SdkDataSlot) -> bool {
 fn scalar(v: c::R4SdkDataSlot) -> Option<u64> {
     present(v).then_some(v.bits)
 }
-pub struct Paint<'a, L> {
+pub struct Paint<'a> {
     pub cache: &'a mut Cache,
-    pub loader: &'a mut L,
 }
-impl<L: Loader> Paint<'_, L> {
+impl Paint<'_> {
     pub fn desktop<F: Fonts>(
         &mut self,
         ui: &mut Ui<'_, '_, F>,
@@ -320,7 +503,7 @@ impl<L: Loader> Paint<'_, L> {
                 Stage::Container => (item.launch_path(), true),
                 Stage::Standard => (PROGRAM_ICON, false),
             };
-            if let Some(icon) = self.cache.load(self.loader, path, 32, container) {
+            if let Some(icon) = self.cache.request(path, 32, container) {
                 icon.paint(ui, x, y)?;
                 return Ok(true);
             }
@@ -331,7 +514,7 @@ impl<L: Loader> Paint<'_, L> {
             })
             .is_some_and(|v| v != 0)
         {
-            if let Some(icon) = self.cache.load(self.loader, TEXT_ICON, 32, false) {
+            if let Some(icon) = self.cache.request(TEXT_ICON, 32, false) {
                 icon.paint(ui, x, y)?;
                 return Ok(true);
             }
@@ -339,7 +522,7 @@ impl<L: Loader> Paint<'_, L> {
         Ok(false)
     }
 }
-impl<L: Loader> crate::shell::taskbar_view::Icons for Paint<'_, L> {
+impl crate::shell::taskbar_view::Icons for Paint<'_> {
     fn quick<F: Fonts>(
         &mut self,
         ui: &mut Ui<'_, '_, F>,
@@ -354,7 +537,7 @@ impl<L: Loader> crate::shell::taskbar_view::Icons for Paint<'_, L> {
         {
             return Ok(true);
         }
-        match self.cache.load(self.loader, path, 16, false) {
+        match self.cache.request(path, 16, false) {
             Some(e) => {
                 e.paint(ui, x, y)?;
                 Ok(true)
@@ -780,11 +963,7 @@ mod tests {
         let mut ui = Ui::new(Painter::cpu(&mut canvas), &mut font_cache, &mut fonts);
         let mut cache = Cache::new().unwrap();
         cache.begin_frame(1);
-        let mut source = ChangingSource { kind: 0, reads: 0 };
-        let mut paint = Paint {
-            cache: &mut cache,
-            loader: &mut source,
-        };
+        let mut paint = Paint { cache: &mut cache };
         let item = crate::shell::desktop_items::Item::new(
             b"C:\\MISSING.R4X",
             crate::shell::desktop_items::FsKind::File,
@@ -800,6 +979,218 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(source.reads, 0, "unaffected icon source must not be read");
+        assert!(
+            !cache.busy(),
+            "unaffected icon must not request source work"
+        );
+    }
+    struct WatchedSource {
+        source: ChangingSource,
+        revision: Option<u64>,
+        queries: usize,
+        mutate_during_read: bool,
+    }
+    impl WatchedSource {
+        fn new() -> Self {
+            Self {
+                source: ChangingSource { kind: 2, reads: 0 },
+                revision: Some(1),
+                queries: 0,
+                mutate_during_read: false,
+            }
+        }
+    }
+    impl Loader for WatchedSource {
+        fn watch(&mut self, _: &[u8]) -> Option<Watch> {
+            self.queries += 1;
+            self.revision.map(|sequence| {
+                Watch(r4os_sdk::abi::DirectoryChangeCursor {
+                    sequence,
+                    node: 5,
+                    mount_generation: 7,
+                    mount_slot: 1,
+                    ..Default::default()
+                })
+            })
+        }
+        fn changed(&mut self, watch: &mut Watch) -> Option<bool> {
+            self.queries += 1;
+            self.revision.map(|revision| {
+                let changed = watch.0.sequence != revision;
+                watch.0.sequence = revision;
+                changed
+            })
+        }
+        fn file(&mut self, path: &[u8], out: &mut [u8]) -> Option<usize> {
+            let result = self.source.file(path, out);
+            if self.mutate_during_read {
+                self.revision = self.revision.map(|v| v + 1);
+            }
+            result
+        }
+        fn container(&mut self, path: &[u8], out: &mut [u8]) -> Option<usize> {
+            self.file(path, out)
+        }
+    }
+    #[test]
+    fn d091_deferred_minute_reads_and_replacement_keep_paint_free_of_io() {
+        for (scenario, step_ns) in [
+            ("quiet", 60_000_000_000),
+            ("visible_clock", 1_000_000_000),
+            ("moving", 16_000_000),
+        ] {
+            let mut cache = Cache::new().unwrap();
+            let mut source = WatchedSource::new();
+            let mut now = 0;
+            while now < 60_000_000_000 {
+                cache.begin_frame(now);
+                let (reads, queries) = (source.source.reads, source.queries);
+                let _ = cache.request(b"C:\\ACTUAL.ICO", 32, false);
+                assert_eq!(
+                    (source.source.reads, source.queries),
+                    (reads, queries),
+                    "paint cannot access a source"
+                );
+                while let Some(request) = cache.take_request() {
+                    let result = request.read(&mut source);
+                    cache.complete(request, result);
+                }
+                assert!(cache.request(b"C:\\ACTUAL.ICO", 32, false).is_some());
+                now += step_ns;
+            }
+            assert_eq!(
+                source.source.reads, 1,
+                "unchanged admitted watches avoid full content reloads"
+            );
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"case\":\"d091-deferred-minute\",\"scenario\":\"{scenario}\",\"source_reads\":{},\"watch_calls\":{}}}",
+                source.source.reads, source.queries
+            );
+        }
+        let mut cache = Cache::new().unwrap();
+        let mut source = WatchedSource::new();
+        cache.begin_frame(0);
+        assert!(cache.request(b"C:\\ACTUAL.ICO", 32, false).is_none());
+        let request = cache.take_request().unwrap();
+        assert!(cache.take_request().is_none());
+        let loaded = request.read(&mut source);
+        for _ in 0..100 {
+            assert!(cache.request(b"C:\\ACTUAL.ICO", 32, false).is_none());
+        }
+        assert!(
+            cache.pending.iter().all(Option::is_none),
+            "in-flight source deduplicated"
+        );
+        assert!(cache.complete(request, loaded));
+        let application = cache.request(b"C:\\ACTUAL.ICO", 32, false).unwrap().pixels;
+        source.source.kind = 3;
+        source.revision = Some(2);
+        cache.begin_frame(5_000_000_000);
+        assert_eq!(
+            cache.request(b"C:\\ACTUAL.ICO", 32, false).unwrap().pixels,
+            application
+        );
+        let request = cache.take_request().unwrap();
+        let loaded = request.read(&mut source);
+        assert_eq!(
+            cache.request(b"C:\\ACTUAL.ICO", 32, false).unwrap().pixels,
+            application,
+            "old pixels live until joined publication"
+        );
+        assert!(cache.complete(request, loaded));
+        assert_ne!(
+            cache.request(b"C:\\ACTUAL.ICO", 32, false).unwrap().pixels,
+            application,
+            "same-path parent publication updates pixels"
+        );
+        assert_eq!(source.source.reads, 2);
+    }
+    #[test]
+    fn d091_deferred_epoch_capacity_and_failed_worker_backoff() {
+        let mut cache = Cache::new().unwrap();
+        let mut source = WatchedSource::new();
+        cache.begin_frame(0);
+        for i in 0..80 {
+            let _ = cache.request(alloc::format!("C:\\P{i}.ICO").as_bytes(), 16, false);
+        }
+        assert_eq!(cache.pending.iter().flatten().count(), 32);
+        while let Some(request) = cache.take_request() {
+            cache.complete(request, request.read(&mut source));
+        }
+        assert_eq!(source.source.reads, 32);
+        cache.begin_frame(5_000_000_000);
+        let old = cache.request(b"C:\\P0.ICO", 16, false).unwrap().pixels;
+        let request = cache.take_request().unwrap();
+        assert!(!cache.complete(request, Refresh::Retry));
+        for now in [5_000_000_001, 5_999_999_999] {
+            cache.begin_frame(now);
+            assert_eq!(cache.request(b"C:\\P0.ICO", 16, false).unwrap().pixels, old);
+            assert!(
+                !cache.busy(),
+                "worker creation failure retains pixels and full retry backoff"
+            );
+        }
+        cache.begin_frame(6_000_000_000);
+        let _ = cache.request(b"C:\\P0.ICO", 16, false);
+        let old_request = cache.take_request().unwrap();
+        let old_result = old_request.read(&mut source);
+        cache.invalidate();
+        assert!(cache.request(b"C:\\P0.ICO", 16, false).is_none());
+        let current = cache.take_request().unwrap();
+        assert!(
+            !cache.complete(old_request, old_result),
+            "late joined old epoch cannot publish or clear new work"
+        );
+        assert!(cache.in_flight == Some(current));
+        assert!(cache.complete(current, current.read(&mut source)));
+        cache.begin_frame(11_000_000_000);
+        let _ = cache.request(b"C:\\P0.ICO", 16, false);
+        let request = cache.take_request().unwrap();
+        assert!(cache.complete(request, Refresh::Failed));
+        assert!(
+            cache.request(b"C:\\P0.ICO", 16, false).is_none(),
+            "a failed source replaces stale pixels with the ordinary fallback"
+        );
+        assert!(!cache.busy());
+    }
+    #[test]
+    fn d091_changed_during_read_and_unavailable_watch_never_bless_cached_bytes() {
+        let mut cache = Cache::new().unwrap();
+        let mut source = WatchedSource::new();
+        source.mutate_during_read = true;
+        cache.begin_frame(0);
+        let _ = cache.request(b"C:\\RACE.ICO", 32, false);
+        let request = cache.take_request().unwrap();
+        assert!(cache.complete(request, request.read(&mut source)));
+        assert!(
+            cache
+                .request(b"C:\\RACE.ICO", 32, false)
+                .unwrap()
+                .watch
+                .is_none()
+        );
+        source.mutate_during_read = false;
+        cache.begin_frame(5_000_000_000);
+        let _ = cache.request(b"C:\\RACE.ICO", 32, false);
+        let request = cache.take_request().unwrap();
+        cache.complete(request, request.read(&mut source));
+        assert_eq!(
+            source.source.reads, 2,
+            "a change during reading cannot skip the next read"
+        );
+        source.revision = None;
+        source.source.kind = 3;
+        cache.begin_frame(10_000_000_000);
+        let old = cache.request(b"C:\\RACE.ICO", 32, false).unwrap().pixels;
+        let request = cache.take_request().unwrap();
+        assert!(cache.complete(request, request.read(&mut source)));
+        assert_ne!(
+            cache.request(b"C:\\RACE.ICO", 32, false).unwrap().pixels,
+            old
+        );
+        assert_eq!(
+            source.source.reads, 3,
+            "unavailable watches retain actual content revalidation"
+        );
     }
 }
