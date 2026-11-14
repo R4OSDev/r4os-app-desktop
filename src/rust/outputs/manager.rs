@@ -466,15 +466,26 @@ impl<'a> Manager<'a> {
     }
     pub(crate) fn fail(&mut self, index: usize, now: u64) {
         let slot = &mut self.slots[index];
-        if !slot.failed {
-            if let Some(owner) = slot.resource.gpu() {
-                let at = (self.native_failure_count % self.native_failures.len() as u64) as usize;
-                self.native_failures[at] = Some(owner.failure_observation(slot.target));
+        let failure = slot
+            .resource
+            .gpu()
+            .map(|owner| owner.failure_observation(slot.target));
+        // A scene that exceeds even the raster fallback's bounded capacity
+        // does not establish a broken device. Retire normally and allow a
+        // bounded native retry on this same connector/device generation.
+        let capacity = failure.is_some_and(|f| {
+            f.capture_error == Some(crate::render::primitive_assets::Error::Capacity)
+        });
+        if !slot.failed && !capacity {
+            if let Some(observation) = failure {
+                let at =
+                    (self.native_failure_count % self.native_failures.len() as u64) as usize;
+                self.native_failures[at] = Some(observation);
                 self.native_failure_count = self.native_failure_count.saturating_add(1);
             }
         }
         slot.failed = true;
-        if slot.resource.gpu().is_some() {
+        if slot.resource.gpu().is_some() && !capacity {
             let target = slot.target;
             let at = self
                 .software_targets

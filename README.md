@@ -83,6 +83,19 @@ its own ordered working-target writes, external producer dependencies, consumer
 receipts, deadlines and source read leases retain their existing barriers.
 This reduces dependency bookkeeping without asserting parallel GR execution.
 
+## Native raster capacity (0.91.1)
+
+Opaque GUI `raster` commands use one XRGB texture primitive per image, including
+scaled and clipped 128x128 images. Their unused high byte remains ignored.
+The native recorder retries a capacity-limited scene once with ordinary layers
+painted into bounded CPU scratch textures. It returns all unsubmitted external
+read loans before retry; native external images keep their own exact leases.
+Premultiplied layer channels survive the straight-ARGB texture conversion
+exactly. A later scene uses ordinary primitive recording again. Exhausting the
+fallback's own capacity retains bounded output retirement/retry without marking
+the connector generation permanently software-only. Device failures retain the
+existing device failure policy.
+
 ## Build and focused checks
 
 Run `./Build.sh` on Linux or `Build.bat` on Windows. The thin launchers share

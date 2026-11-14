@@ -49,6 +49,9 @@ impl<'a, 'pixels> Painter<'a, 'pixels> {
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
+    pub fn records_primitives(&self) -> bool {
+        self.recording.is_some()
+    }
     /// Reborrow this current layer for a UI scope. Neither scene nor command
     /// recorder is aliased, and the original clip remains the admission bound.
     pub fn reborrow(&mut self) -> Painter<'_, 'pixels> {

@@ -102,6 +102,7 @@ struct Capture<'a, M: Memory> {
     reads: &'a mut Reads,
     windows: &'a mut Set<M, Consumer>,
     recording_replay: Option<&'a RecordingReplay>,
+    rasterize: bool,
     finished: bool,
 }
 impl<M: Memory> Capture<'_, M> {
@@ -166,6 +167,9 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
         damage: Rect,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
+        if self.rasterize {
+            return self.raster_layer(key, bounds, damage, paint);
+        }
         // Only NativeOutput computed this capture's reusable mask. Keep the
         // immutable engine snapshot separate from the mutable cache/frame,
         // and end this borrow before any external read can change the engine.
@@ -185,6 +189,9 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
         background: u32,
         paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
     ) -> Result<bool> {
+        if self.rasterize {
+            return self.raster_layer(key, bounds, damage, paint);
+        }
         let background = self.solid_background(bounds, background);
         let replay = self.cache.view().map(|_| {
             self.recording_replay
@@ -201,7 +208,13 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
             paint,
         )
     }
-    fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()> {
+    fn external(
+        &mut self,
+        window: usize,
+        key: u32,
+        bounds: Rect,
+        damage: &[Rect],
+    ) -> Result<()> {
         self.reads.capture(
             self.windows,
             self.engine,
@@ -212,6 +225,86 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
             damage,
         )
     }
+}
+impl<M: Memory> Capture<'_, M> {
+    fn raster_layer(
+        &mut self,
+        key: u32,
+        bounds: Rect,
+        damage: Rect,
+        paint: impl FnOnce(&mut Painter<'_, '_>) -> Result<()>,
+    ) -> Result<bool> {
+        use super::{
+            pixels::PixelBytes,
+            primitive_image::{Format, Picture, View},
+            scene::{CpuScene, intersect},
+        };
+        let desktop = self
+            .cache
+            .view()
+            .map_or(Ok(self.cache.screen()), super::output_geometry::logical)?;
+        let Some(bounds) = intersect(bounds, desktop).filter(|r| r.intersects(damage)) else {
+            return Ok(false);
+        };
+        let bytes = CpuScene::required_bytes(bounds.w, bounds.h).ok_or(Error::Bounds)?;
+        // The fallback is cold and bounded by the same layer workspace budget.
+        // No scratch image escapes the immediate content-keyed texture copy.
+        self.cache.reserve_workspace(bytes)?;
+        let result = (|| {
+            let mut pixels = Vec::new();
+            pixels
+                .try_reserve_exact(bytes / 4)
+                .map_err(|_| Error::OutOfMemory)?;
+            pixels.resize(bytes / 4, 0);
+            let mut scene = CpuScene::layer(&mut pixels, bounds).ok_or(Error::Bounds)?;
+            paint(&mut Painter::cpu(&mut scene))?;
+            // CPU layers are premultiplied. The ordinary ARGB texture input is
+            // straight alpha; this inverse quantization round-trips every valid
+            // premultiplied channel exactly through View::pixel's quantizer.
+            for pixel in &mut pixels {
+                *pixel = straight_alpha(*pixel)?;
+            }
+            self.cache
+                .paint(key, bounds, damage, Some(self.frame), None, |p| {
+                    p.picture(Picture {
+                        view: View::new(
+                            Format::Argb,
+                            bounds.w as u32,
+                            bounds.h as u32,
+                            bounds.w as usize * 4,
+                            PixelBytes::from_words(&pixels).bytes(),
+                        ),
+                        viewport: bounds,
+                        clip: bounds,
+                        source_x: 0,
+                        source_y: 0,
+                        guest_w: bounds.w as u32,
+                        guest_h: bounds.h as u32,
+                    })
+                })
+        })();
+        self.cache.release_workspace(bytes);
+        result
+    }
+}
+fn straight_alpha(pixel: u32) -> Result<u32> {
+    let alpha = pixel >> 24;
+    if alpha == 0 {
+        return if pixel == 0 {
+            Ok(0)
+        } else {
+            Err(Error::Invalid)
+        };
+    }
+    let mut result = alpha << 24;
+    for shift in [0, 8, 16] {
+        let channel = (pixel >> shift) & 255;
+        if channel > alpha {
+            return Err(Error::Invalid);
+        }
+        result |= ((channel * 255 + alpha / 2) / alpha) << shift;
+    }
+    Ok(result)
 }
 impl<M: Memory> Drop for Capture<'_, M> {
     fn drop(&mut self) {
@@ -307,6 +400,79 @@ unsafe fn capture_impl<M: Memory>(
     shapes: &mut impl Shapes,
     mut recording_replay: Option<&mut RecordingReplay>,
 ) -> Result<Stats> {
+    with_capacity_fallback(
+        cache,
+        frame,
+        engine,
+        reads,
+        windows,
+        |cache, frame, engine, reads, windows, rasterize| unsafe {
+            capture_once(
+                cache,
+                frame,
+                engine,
+                reads,
+                windows,
+                mode,
+                scene,
+                damage,
+                fonts_cache,
+                fonts,
+                icons,
+                shapes,
+                recording_replay.as_deref_mut(),
+                rasterize,
+            )
+        },
+    )
+}
+fn with_capacity_fallback<M: Memory, T>(
+    cache: &mut Cache,
+    frame: &mut Frame,
+    engine: &mut Engine,
+    reads: &mut Reads,
+    windows: &mut Set<M, Consumer>,
+    mut attempt: impl FnMut(
+        &mut Cache,
+        &mut Frame,
+        &mut Engine,
+        &mut Reads,
+        &mut Set<M, Consumer>,
+        bool,
+    ) -> Result<T>,
+) -> Result<T> {
+    let result = attempt(cache, frame, engine, reads, windows, false);
+    if result.as_ref().err() != Some(&Error::Capacity) {
+        return result;
+    }
+    // Recording has submitted no work. Return each exact source loan before
+    // retrying; an unacknowledged return keeps the owners and refuses retry.
+    if engine.active()
+        || !engine.jobs.drained()
+        || !engine.finish_external(&mut reads.completion(windows), false)
+        || !reads.empty()
+    {
+        return Err(Error::State);
+    }
+    cache.cancel();
+    attempt(cache, frame, engine, reads, windows, true)
+}
+unsafe fn capture_once<M: Memory>(
+    cache: &mut Cache,
+    frame: &mut Frame,
+    engine: &mut Engine,
+    reads: &mut Reads,
+    windows: &mut Set<M, Consumer>,
+    mode: Mode,
+    scene: &Scene<'_>,
+    damage: &[Rect],
+    fonts_cache: &mut FontCache,
+    fonts: &mut impl Fonts,
+    icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
+    shapes: &mut impl Shapes,
+    mut recording_replay: Option<&mut RecordingReplay>,
+    rasterize: bool,
+) -> Result<Stats> {
     if engine.active()
         || !reads.empty()
         || !matches!(
@@ -323,7 +489,7 @@ unsafe fn capture_impl<M: Memory>(
     frame.set_mirror(false)?;
     cache.start(mode, Some(frame))?;
     let changed = Some(Regions::from_slice(damage));
-    if matches!(mode, Mode::NativeOutput(_)) {
+    if !rasterize && matches!(mode, Mode::NativeOutput(_)) {
         if let Some(replay) = recording_replay.as_deref_mut() {
             replay.prepare(cache, frame, changed)?;
         } else {
@@ -344,6 +510,7 @@ unsafe fn capture_impl<M: Memory>(
         reads,
         windows,
         recording_replay: recording_replay.as_deref(),
+        rasterize,
         finished: false,
     };
     let stats = unsafe {

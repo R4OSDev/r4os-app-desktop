@@ -324,31 +324,65 @@ fn raster(
     {
         return Ok(());
     }
-    let Some(source) = resource(resources, command).and_then(PixelBytes::new) else {
+    let Some(bytes) = resource(resources, command) else {
         return Ok(());
     };
-    let scale = command.parameter0 as i64;
-    for row in 0..command.h as usize {
-        let mut start = 0;
-        while start < command.w as usize {
-            let color = source.word(row * command.w as usize + start);
-            let mut end = start + 1;
-            while end < command.w as usize && source.word(row * command.w as usize + end) == color {
-                end += 1;
+    if !painter.records_primitives() {
+        // Keep the original CPU RGB normalization. The generic XRGB copy may
+        // retain its unused high byte in a non-premultiplied destination.
+        let Some(source) = PixelBytes::new(bytes) else {
+            return Ok(());
+        };
+        let scale = command.parameter0 as i64;
+        for row in 0..command.h as usize {
+            let mut start = 0;
+            while start < command.w as usize {
+                let color = source.word(row * command.w as usize + start);
+                let mut end = start + 1;
+                while end < command.w as usize
+                    && source.word(row * command.w as usize + end) == color
+                {
+                    end += 1;
+                }
+                if let Some(rect) = clipped(
+                    bounds,
+                    i64::from(bounds.x) + i64::from(command.x) + start as i64 * scale,
+                    i64::from(bounds.y) + i64::from(command.y) + row as i64 * scale,
+                    (end - start) as i64 * scale,
+                    scale,
+                ) {
+                    painter.fill(rect, color & 0xffffff)?;
+                }
+                start = end;
             }
-            if let Some(rect) = clipped(
-                bounds,
-                i64::from(bounds.x) + i64::from(command.x) + start as i64 * scale,
-                i64::from(bounds.y) + i64::from(command.y) + row as i64 * scale,
-                (end - start) as i64 * scale,
-                scale,
-            ) {
-                painter.fill(rect, color & 0xffffff)?;
-            }
-            start = end;
         }
+        return Ok(());
     }
-    Ok(())
+    let Some(viewport) = viewport(
+        bounds,
+        command.x,
+        command.y,
+        command.w * command.parameter0 as u32,
+        command.h * command.parameter0 as u32,
+    ) else {
+        return Ok(());
+    };
+    picture(
+        painter,
+        Image::new(
+            Format::Xrgb,
+            command.w,
+            command.h,
+            command.w as usize * 4,
+            bytes,
+        ),
+        viewport,
+        bounds,
+        0,
+        0,
+        command.w,
+        command.h,
+    )
 }
 #[cfg(test)]
 #[path = "../../../Tests/RustNative/frame_pixels.rs"]

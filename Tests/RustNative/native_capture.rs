@@ -84,7 +84,8 @@ fn recorded(
         // Fill the real original entry table. On the next frame intern must
         // evict this old page and actually overwrite its first source tile.
         assert_eq!(frame.assets.evictions, 0);
-        for n in frame.assets.misses as usize..crate::render::primitive_assets::ENTRY_CAPACITY {
+        for n in frame.assets.misses as usize..crate::render::primitive_assets::ENTRY_CAPACITY
+        {
             let pixel = [0xff200000 | n as u32];
             frame
                 .assets
@@ -159,6 +160,7 @@ fn recorded(
         reads: &mut reads,
         windows: &mut windows,
         recording_replay: replay.as_deref(),
+        rasterize: false,
         finished: false,
     };
     capture
@@ -433,6 +435,181 @@ fn productive_adapter_reuses_cpu_capture_and_rejects_damage_geometry_asset_and_c
 }
 
 #[test]
+fn capacity_fallback_keeps_exact_premultiplied_channels_and_native_output_recovers() {
+    for alpha in 0..=255u32 {
+        for channel in 0..=alpha {
+            let premultiplied = (alpha << 24) | channel * 0x010101;
+            let straight = [straight_alpha(premultiplied).unwrap()];
+            let view = View::new(
+                Format::Argb,
+                1,
+                1,
+                4,
+                PixelBytes::from_words(&straight).bytes(),
+            );
+            assert_eq!(view.pixel(0, 0), premultiplied);
+        }
+    }
+    assert_eq!(straight_alpha(1), Err(Error::Invalid));
+    assert_eq!(straight_alpha(0x01020000), Err(Error::Invalid));
+    gpu::with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut engine = Engine::new().unwrap();
+        let mut reads = Reads::default();
+        let mut windows = Set::new(NoExternal);
+        let view = super::super::output_geometry::topology::Viewport {
+            pixel_w: 8,
+            pixel_h: 8,
+            ..Default::default()
+        };
+        for count in [9000, 3] {
+            let paint = |p: &mut Painter<'_, '_>, first| {
+                for n in first..count {
+                    p.fill(Rect::new(n % 2, 0, 2, 2), n as u32 * 77)?;
+                }
+                let argb = [0x80ff4000];
+                p.picture(Picture {
+                    view: View::new(
+                        Format::Argb,
+                        1,
+                        1,
+                        4,
+                        PixelBytes::from_words(&argb).bytes(),
+                    ),
+                    viewport: Rect::new(4, 2, 2, 2),
+                    clip: FULL,
+                    source_x: 0,
+                    source_y: 0,
+                    guest_w: 1,
+                    guest_h: 1,
+                })
+            };
+            // The last two opaque overlapping writes determine these pixels.
+            // Keep the independent original GPU/CMM oracle for the transparent
+            // layer: blending display RGB bytes directly would skip its linear
+            // color conversion and is not the output composition contract.
+            let mut ref_cache = Cache::new(1024 * 1024).unwrap();
+            let mut ref_frame = Frame::new().unwrap();
+            let mut reference = Engine::new().unwrap();
+            reference.destination = crate::render::gpu::engine::Destination::Readback;
+            ref_frame.set_mirror(false).unwrap();
+            ref_cache
+                .start(Mode::NativeOutput(view), Some(&mut ref_frame))
+                .unwrap();
+            ref_cache
+                .paint(1, FULL, FULL, Some(&mut ref_frame), None, |p| {
+                    p.fill(FULL, 0x203040)
+                })
+                .unwrap();
+            ref_cache
+                .paint(2, FULL, FULL, Some(&mut ref_frame), None, |p| {
+                    paint(p, count - 2)
+                })
+                .unwrap();
+            ref_cache.finish(Some(&ref_frame)).unwrap();
+            ref_cache.complete_scene = true;
+            reference
+                .composition_damage(view, Some(FULL.into()))
+                .unwrap();
+            gpu::begin(app, device, &mut reference, &ref_cache, Some(&ref_frame));
+            gpu::pump(
+                app,
+                device,
+                &mut reference,
+                &mut ref_cache,
+                Some(&mut ref_frame),
+                Progress::Copied,
+            );
+            let expected = gpu::pixels(app, device, &reference).map(|pixel| pixel & 0xffffff);
+            reference.close(&device.bind(app).unwrap()).unwrap();
+            let mut attempts = Vec::new();
+            let submissions = gpu::stats()[0];
+            with_capacity_fallback(
+                &mut cache,
+                &mut frame,
+                &mut engine,
+                &mut reads,
+                &mut windows,
+                |cache, frame, engine, reads, windows, rasterize| {
+                    attempts.push(rasterize);
+                    assert_eq!(
+                        gpu::stats()[0],
+                        submissions,
+                        "failed recording never submitted work"
+                    );
+                    frame.set_mirror(false)?;
+                    cache.start(Mode::NativeOutput(view), Some(frame))?;
+                    let mut capture = Capture {
+                        cache,
+                        frame,
+                        engine,
+                        reads,
+                        windows,
+                        recording_replay: None,
+                        rasterize,
+                        finished: false,
+                    };
+                    capture.paint(1, FULL, FULL, |p| p.fill(FULL, 0x203040))?;
+                    capture.paint(2, FULL, FULL, |p| paint(p, 0))?;
+                    capture.cache.finish(Some(capture.frame))?;
+                    capture.cache.complete_scene = true;
+                    capture
+                        .engine
+                        .composition_damage(view, Some(FULL.into()))
+                        .unwrap();
+                    capture.finished = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                attempts.as_slice(),
+                if count == 9000 {
+                    &[false, true][..]
+                } else {
+                    &[false][..]
+                }
+            );
+            assert_eq!(
+                cache.reserved(),
+                0,
+                "fallback scratch leaves no retained layer pixels"
+            );
+            assert!(frame.commands().len() < 8);
+            gpu::begin(app, device, &mut engine, &cache, Some(&frame));
+            gpu::pump(
+                app,
+                device,
+                &mut engine,
+                &mut cache,
+                Some(&mut frame),
+                Progress::Copied,
+            );
+            assert_eq!(gpu::visible(), expected);
+            assert!(reads.empty() && engine.fault.is_none());
+        }
+        for error in [Error::Graphics, Error::Capacity] {
+            let mut attempts = 0;
+            let result = with_capacity_fallback(
+                &mut cache,
+                &mut frame,
+                &mut engine,
+                &mut reads,
+                &mut windows,
+                |_, _, _, _, _, _| {
+                    attempts += 1;
+                    Err::<(), _>(error)
+                },
+            );
+            assert_eq!(result, Err(error));
+            assert_eq!(attempts, if error == Error::Capacity { 2 } else { 1 });
+        }
+        engine.close(&device.bind(app).unwrap()).unwrap();
+    });
+}
+
+#[test]
 fn solid_shell_backdrop_keeps_original_pixels_and_revalidates_replay_dependencies() {
     use super::super::output_geometry::{
         self as geometry,
@@ -470,6 +647,7 @@ fn solid_shell_backdrop_keeps_original_pixels_and_revalidates_replay_dependencie
             reads: &mut reads,
             windows: &mut windows,
             recording_replay: Some(replay),
+            rasterize: false,
             finished: false,
         };
         let background = if turn >= 2 { 0x7821af } else { 0x123456 };

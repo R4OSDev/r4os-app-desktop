@@ -290,3 +290,82 @@ fn exact_shared_generation_and_declared_span_do_not_admit_other_bytes() {
     absent.commands.remove(2);
     assert_eq!(execute(&f).0, execute(&absent).0);
 }
+
+#[test]
+fn noisy_128_rasters_stay_two_native_pictures_at_every_integer_scale() {
+    use crate::render::primitive_frame::Frame;
+    // Every neighboring pixel differs; the unused top byte also varies.
+    let pixels: Vec<u32> = (0..128 * 128u32)
+        .map(|n| n.wrapping_mul(0x9e3779b9))
+        .collect();
+    let resources = words(&pixels);
+    let mut frame = Frame::new().unwrap();
+    frame.set_mirror(false).unwrap();
+    for scale in 1..=16 {
+        let bounds = Rect::new(-17, 11, 272 * scale, 128 * scale);
+        frame.start(scale as u64).unwrap();
+        frame.begin(0, bounds).unwrap();
+        let mut painter = Painter::recorded(None, &mut frame, bounds, bounds);
+        for x in [0, 144 * scale] {
+            let mut c = cmd(a::gui_frame_command_kind_raster, x, 0, 128, 128);
+            c.parameter0 = scale as u64;
+            c.resource_bytes = resources.len() as u64;
+            raster(&mut painter, bounds, &c, &resources).unwrap();
+        }
+        frame.end().unwrap();
+        assert_eq!(frame.commands().len(), 2);
+        assert!(
+            frame
+                .commands()
+                .iter()
+                .all(|c| c.texture.is_some() && c.opaque && !c.over)
+        );
+        assert_eq!(frame.commands()[0].texture, frame.commands()[1].texture);
+        let c = frame.commands()[0];
+        let texture = frame.assets.texture(c.texture.unwrap() as usize);
+        for y in 0..128usize {
+            for x in 0..128usize {
+                assert_eq!(
+                    texture.pixels()[(c.source.y as usize + y) * texture.width as usize
+                        + c.source.x as usize
+                        + x],
+                    0xff000000 | (pixels[y * 128 + x] & 0xffffff)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn raster_picture_keeps_original_clip_scaling_unaligned_bytes_and_opaque_rgb() {
+    let colors = [0x00112233, 0x80445566, 0xff778899, 0xdeadbeef];
+    let mut bytes = vec![0xee];
+    bytes.extend(words(&colors));
+    for scale in 1..=16 {
+        let mut pixels = [0x010203; 35];
+        let mut scene = CpuScene::new(&mut pixels, 7, 5).unwrap();
+        scene.set_paint_clip(Rect::new(2, 1, 4, 3));
+        let bounds = Rect::new(1, 0, 5, 4);
+        let mut c = cmd(a::gui_frame_command_kind_raster, -1, 0, 2, 2);
+        c.parameter0 = scale as u64;
+        c.resource_offset = 1;
+        c.resource_bytes = 16;
+        raster(&mut Painter::cpu(&mut scene), bounds, &c, &bytes).unwrap();
+        for y in 0..5usize {
+            for x in 0..7usize {
+                let expected = if x >= 2
+                    && x < 6
+                    && y >= 1
+                    && y < 4
+                    && x < 2 * scale as usize
+                    && y < 2 * scale as usize
+                {
+                    colors[(y / scale as usize) * 2 + x / scale as usize] & 0xffffff
+                } else {
+                    0x010203
+                };
+                assert_eq!(pixels[y * 7 + x], expected, "scale={scale} x={x} y={y}");
+            }
+        }
+    }
+}
