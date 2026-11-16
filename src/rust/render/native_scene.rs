@@ -21,6 +21,8 @@ use alloc::vec::Vec;
 pub struct RecordingReplay {
     commands: Vec<super::primitive_frame::Command>,
     reusable: [bool; super::layers::CAPACITY],
+    retained: [bool; super::layers::CAPACITY],
+    changed: Option<Regions>,
     frame: u64,
     view: Option<super::output_geometry::topology::Viewport>,
     complete: bool,
@@ -34,6 +36,8 @@ impl RecordingReplay {
         Ok(Self {
             commands,
             reusable: [false; super::layers::CAPACITY],
+            retained: [false; super::layers::CAPACITY],
+            changed: None,
             frame: 0,
             view: None,
             complete: false,
@@ -52,6 +56,8 @@ impl RecordingReplay {
         changed: Option<Regions>,
     ) -> Result<()> {
         self.reusable.fill(false);
+        self.retained.fill(false);
+        self.changed = changed;
         let Some(changed) = changed else {
             return Ok(());
         };
@@ -64,10 +70,8 @@ impl RecordingReplay {
             return Ok(());
         }
         for (i, entry) in cache.entries().iter().enumerate() {
-            self.reusable[i] = entry.initialized
-                && !entry.external
-                && entry.frame == self.frame
-                && !changed.intersects(entry.capture_bounds);
+            self.retained[i] = entry.initialized && !entry.external && entry.frame == self.frame;
+            self.reusable[i] = self.retained[i] && !changed.intersects(entry.capture_bounds);
         }
         for command in &self.commands {
             if let Some(texture) = command.texture {
@@ -76,6 +80,7 @@ impl RecordingReplay {
                     .contains(command.content, texture, command.source)
                 {
                     self.reusable[command.layer as usize] = false;
+                    self.retained[command.layer as usize] = false;
                 }
             }
         }
@@ -92,6 +97,8 @@ impl RecordingReplay {
         super::layers::Replay {
             commands: &self.commands,
             reusable: &self.reusable,
+            retained: &self.retained,
+            changed: self.changed,
         }
     }
 }
@@ -208,13 +215,7 @@ impl<M: Memory> compositor::Capture for Capture<'_, M> {
             paint,
         )
     }
-    fn external(
-        &mut self,
-        window: usize,
-        key: u32,
-        bounds: Rect,
-        damage: &[Rect],
-    ) -> Result<()> {
+    fn external(&mut self, window: usize, key: u32, bounds: Rect, damage: &[Rect]) -> Result<()> {
         self.reads.capture(
             self.windows,
             self.engine,

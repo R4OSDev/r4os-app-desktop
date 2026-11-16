@@ -27,6 +27,47 @@ pub struct Command {
     pub grid: GfxSampleGrid,
 }
 impl Command {
+    pub(crate) fn same(&self, y: &Self) -> bool {
+        let grid = |v: GfxSampleGrid| {
+            [
+                v.enabled as i64,
+                v.rotation as i64,
+                v.scale as i64,
+                v.pixel_width as i64,
+                v.pixel_height as i64,
+                v.target_x as i64,
+                v.target_y as i64,
+                v.reserved as i64,
+                v.viewport_x as i64,
+                v.viewport_y as i64,
+                v.viewport_width as i64,
+                v.viewport_height as i64,
+                v.guest_width as i64,
+                v.guest_height as i64,
+                v.source_x as i64,
+                v.source_y as i64,
+            ]
+        };
+        self.layer == y.layer
+            && self.texture == y.texture
+            && self.content == y.content
+            && self.source == y.source
+            && self.target == y.target
+            && self.scissor == y.scissor
+            && self.color == y.color
+            && self.over == y.over
+            && self.opaque == y.opaque
+            && grid(self.grid) == grid(y.grid)
+    }
+    /// Normalize only solid fills; textured sampling retains its original
+    /// viewport/grid and source coordinates when narrowing the scissor.
+    pub(crate) fn clipped(mut self, cut: Rect) -> Option<Self> {
+        self.scissor = intersect(intersect(self.target, self.scissor)?, cut)?;
+        if self.texture.is_none() {
+            self.target = self.scissor;
+        }
+        Some(self)
+    }
     fn fill(layer: u8, rect: Rect, color: u32) -> Self {
         Self {
             layer,
@@ -272,6 +313,13 @@ impl Frame {
             }
         }
         self.commands.push(value);
+        Ok(())
+    }
+    pub(crate) fn truncate_commands(&mut self, count: usize) -> Result<()> {
+        if self.active.is_some() || self.failure.is_some() || count > self.commands.len() {
+            return Err(Error::State);
+        }
+        self.commands.truncate(count);
         Ok(())
     }
     fn local(&self, rect: Rect) -> Result<Rect> {

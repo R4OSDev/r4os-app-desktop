@@ -84,8 +84,7 @@ fn recorded(
         // Fill the real original entry table. On the next frame intern must
         // evict this old page and actually overwrite its first source tile.
         assert_eq!(frame.assets.evictions, 0);
-        for n in frame.assets.misses as usize..crate::render::primitive_assets::ENTRY_CAPACITY
-        {
+        for n in frame.assets.misses as usize..crate::render::primitive_assets::ENTRY_CAPACITY {
             let pixel = [0xff200000 | n as u32];
             frame
                 .assets
@@ -199,6 +198,174 @@ fn recorded(
 }
 
 #[test]
+fn local_native_capture_retains_complete_maximized_layer_and_skips_unaffected_picture_work() {
+    let full = Rect::new(0, 0, 1280, 720);
+    let local = Rect::new(5, 5, 1, 1);
+    let view = super::super::output_geometry::topology::Viewport {
+        pixel_w: 1280,
+        pixel_h: 720,
+        ..Default::default()
+    };
+    let mut cache = Cache::new(16 * 1024 * 1024).unwrap();
+    let mut frame = Frame::new().unwrap();
+    let mut engine = Engine::new().unwrap();
+    let mut replay = RecordingReplay::new().unwrap();
+    let mut full_rebuilds = 0;
+    let damage_sequence = [full, full]
+        .into_iter()
+        .chain((0..180).map(|n| Rect::new((n % 60) * 20 + local.x, (n / 60) * 24 + local.y, 1, 1)));
+    for (sample, damage) in damage_sequence.enumerate() {
+        replay.save(&cache, &mut frame);
+        frame.set_mirror(false).unwrap();
+        cache
+            .start(Mode::NativeOutput(view), Some(&mut frame))
+            .unwrap();
+        replay
+            .prepare(&cache, &mut frame, Some(damage.into()))
+            .unwrap();
+        let original_interns = frame.assets.hits + frame.assets.misses;
+        let calls = Cell::new(0);
+        let clip = Cell::new(Rect::ZERO);
+        let mut reads = Reads::default();
+        let mut windows = Set::new(NoExternal);
+        let start = std::time::Instant::now();
+        let mut capture = Capture {
+            cache: &mut cache,
+            frame: &mut frame,
+            engine: &mut engine,
+            reads: &mut reads,
+            windows: &mut windows,
+            recording_replay: Some(&replay),
+            rasterize: false,
+            finished: false,
+        };
+        capture
+            .paint(1, full, full, |p| p.fill(full, 0x203040))
+            .unwrap();
+        capture
+            .paint(2, full, full, |p| {
+                clip.set(p.clip());
+                for y in 0..20 {
+                    for x in 0..60 {
+                        let rect = Rect::new(x * 20, y * 24, 16, 16);
+                        if !p.visible(rect) {
+                            continue;
+                        }
+                        calls.set(calls.get() + 1);
+                        let white = [0xffffffffu32];
+                        p.picture(Picture {
+                            view: View::new(
+                                Format::Argb,
+                                1,
+                                1,
+                                4,
+                                PixelBytes::from_words(&white).bytes(),
+                            ),
+                            viewport: rect,
+                            clip: full,
+                            source_x: 0,
+                            source_y: 0,
+                            guest_w: 1,
+                            guest_h: 1,
+                        })?;
+                    }
+                }
+                for n in 0..sample.saturating_sub(1) {
+                    p.fill(
+                        Rect::new(
+                            (n % 60) as i32 * 20 + local.x,
+                            (n / 60) as i32 * 24 + local.y,
+                            1,
+                            1,
+                        ),
+                        0x00ff00,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        capture.cache.finish(Some(capture.frame)).unwrap();
+        capture.cache.complete_scene = true;
+        capture.finished = true;
+        let elapsed = start.elapsed().as_nanos();
+        // Independent whole-scene oracle: these source images are solid
+        // white. Replay the retained local scissors into two separate layers,
+        // then compose their opaque pixels over the original solid backdrop.
+        if sample < 3 || sample == 181 {
+            let mut layers = [alloc::vec![0u32; 1280 * 720], alloc::vec![0u32; 1280 * 720]];
+            for command in capture.frame.commands() {
+                let color = if command.texture.is_some() {
+                    0xffffffff
+                } else {
+                    command.color
+                };
+                let clip =
+                    crate::render::scene::intersect(command.target, command.scissor).unwrap();
+                for y in clip.y..clip.bottom() {
+                    let first = (y * 1280 + clip.x) as usize;
+                    layers[command.layer as usize][first..first + clip.w as usize].fill(color);
+                }
+            }
+            for y in 0..720usize {
+                for x in 0..1280usize {
+                    let i = y * 1280 + x;
+                    let actual = if layers[1][i] >> 24 == 255 {
+                        layers[1][i]
+                    } else {
+                        layers[0][i]
+                    };
+                    let changed_pixel = x >= 5
+                        && y >= 5
+                        && (x - 5) % 20 == 0
+                        && (y - 5) % 24 == 0
+                        && (x - 5) / 20 < 60
+                        && (y - 5) / 24 * 60 + (x - 5) / 20 < sample.saturating_sub(1);
+                    let expected = if changed_pixel {
+                        0xff00ff00
+                    } else if x < 1200 && x % 20 < 16 && y < 480 && y % 24 < 16 {
+                        0xffffffff
+                    } else {
+                        0xff203040
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "complete scene sample{sample}, pixel{x},{y}"
+                    );
+                }
+            }
+        }
+        let interns = capture.frame.assets.hits + capture.frame.assets.misses - original_interns;
+        if sample < 3 || clip.get() == full || sample == 181 {
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"native CPU recording; no GPU submission\",\"sample\":{sample},\"capture_ns\":{elapsed},\"picture_calls\":{},\"asset_interns\":{interns},\"scene_commands\":{}}}",
+                calls.get(),
+                capture.frame.commands().len()
+            );
+        }
+        if sample >= 2 && clip.get() != full {
+            assert_eq!(clip.get(), damage);
+            assert_eq!(calls.get(), 1);
+            assert_eq!(interns, 1);
+            assert!(
+                capture.frame.commands().len() >= 1200,
+                "complete immutable scene remains available"
+            );
+        } else {
+            assert_eq!(calls.get(), 1200);
+            assert_eq!(interns, 1200);
+            if sample >= 2 {
+                full_rebuilds += 1;
+            }
+        }
+        assert!(capture.frame.commands().len() < crate::render::primitive_frame::CAPACITY);
+    }
+    assert!(
+        full_rebuilds > 0,
+        "disjoint updates must compact retained fragments with a full native rebuild"
+    );
+}
+
+#[test]
 fn cpu_scene_replay_keeps_unchanged_tiles_without_inventing_gpu_residency() {
     gpu::with(|app, device| {
         let mut cache = Cache::new(1024 * 1024).unwrap();
@@ -305,6 +472,143 @@ fn cpu_scene_replay_keeps_unchanged_tiles_without_inventing_gpu_residency() {
         assert_eq!(gpu::visible(), expected);
         let session = device.bind(app).unwrap();
         transaction.close(&session).unwrap();
+    });
+}
+
+#[test]
+fn local_lower_update_keeps_unchanged_upper_alpha_and_complete_outside_pixels() {
+    gpu::with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut engine = Engine::new().unwrap();
+        let view = super::super::output_geometry::topology::Viewport {
+            pixel_w: 8,
+            pixel_h: 8,
+            ..Default::default()
+        };
+        let lower = Rect::new(2, 2, 4, 4);
+        let upper = Rect::new(3, 3, 2, 2);
+        let pixel = Rect::new(3, 3, 1, 1);
+        for (round, updated) in [false, true, true].into_iter().enumerate() {
+            let draws = engine.primitive_draws;
+            let damage = if updated { pixel } else { FULL };
+            engine.clear_sources().unwrap();
+            frame.set_mirror(false).unwrap();
+            cache
+                .start(Mode::NativeOutput(view), Some(&mut frame))
+                .unwrap();
+            engine
+                .reuse_capture(&cache, &mut frame, Some(damage.into()))
+                .unwrap();
+            let mut reads = Reads::default();
+            let mut windows = Set::new(NoExternal);
+            let mut capture = Capture {
+                cache: &mut cache,
+                frame: &mut frame,
+                engine: &mut engine,
+                reads: &mut reads,
+                windows: &mut windows,
+                recording_replay: None,
+                rasterize: false,
+                finished: false,
+            };
+            capture
+                .paint(1, FULL, FULL, |p| p.fill(FULL, 0x203040))
+                .unwrap();
+            capture
+                .paint(2, lower, FULL, |p| {
+                    let red = [0xffff0000u32];
+                    p.picture(Picture {
+                        view: View::new(
+                            Format::Argb,
+                            1,
+                            1,
+                            4,
+                            PixelBytes::from_words(&red).bytes(),
+                        ),
+                        viewport: lower,
+                        clip: FULL,
+                        source_x: 0,
+                        source_y: 0,
+                        guest_w: 1,
+                        guest_h: 1,
+                    })?;
+                    if updated {
+                        p.fill(pixel, 0x00ff00)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            capture
+                .paint(3, upper, FULL, |p| {
+                    let white = [0x80ffffffu32];
+                    p.picture(Picture {
+                        view: View::new(
+                            Format::Argb,
+                            1,
+                            1,
+                            4,
+                            PixelBytes::from_words(&white).bytes(),
+                        ),
+                        viewport: upper,
+                        clip: FULL,
+                        source_x: 0,
+                        source_y: 0,
+                        guest_w: 1,
+                        guest_h: 1,
+                    })
+                })
+                .unwrap();
+            capture.cache.finish(Some(capture.frame)).unwrap();
+            capture.cache.complete_scene = true;
+            capture
+                .engine
+                .composition_damage(view, Some(damage.into()))
+                .unwrap();
+            capture.finished = true;
+            drop(capture);
+            gpu::begin(app, device, &mut engine, &cache, Some(&frame));
+            gpu::pump(
+                app,
+                device,
+                &mut engine,
+                &mut cache,
+                Some(&mut frame),
+                Progress::Copied,
+            );
+            if round == 2 {
+                assert_eq!(
+                    engine.primitive_draws, draws,
+                    "identical local content keeps prior GPU recordings"
+                );
+            }
+            let mut expected = [0x203040; 64];
+            for y in 2..6 {
+                for x in 2..6 {
+                    expected[y * 8 + x] = if updated && x == 3 && y == 3 {
+                        0x00ff00
+                    } else {
+                        0xff0000
+                    };
+                }
+            }
+            for y in 3..5 {
+                for x in 3..5 {
+                    expected[y * 8 + x] = if updated && x == 3 && y == 3 {
+                        0xbcffbc
+                    } else {
+                        0xffbcbc
+                    };
+                }
+            }
+            assert_eq!(
+                gpu::visible(),
+                expected,
+                "updated{updated}: whole scene including upper alpha"
+            );
+        }
+        let session = device.bind(app).unwrap();
+        engine.close(&session).unwrap();
     });
 }
 
@@ -470,13 +774,7 @@ fn capacity_fallback_keeps_exact_premultiplied_channels_and_native_output_recove
                 }
                 let argb = [0x80ff4000];
                 p.picture(Picture {
-                    view: View::new(
-                        Format::Argb,
-                        1,
-                        1,
-                        4,
-                        PixelBytes::from_words(&argb).bytes(),
-                    ),
+                    view: View::new(Format::Argb, 1, 1, 4, PixelBytes::from_words(&argb).bytes()),
                     viewport: Rect::new(4, 2, 2, 2),
                     clip: FULL,
                     source_x: 0,

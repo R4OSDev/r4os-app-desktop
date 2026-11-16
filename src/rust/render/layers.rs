@@ -1,7 +1,7 @@
 //! Ordinary Desktop layer capture. Pixel/primitive storage remains here;
 //! presentation, external BO leases and job/fence retirement are separate.
 use super::{
-    geometry::{MAX_DAMAGE_REGIONS, Rect},
+    geometry::{MAX_DAMAGE_REGIONS, Rect, Regions},
     output_geometry as geometry,
     painter::Painter,
     primitive_assets::{Error, Result},
@@ -45,6 +45,21 @@ pub enum Mode {
 pub struct Replay<'a> {
     pub commands: &'a [Primitive],
     pub reusable: &'a [bool; CAPACITY],
+    pub retained: &'a [bool; CAPACITY],
+    pub changed: Option<Regions>,
+}
+
+// Disjoint pieces of an existing local command outside the replacement.
+fn outside(rect: Rect, cut: Rect) -> [Rect; 4] {
+    let Some(hit) = intersect(rect, cut) else {
+        return [rect, Rect::ZERO, Rect::ZERO, Rect::ZERO];
+    };
+    [
+        Rect::new(rect.x, rect.y, rect.w, hit.y - rect.y),
+        Rect::new(rect.x, hit.bottom(), rect.w, rect.bottom() - hit.bottom()),
+        Rect::new(rect.x, hit.y, hit.x - rect.x, hit.h),
+        Rect::new(hit.right(), hit.y, rect.right() - hit.right(), hit.h),
+    ]
 }
 pub struct Cache {
     entries: Vec<Entry>,
@@ -475,9 +490,12 @@ impl Cache {
         if entry.external {
             return Err(Error::State);
         }
+        let mut partial = None;
+        let mut partial_cut = Rect::ZERO;
+        let mut retained_start = 0;
         if !mirror
             && entry.solid_background == background
-            && replay.as_ref().is_some_and(|r| r.reusable[index])
+            && replay.is_some()
             && entry.initialized
             && entry.frame == self.frame - 1
             && entry.bounds == raster
@@ -490,7 +508,7 @@ impl Cache {
                 .iter()
                 .filter(|c| c.layer as usize == index)
                 .count();
-            if count != 0 {
+            if count != 0 && previous.reusable[index] {
                 let recording = recording.as_deref_mut().ok_or(Error::State)?;
                 if count > super::primitive_frame::CAPACITY - recording.commands().len() {
                     return Err(Error::Capacity);
@@ -507,6 +525,83 @@ impl Cache {
                 });
                 self.reused_captures = self.reused_captures.saturating_add(1);
                 return Ok(false);
+            }
+            // Retain a complete layer while recording only a local update.
+            // Exact unit-scale edges need no new filtering/fringe proof.
+            // Rebuild periodically before clipping fragments fill the budget.
+            if previous.retained[index]
+                && !entry.background_applied
+                // A short solid fill is already cheap and can compare equal
+                // to its prior GPU recording; fragmenting it adds work.
+                && count > 1
+                && previous.commands.iter().any(|c| c.layer as usize == index && c.texture.is_some())
+                && self.view.is_some_and(|v| v.scale == 120)
+                && previous.commands.len() <= super::primitive_frame::CAPACITY / 2
+                && count <= super::primitive_frame::CAPACITY / 4
+            {
+                let changed = previous.changed.and_then(|regions| {
+                    regions
+                        .as_slice()
+                        .iter()
+                        .filter_map(|r| intersect(*r, clipped))
+                        .reduce(Rect::merged)
+                });
+                if let Some(changed) = changed.filter(|r| *r != clipped) {
+                    let physical = geometry::raster_rect(self.view.unwrap(), changed)?;
+                    let cut = Rect::new(
+                        physical.x - raster.x,
+                        physical.y - raster.y,
+                        physical.w,
+                        physical.h,
+                    );
+                    let recording = recording.as_deref_mut().ok_or(Error::State)?;
+                    let pieces = previous
+                        .commands
+                        .iter()
+                        .filter(|c| c.layer as usize == index)
+                        .map(|c| {
+                            outside(c.scissor, cut)
+                                .iter()
+                                .filter(|r| !r.is_empty())
+                                .count()
+                        })
+                        .sum::<usize>();
+                    let resident = previous
+                        .commands
+                        .iter()
+                        .filter(|c| c.layer as usize == index)
+                        .all(|c| {
+                            c.texture
+                                .is_none_or(|t| recording.assets.contains(c.content, t, c.source))
+                        });
+                    if pieces <= super::primitive_frame::CAPACITY / 4
+                        && recording.commands().len() + pieces + count
+                            <= super::primitive_frame::CAPACITY
+                        && resident
+                    {
+                        retained_start = recording.commands().len();
+                        for command in previous
+                            .commands
+                            .iter()
+                            .filter(|c| c.layer as usize == index)
+                        {
+                            let pieces = outside(command.scissor, cut);
+                            if pieces.iter().any(|r| !r.is_empty()) {
+                                if let Some(texture) = command.texture {
+                                    recording.assets.reuse_texture(texture as usize)?;
+                                }
+                            }
+                            for scissor in pieces.into_iter().filter(|r| !r.is_empty()) {
+                                recording.append(Primitive {
+                                    scissor,
+                                    ..*command
+                                })?;
+                            }
+                        }
+                        partial = Some(changed);
+                        partial_cut = cut;
+                    }
+                }
             }
         }
         if entry.bounds != raster
@@ -530,11 +625,11 @@ impl Cache {
             entry.initialized = false;
             entry.dirty = None;
         }
-        let repaint = if entry.initialized {
+        let repaint = partial.unwrap_or(if entry.initialized {
             logical_scissor
         } else {
             clipped
-        };
+        });
         if mirror {
             Self::grow(
                 &mut entry.pixels,
@@ -552,6 +647,7 @@ impl Cache {
         if let Some(recording) = recording.as_deref_mut() {
             recording.begin(index as u8, clipped)?;
         }
+        let patch_start = recording.as_ref().map_or(0, |r| r.commands().len());
         let mut scene = if mirror {
             Some(CpuScene::layer(&mut self.scratch, repaint).ok_or(Error::Bounds)?)
         } else {
@@ -580,6 +676,45 @@ impl Cache {
             recording.end()?;
         }
         result?;
+        if partial.is_some() {
+            let previous = replay.as_ref().ok_or(Error::State)?;
+            let recording = recording.as_deref_mut().ok_or(Error::State)?;
+            let mut old = previous
+                .commands
+                .iter()
+                .filter(|c| c.layer as usize == index)
+                .filter_map(|c| c.clipped(partial_cut));
+            let mut new = recording.commands()[patch_start..]
+                .iter()
+                .filter_map(|c| c.clipped(partial_cut));
+            let unchanged = loop {
+                match (old.next(), new.next()) {
+                    (None, None) => break true,
+                    (Some(a), Some(b)) if a.same(&b) => {}
+                    _ => break false,
+                }
+            };
+            if unchanged {
+                recording.truncate_commands(retained_start)?;
+                for command in previous
+                    .commands
+                    .iter()
+                    .filter(|c| c.layer as usize == index)
+                {
+                    if let Some(texture) = command.texture {
+                        recording.assets.reuse_texture(texture as usize)?;
+                    }
+                    recording.append(*command)?;
+                }
+                entry.frame = self.frame;
+                self.commands.push(Command {
+                    entry: index as u8,
+                    scissor,
+                });
+                self.reused_captures = self.reused_captures.saturating_add(1);
+                return Ok(false);
+            }
+        }
         entry.solid_background = background;
         entry.background_applied = background_applied;
         entry.frame = self.frame;

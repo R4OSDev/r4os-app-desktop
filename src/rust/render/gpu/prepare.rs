@@ -529,6 +529,8 @@ impl Engine {
         damage: Option<Regions>,
     ) -> Result<()> {
         self.reuse_layers = [false; layers::CAPACITY];
+        self.capture_retained.fill(false);
+        self.capture_replay_damage = damage;
         let Some(changed) = damage else {
             return Ok(());
         };
@@ -548,13 +550,14 @@ impl Engine {
         }
         for (i, entry) in cache.entries().iter().enumerate() {
             let image = &self.resources.layers[i];
-            self.reuse_layers[i] = entry.initialized
+            self.capture_retained[i] = entry.initialized
                 && !entry.external
                 && entry.frame == self.frame
-                && !changed.intersects(entry.capture_bounds)
                 && image.generation == entry.generation
                 && image.resource.slot != 0
                 && same_resource(image.resource, self.snapshot_images[i]);
+            self.reuse_layers[i] =
+                self.capture_retained[i] && !changed.intersects(entry.capture_bounds);
         }
         for command in &self.snapshot {
             if let Some(texture) = command.texture {
@@ -563,6 +566,7 @@ impl Engine {
                     .contains(command.content, texture, command.source)
                 {
                     self.reuse_layers[command.layer as usize] = false;
+                    self.capture_retained[command.layer as usize] = false;
                 }
             }
         }
@@ -582,6 +586,8 @@ impl Engine {
         layers::Replay {
             commands: &self.snapshot,
             reusable: &self.reuse_layers,
+            retained: &self.capture_retained,
+            changed: self.capture_replay_damage,
         }
     }
     pub(super) fn remember(&mut self, cache: &Cache, recording: Option<&Frame>) {
@@ -623,34 +629,5 @@ fn footprint(command: &Command) -> Rect {
     intersect(command.target, command.scissor).unwrap_or(Rect::ZERO)
 }
 fn same_command(x: &Command, y: &Command) -> bool {
-    let grid = |v: a::GfxSampleGrid| {
-        [
-            v.enabled as i64,
-            v.rotation as i64,
-            v.scale as i64,
-            v.pixel_width as i64,
-            v.pixel_height as i64,
-            v.target_x as i64,
-            v.target_y as i64,
-            v.reserved as i64,
-            v.viewport_x as i64,
-            v.viewport_y as i64,
-            v.viewport_width as i64,
-            v.viewport_height as i64,
-            v.guest_width as i64,
-            v.guest_height as i64,
-            v.source_x as i64,
-            v.source_y as i64,
-        ]
-    };
-    x.layer == y.layer
-        && x.texture == y.texture
-        && x.content == y.content
-        && x.source == y.source
-        && x.target == y.target
-        && x.scissor == y.scissor
-        && x.color == y.color
-        && x.over == y.over
-        && x.opaque == y.opaque
-        && grid(x.grid) == grid(y.grid)
+    x.same(y)
 }
