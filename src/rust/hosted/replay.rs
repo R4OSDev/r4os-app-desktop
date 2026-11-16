@@ -535,27 +535,51 @@ fn viewport(bounds: Rect, x: i32, y: i32, w: u32, h: u32) -> Option<Rect> {
     rect.y.checked_add(rect.h)?;
     Some(rect)
 }
-fn alpha_row(
+fn alpha_image(
     painter: &mut Painter<'_, '_>,
     bounds: Rect,
     x: i32,
     y: i32,
     rgb: u32,
+    width: u32,
+    height: u32,
+    stride: usize,
     alpha: &[u8],
 ) -> Result<()> {
-    let Some(clip) = clipped(bounds, i64::from(x), i64::from(y), alpha.len() as i64, 1) else {
+    let full = Image::new(Format::Alpha, width, height, stride, alpha);
+    if !full.valid() {
+        return Ok(());
+    }
+    let Some(clip) = clipped(
+        bounds,
+        i64::from(x),
+        i64::from(y),
+        i64::from(width),
+        i64::from(height),
+    ) else {
         return Ok(());
     };
     let source_x = (i64::from(clip.x) - i64::from(x)) as usize;
+    let source_y = (i64::from(clip.y) - i64::from(y)) as usize;
+    let offset = source_y * stride + source_x;
     let mut view = Image::new(
         Format::Alpha,
         clip.w as u32,
-        1,
-        clip.w as usize,
-        &alpha[source_x..source_x + clip.w as usize],
+        clip.h as u32,
+        stride,
+        &alpha[offset..],
     );
     view.foreground = rgb;
-    picture(painter, view, clip, clip, 0, 0, clip.w as u32, 1)
+    picture(
+        painter,
+        view,
+        clip,
+        clip,
+        0,
+        0,
+        clip.w as u32,
+        clip.h as u32,
+    )
 }
 fn alpha(
     painter: &mut Painter<'_, '_>,
@@ -580,21 +604,20 @@ fn alpha(
     let Some(x) = bounds.x.checked_add(command.x) else {
         return Ok(());
     };
-    for row in 0..command.h {
-        let y = i64::from(bounds.y) + i64::from(command.y) + i64::from(row);
-        let Ok(y) = i32::try_from(y) else {
-            continue;
-        };
-        let offset = row as usize * command.w as usize;
-        alpha_row(
-            painter,
-            bounds,
-            x,
-            y,
-            command.rgb,
-            &bytes[offset..offset + command.w as usize],
-        )?;
-    }
+    let Some(y) = bounds.y.checked_add(command.y) else {
+        return Ok(());
+    };
+    alpha_image(
+        painter,
+        bounds,
+        x,
+        y,
+        command.rgb,
+        command.w,
+        command.h,
+        command.w as usize,
+        bytes,
+    )?;
     Ok(())
 }
 fn argb(
@@ -766,24 +789,26 @@ fn shared(
             let Some(y) = bounds.y.checked_add(command.y) else {
                 return Ok(());
             };
-            for row in 0..d.source_h {
-                let Some(offset) = (d.source_y as usize + row as usize)
-                    .checked_mul(m.stride_bytes as usize)
-                    .and_then(|v| v.checked_add(d.source_x as usize))
-                else {
-                    return Ok(());
-                };
-                let Some(alpha) = offset
-                    .checked_add(d.source_w as usize)
-                    .and_then(|end| memory.get(offset..end))
-                else {
-                    return Ok(());
-                };
-                let Some(y) = y.checked_add(row as i32) else {
-                    return Ok(());
-                };
-                alpha_row(painter, bounds, x, y, command.rgb, alpha)?;
-            }
+            let Some(offset) = (d.source_y as usize)
+                .checked_mul(m.stride_bytes as usize)
+                .and_then(|v| v.checked_add(d.source_x as usize))
+            else {
+                return Ok(());
+            };
+            let Some(bytes) = memory.get(offset..) else {
+                return Ok(());
+            };
+            alpha_image(
+                painter,
+                bounds,
+                x,
+                y,
+                command.rgb,
+                d.source_w,
+                d.source_h,
+                m.stride_bytes as usize,
+                bytes,
+            )?;
         }
         _ => (),
     }

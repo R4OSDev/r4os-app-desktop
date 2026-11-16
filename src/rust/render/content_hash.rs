@@ -20,6 +20,8 @@ impl Blake3 {
         result
     }
     pub fn update(&mut self, bytes: &[u8]) {
+        #[cfg(test)]
+        work::add(bytes.len());
         unsafe {
             r4desk_content_update(
                 self.storage.as_mut_ptr().cast(),
@@ -34,5 +36,22 @@ impl Blake3 {
             r4desk_content_finish(self.storage.as_ptr().cast(), result.as_mut_ptr());
         }
         result
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod work {
+    std::thread_local! { static COUNT: core::cell::Cell<(u64,u64)> = const { core::cell::Cell::new((0,0)) }; }
+    pub fn reset() {
+        COUNT.with(|c| c.set((0, 0)));
+    }
+    pub fn add(bytes: usize) {
+        COUNT.with(|c| {
+            let (calls, n) = c.get();
+            c.set((calls + 1, n + bytes as u64));
+        });
+    }
+    pub fn get() -> (u64, u64) {
+        COUNT.with(|c| c.get())
     }
 }

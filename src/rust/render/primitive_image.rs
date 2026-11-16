@@ -114,7 +114,7 @@ impl<'a> View<'a> {
     /// Call only for an admitted view; no temporary full-image allocation.
     pub(super) fn key(self) -> [u8; 32] {
         let mut hash = Blake3::new();
-        for value in [
+        let values = [
             self.format as u32,
             self.width,
             self.height,
@@ -126,24 +126,35 @@ impl<'a> View<'a> {
             self.identity.dpi_x,
             self.identity.dpi_y,
             u32::from(self.rotation),
-        ] {
-            hash.update(&value.to_le_bytes());
+        ];
+        let mut header = [0u8; 44];
+        for (slot, value) in header.chunks_exact_mut(4).zip(values) {
+            slot.copy_from_slice(&value.to_le_bytes());
         }
+        hash.update(&header);
         if self.format == Format::Glyph {
             let mask = if self.width == 64 {
                 u64::MAX
             } else {
                 (1u64 << self.width) - 1
             };
-            for row in &self.rows[..self.height as usize] {
-                hash.update(&(row & mask).to_le_bytes());
+            let mut rows = [0u8; 64 * 8];
+            for (out, row) in rows
+                .chunks_exact_mut(8)
+                .zip(&self.rows[..self.height as usize])
+            {
+                out.copy_from_slice(&(row & mask).to_le_bytes());
             }
+            hash.update(&rows[..self.height as usize * 8]);
         } else {
-            for row in 0..self.height as usize {
-                let first = row * self.stride;
-                hash.update(
-                    &self.bytes[first..first + self.width as usize * self.bytes_per_pixel()],
-                );
+            let row_bytes = self.width as usize * self.bytes_per_pixel();
+            if self.stride == row_bytes {
+                hash.update(&self.bytes[..row_bytes * self.height as usize]);
+            } else {
+                for row in 0..self.height as usize {
+                    let first = row * self.stride;
+                    hash.update(&self.bytes[first..first + row_bytes]);
+                }
             }
             if self.format == Format::Indexed {
                 hash.update(&self.palette.bytes()[..256 * 4]);

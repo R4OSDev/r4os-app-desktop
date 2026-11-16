@@ -5,6 +5,7 @@ use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 pub const TEXTURE_CAPACITY: usize = 32;
 pub const ENTRY_CAPACITY: usize = 2048;
+const _: () = assert!(ENTRY_CAPACITY.is_power_of_two() && ENTRY_CAPACITY < u16::MAX as usize);
 pub const ATLAS_COUNT: usize = 8;
 pub const ATLAS_DIMENSION: u32 = 512;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +43,9 @@ pub struct Entry {
     pub texture: u8,
     pub rect: Rect,
     pub content: Content,
+    // Bucket heads live alongside slots; zero links mean no entry.
+    head: u16,
+    next: u16,
 }
 #[derive(Clone, Default)]
 pub struct Texture {
@@ -92,6 +96,10 @@ pub struct Cache {
     budget: usize,
     reserved: usize,
     frame: u64,
+    live_entries: usize,
+    first_free: usize,
+    #[cfg(test)]
+    pub search_steps: u64,
     pub hits: u64,
     pub misses: u64,
     pub converted_pixels: u64,
@@ -114,6 +122,10 @@ impl Cache {
             budget,
             reserved: bytes,
             frame: 0,
+            live_entries: 0,
+            first_free: 0,
+            #[cfg(test)]
+            search_steps: 0,
             hits: 0,
             misses: 0,
             converted_pixels: 0,
@@ -138,6 +150,10 @@ impl Cache {
             budget: self.budget,
             reserved: self.reserved,
             frame: self.frame,
+            live_entries: self.live_entries,
+            first_free: self.first_free,
+            #[cfg(test)]
+            search_steps: self.search_steps,
             hits: self.hits,
             misses: self.misses,
             converted_pixels: self.converted_pixels,
@@ -186,9 +202,29 @@ impl Cache {
         Ok(())
     }
     fn forget(&mut self, index: usize) {
-        for entry in &mut self.entries {
-            if entry.live && entry.texture as usize == index {
-                entry.live = false;
+        for slot in 0..self.entries.len() {
+            if self.entries[slot].live && self.entries[slot].texture as usize == index {
+                let bucket = Self::bucket(self.entries[slot].key);
+                let mut link = self.entries[bucket].head;
+                let mut previous = 0;
+                while link != 0 {
+                    let i = usize::from(link - 1);
+                    if i == slot {
+                        let next = self.entries[i].next;
+                        if previous == 0 {
+                            self.entries[bucket].head = next;
+                        } else {
+                            self.entries[usize::from(previous - 1)].next = next;
+                        }
+                        break;
+                    }
+                    previous = link;
+                    link = self.entries[i].next;
+                }
+                self.entries[slot].live = false;
+                self.entries[slot].next = 0;
+                self.live_entries -= 1;
+                self.first_free = self.first_free.min(slot);
             }
         }
         self.reserved -= self.textures[index].pixels().len() * 4;
@@ -238,25 +274,38 @@ impl Cache {
         };
         Ok(())
     }
+    fn bucket(key: [u8; 32]) -> usize {
+        u64::from_le_bytes(key[..8].try_into().unwrap()) as usize & (ENTRY_CAPACITY - 1)
+    }
+    fn find_entry(&mut self, key: [u8; 32]) -> Option<Entry> {
+        let mut link = self.entries[Self::bucket(key)].head;
+        while link != 0 {
+            let entry = self.entries[usize::from(link - 1)];
+            #[cfg(test)]
+            {
+                self.search_steps += 1;
+            }
+            if entry.key == key {
+                return Some(entry);
+            }
+            link = entry.next;
+        }
+        None
+    }
     pub fn intern(&mut self, view: View<'_>) -> Result<Entry> {
         if self.frame == 0 || !view.valid() {
             return Err(Error::Invalid);
         }
         let (width, height) = (view.raster_width(), view.raster_height());
         let key = view.key();
-        if let Some(entry) = self
-            .entries
-            .iter()
-            .find(|e| e.live && e.key == key)
-            .copied()
-        {
+        if let Some(entry) = self.find_entry(key) {
             let texture = &mut self.textures[entry.texture as usize];
             texture.pinned = self.frame;
             texture.touched = self.frame;
             self.hits = self.hits.saturating_add(1);
             return Ok(entry);
         }
-        if self.entries.iter().all(|e| e.live) {
+        if self.live_entries == ENTRY_CAPACITY {
             self.forget(
                 self.oldest(0, TEXTURE_CAPACITY, true)
                     .ok_or(Error::Capacity)?,
@@ -287,10 +336,8 @@ impl Cache {
         }
         let index = chosen.expect("admitted atlas");
         self.textures[index].pinned = self.frame;
-        let entry_index = self
-            .entries
-            .iter()
-            .position(|e| !e.live)
+        let entry_index = (self.first_free..self.entries.len())
+            .find(|i| !self.entries[*i].live)
             .ok_or(Error::Capacity)?;
         let texture = &mut self.textures[index];
         let rect = texture.placement(width, height).ok_or(Error::Capacity)?;
@@ -315,8 +362,12 @@ impl Cache {
         texture.pinned = self.frame;
         texture.touched = self.frame;
         texture.dirty = Some(texture.dirty.map_or(rect, |prior| prior.merged(rect)));
+        let bucket = Self::bucket(key);
+        let next = self.entries[bucket].head;
         let entry = Entry {
             live: true,
+            head: self.entries[entry_index].head,
+            next,
             opaque,
             key,
             texture: index as u8,
@@ -327,6 +378,9 @@ impl Cache {
             },
         };
         self.entries[entry_index] = entry;
+        self.entries[bucket].head = (entry_index + 1) as u16;
+        self.live_entries += 1;
+        self.first_free = entry_index + 1;
         self.misses = self.misses.saturating_add(1);
         self.converted_pixels = self
             .converted_pixels
@@ -528,5 +582,69 @@ mod tests {
         assert!(second.opaque);
         assert_eq!(first.texture, second.texture);
         assert!(!opacity.intern(argb).unwrap().opaque);
+    }
+}
+
+#[cfg(test)]
+mod work_cases {
+    use super::super::primitive_image::{Format, Identity};
+    use super::*;
+    #[test]
+    fn indexed_asset_work_keeps_exact_content_and_pinned_pages() {
+        let mut cache = Cache::new(8 * 1024 * 1024).unwrap();
+        let mut originals = alloc::vec::Vec::new();
+        for phase in 0..2 {
+            cache.start(phase + 1).unwrap();
+            let search = cache.search_steps;
+            super::super::content_hash::work::reset();
+            let started = std::time::Instant::now();
+            for repeat in 0..if phase == 0 { 1 } else { 4 } {
+                for n in 0..512u32 {
+                    let rows = [u64::from(n); 8];
+                    let mut view = View::new(Format::Glyph, 8, 8, 0, &[]);
+                    view.rows = &rows;
+                    view.foreground = 0xffffff;
+                    view.identity = Identity {
+                        font: 9,
+                        revision: 11,
+                        glyph: n,
+                        ..Default::default()
+                    };
+                    let entry = cache.intern(view).unwrap();
+                    if phase == 0 {
+                        originals.push(entry);
+                    } else {
+                        assert_eq!(entry.content, originals[n as usize].content);
+                        assert_eq!(entry.rect, originals[n as usize].rect);
+                        assert_eq!(entry.texture, originals[n as usize].texture);
+                    }
+                    let tex = cache.texture(entry.texture as usize);
+                    assert_eq!(tex.pinned, phase + 1);
+                    let expected = if rows[0] & 1 != 0 {
+                        view.foreground
+                    } else {
+                        view.background
+                    } | 0xff000000;
+                    assert_eq!(
+                        tex.pixels()
+                            [entry.rect.y as usize * tex.width as usize + entry.rect.x as usize],
+                        expected
+                    );
+                }
+                assert!(repeat < 4);
+            }
+            let elapsed = started.elapsed().as_nanos();
+            let (updates, bytes) = super::super::content_hash::work::get();
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"asset CPU model\",\"phase\":{phase},\"elapsed_ns\":{elapsed},\"hash_updates\":{updates},\"hash_bytes\":{bytes},\"search_steps\":{},\"hits\":{},\"misses\":{},\"evictions\":{}}}",
+                cache.search_steps - search,
+                cache.hits,
+                cache.misses,
+                cache.evictions
+            );
+        }
+        assert_eq!(cache.misses, 512);
+        assert_eq!(cache.hits, 2048);
+        assert_eq!(cache.evictions, 0);
     }
 }

@@ -369,3 +369,54 @@ fn raster_picture_keeps_original_clip_scaling_unaligned_bytes_and_opaque_rgb() {
         }
     }
 }
+
+#[test]
+fn alpha_surface_recording_preserves_every_premultiplied_pixel_and_clip() {
+    use crate::render::primitive_frame::Frame;
+    let bytes: Vec<u8> = (0..32 * 32).map(|n| (n * 73 + n / 32) as u8).collect();
+    let bounds = Rect::new(17, 11, 40, 40);
+    let mut command = cmd(a::gui_frame_command_kind_alpha8, -3, 2, 32, 32);
+    command.rgb = 0x669933;
+    command.resource_bytes = bytes.len() as u64;
+    let mut frame = Frame::new().unwrap();
+    frame.set_mirror(false).unwrap();
+    for turn in 0..2 {
+        frame.start(turn + 1).unwrap();
+        frame.begin(0, bounds).unwrap();
+        crate::render::content_hash::work::reset();
+        let mut painter = Painter::recorded(None, &mut frame, bounds, bounds);
+        alpha(&mut painter, bounds, &command, &bytes).unwrap();
+        frame.end().unwrap();
+        let (updates, hashbytes) = crate::render::content_hash::work::get();
+        println!(
+            "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"alpha CPU recording\",\"turn\":{turn},\"commands\":{},\"hash_updates\":{updates},\"hash_bytes\":{hashbytes}}}",
+            frame.commands().len()
+        );
+        let mut actual = vec![0u32; 40 * 40];
+        for c in frame.commands() {
+            let t = frame.assets.texture(c.texture.unwrap() as usize);
+            for y in c.scissor.y..c.scissor.bottom() {
+                for x in c.scissor.x..c.scissor.right() {
+                    let sx = c.source.x + x - c.target.x;
+                    let sy = c.source.y + y - c.target.y;
+                    actual[y as usize * 40 + x as usize] =
+                        t.pixels()[sy as usize * t.width as usize + sx as usize];
+                }
+            }
+        }
+        for y in 0..40usize {
+            for x in 0..40usize {
+                let expected = if x < 29 && (2..34).contains(&y) {
+                    let alpha = u32::from(bytes[(y - 2) * 32 + x + 3]);
+                    alpha << 24
+                        | ((0x66 * alpha + 127) / 255) << 16
+                        | ((0x99 * alpha + 127) / 255) << 8
+                        | (0x33 * alpha + 127) / 255
+                } else {
+                    0
+                };
+                assert_eq!(actual[y * 40 + x], expected, "turn{turn} {x},{y}");
+            }
+        }
+    }
+}
