@@ -561,6 +561,7 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
         let mut expected = [0; 64];
         expected[27] = 0xbcbcbc;
         assert_eq!(visible(), expected, "original separate linear-alpha oracle");
+        let retained_working = engine.resources.workings[engine.output_index].resource;
         cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
         cache
             .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
@@ -570,13 +571,11 @@ fn changed_primitive_footprint_and_disjoint_batch_preserve_original_pixels() {
         cache.finish(Some(&frame)).unwrap();
         begin(app, device, &mut engine, &cache, Some(&frame));
         assert!(engine.direct_sdr);
-        assert!(
-            engine
-                .resources
-                .workings
-                .iter()
-                .all(|image| image.resource.slot == 0)
-        );
+        assert!(same_resource(
+            engine.resources.workings[engine.output_index].resource,
+            retained_working
+        ));
+        assert!(engine.resources.charged <= engine.resources.budget);
         pump(
             app,
             device,
@@ -1647,4 +1646,242 @@ pub(crate) fn pixels(app: &App2<'_>, device: &mut Device, engine: &Engine) -> [u
     assert_eq!(reader.source().unwrap().slot, 0);
     reader.close(&s).unwrap();
     result
+}
+
+#[test]
+fn sdr_mode_switches_keep_complete_pixels_and_measure_working_allocations() {
+    with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut engine = Engine::new().unwrap();
+        let mut original_working = None;
+        for turn in 0..5 {
+            let alpha = turn % 2 == 0;
+            cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+            cache
+                .paint(1, FULL, FULL, Some(&mut frame), None, |p| p.fill(FULL, 0))
+                .unwrap();
+            let rect = Rect::new(2, 2, 4, 4);
+            cache
+                .paint(2, rect, FULL, Some(&mut frame), None, |p| {
+                    if !alpha {
+                        return p.fill(rect, 0x00ff00);
+                    }
+                    let white = [0x80ffffffu32];
+                    p.picture(Picture {
+                        view: View::new(
+                            Format::Argb,
+                            1,
+                            1,
+                            4,
+                            PixelBytes::from_words(&white).bytes(),
+                        ),
+                        viewport: rect,
+                        clip: rect,
+                        source_x: 0,
+                        source_y: 0,
+                        guest_w: 1,
+                        guest_h: 1,
+                    })
+                })
+                .unwrap();
+            cache.finish(Some(&frame)).unwrap();
+            cache.complete_scene = true;
+            let before = stats()[1];
+            begin(app, device, &mut engine, &cache, Some(&frame));
+            pump(
+                app,
+                device,
+                &mut engine,
+                &mut cache,
+                Some(&mut frame),
+                Progress::Copied,
+            );
+            assert_eq!(engine.direct_sdr, !alpha);
+            let mut expected = [0u32; 64];
+            for y in 2..6 {
+                for x in 2..6 {
+                    expected[y * 8 + x] = if alpha { 0xbcbcbc } else { 0x00ff00 };
+                }
+            }
+            assert_eq!(visible(), expected);
+            let working = engine.resources.workings[0].resource;
+            if let Some(original) = original_working {
+                assert!(same_resource(working, original));
+                assert_eq!(
+                    stats()[1] - before,
+                    0,
+                    "same-size SDR storage survives mode switches"
+                );
+            } else {
+                original_working = Some(working);
+            }
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"GPU resource model; no hardware\",\"turn\":{turn},\"direct_sdr\":{},\"native_allocations\":{},\"working_slot\":{},\"working_generation\":{},\"charged_bytes\":{}}}",
+                engine.direct_sdr,
+                stats()[1] - before,
+                working.slot,
+                working.generation,
+                engine.resources.charged
+            );
+        }
+        let s = device.bind(app).unwrap();
+        engine.close(&s).unwrap();
+    });
+}
+
+#[test]
+fn private_layers_submit_composition_with_both_exact_writer_dependencies() {
+    with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut engine = Engine::new().unwrap();
+        capture(&mut cache, FULL, 0x00ff00, Some(&mut frame));
+        begin(app, device, &mut engine, &cache, Some(&frame));
+        {
+            let s = device.bind(app).unwrap();
+            control(&s, 1, 0);
+            for _ in 0..8 {
+                assert_eq!(
+                    engine.advance(&s, &mut cache, Some(&mut frame), || 1),
+                    Progress::Pending
+                );
+            }
+            assert!(!engine.jobs.physically_retired());
+            assert!(
+                engine.render_jobs > engine.primitive_jobs,
+                "independent composition admitted before CPU join"
+            );
+            assert!(
+                stats()[14] >= 2,
+                "source writer and prior output writer both copied into provider jobs"
+            );
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"private GPU dependency model\",\"primitive_jobs\":{},\"render_jobs_before_completion\":{},\"max_dependencies\":{}}}",
+                engine.primitive_jobs,
+                engine.render_jobs,
+                stats()[14]
+            );
+        }
+        pump(
+            app,
+            device,
+            &mut engine,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        assert_eq!(visible(), expected(0x00ff00));
+        assert!(stats()[7] <= g::device_job_capacity as u64);
+        let s = device.bind(app).unwrap();
+        engine.close(&s).unwrap();
+    });
+}
+
+#[test]
+fn retained_sdr_working_is_reclaimed_once_under_real_image_budget_pressure() {
+    with(|app, device| {
+        let mut cache = Cache::new(1024 * 1024).unwrap();
+        let mut frame = Frame::new().unwrap();
+        let mut engine = Engine::new().unwrap();
+        cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+        cache
+            .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
+                let white = [0x80ffffffu32];
+                p.picture(Picture {
+                    view: View::new(
+                        Format::Argb,
+                        1,
+                        1,
+                        4,
+                        PixelBytes::from_words(&white).bytes(),
+                    ),
+                    viewport: FULL,
+                    clip: FULL,
+                    source_x: 0,
+                    source_y: 0,
+                    guest_w: 1,
+                    guest_h: 1,
+                })
+            })
+            .unwrap();
+        cache.finish(Some(&frame)).unwrap();
+        cache.complete_scene = true;
+        begin(app, device, &mut engine, &cache, Some(&frame));
+        pump(
+            app,
+            device,
+            &mut engine,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        let working_charge = engine.resources.workings[0].charge;
+        assert!(working_charge != 0);
+        engine.resources.budget = engine.resources.charged - working_charge + 65536;
+        cache.start(Mode::Desktop(FULL), Some(&mut frame)).unwrap();
+        cache
+            .paint(1, FULL, FULL, Some(&mut frame), None, |p| {
+                p.fill(FULL, 0x112233)
+            })
+            .unwrap();
+        let r = Rect::new(3, 3, 1, 1);
+        cache
+            .paint(2, r, FULL, Some(&mut frame), None, |p| p.fill(r, 0x00ff00))
+            .unwrap();
+        cache.finish(Some(&frame)).unwrap();
+        cache.complete_scene = true;
+        begin(app, device, &mut engine, &cache, Some(&frame));
+        assert!(engine.direct_sdr);
+        assert!(
+            engine
+                .resources
+                .workings
+                .iter()
+                .all(|v| v.resource.slot == 0)
+        );
+        assert!(engine.resources.charged <= engine.resources.budget);
+        pump(
+            app,
+            device,
+            &mut engine,
+            &mut cache,
+            Some(&mut frame),
+            Progress::Copied,
+        );
+        let mut expected = [0x112233; 64];
+        expected[27] = 0x00ff00;
+        assert_eq!(visible(), expected);
+        let s = device.bind(app).unwrap();
+        engine.close(&s).unwrap();
+        assert_eq!(engine.resources.charged, 0);
+    });
+}
+
+#[test]
+fn scanout_intent_requires_actual_capability_source_color_and_no_blockers() {
+    let mut engine = Engine::new().unwrap();
+    engine.chain.slot = 1;
+    engine.presentation = Some(g::R4GfxPresentationInfo {
+        flags: g::present_active | g::present_native | g::present_direct,
+        format: g::format_xrgb8888,
+        ..Default::default()
+    });
+    engine.resources.outputs[0].resource.slot = 1;
+    engine.resources.outputs[0].info.source_kind = g::source_create_native_scanout;
+    assert_eq!(engine.candidate_present_intent(g::device_gpu_direct), 1);
+    assert_eq!(engine.candidate_present_intent(0), 0);
+    for blocker in [1, 2, 4, 8, 16, 32] {
+        engine.present_blockers = blocker;
+        assert_eq!(engine.candidate_present_intent(g::device_gpu_direct), 0);
+    }
+    engine.present_blockers = 0;
+    engine.resources.outputs[0].info.source_kind = g::source_create_native;
+    assert_eq!(engine.candidate_present_intent(g::device_gpu_direct), 0);
+    engine.resources.outputs[0].info.source_kind = g::source_create_native_scanout;
+    engine.output_color.reference_white += 1;
+    assert_eq!(engine.candidate_present_intent(g::device_gpu_direct), 0);
+    engine.output_color = software::description(false, true);
+    engine.presentation.as_mut().unwrap().flags |= g::present_lost;
+    assert_eq!(engine.candidate_present_intent(g::device_gpu_direct), 0);
 }

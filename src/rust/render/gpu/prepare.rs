@@ -169,6 +169,33 @@ impl Engine {
         mut clock: impl FnMut() -> u64,
         cancelled: impl Fn() -> bool,
     ) -> Result<()> {
+        let result = self.prepare_once(s, cache, recording, deadline, &mut clock, &cancelled);
+        if result == Err(Error::Limit)
+            && self.allows_direct_sdr(cache, recording)
+            && self
+                .resources
+                .workings
+                .iter()
+                .any(|image| image.resource.slot != 0)
+        {
+            // Idle linear SDR storage is optional. Reclaim it once before
+            // reporting a real budget limit; submitted jobs are already drained.
+            for image in &mut self.resources.workings {
+                image.release(s, &mut self.resources.charged)?;
+            }
+            return self.prepare_once(s, cache, recording, deadline, clock, cancelled);
+        }
+        result
+    }
+    fn prepare_once(
+        &mut self,
+        s: &Session<'_, '_>,
+        cache: &Cache,
+        recording: Option<&Frame>,
+        deadline: u64,
+        mut clock: impl FnMut() -> u64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<()> {
         let mut check = || {
             if cancelled() {
                 Err(Error::State)
@@ -294,8 +321,13 @@ impl Engine {
         let hdr = self.has_hdr(cache);
         let direct_sdr = self.allows_direct_sdr(cache, recording);
         if hdr != self.hdr_frame || direct_sdr != self.direct_sdr {
-            for image in &mut self.resources.workings {
-                image.release(s, &mut self.resources.charged)?;
+            // A direct-SDR toggle does not change the linear SDR description.
+            // Keep its bounded storage for a later translucent frame. HDR
+            // transitions still replace the color-bound resource as before.
+            if hdr != self.hdr_frame {
+                for image in &mut self.resources.workings {
+                    image.release(s, &mut self.resources.charged)?;
+                }
             }
             self.hdr_frame = hdr;
             self.direct_sdr = direct_sdr;

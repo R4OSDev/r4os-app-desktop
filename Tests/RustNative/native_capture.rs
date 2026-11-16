@@ -1100,14 +1100,18 @@ fn solid_shell_backdrop_keeps_original_pixels_and_revalidates_replay_dependencie
                     assert_eq!(entry.background_applied, direct, "turn={turn}, {view:?}");
                     let jobs = engine.render_jobs - engine.primitive_jobs;
                     gpu::begin(app, device, &mut engine, &cache, Some(&frame));
-                    assert_eq!(
-                        engine
-                            .resources
-                            .workings
-                            .iter()
-                            .all(|w| w.resource.slot == 0),
-                        direct
-                    );
+                    if !direct {
+                        assert_ne!(
+                            engine.resources.workings[engine.output_index].resource.slot,
+                            0
+                        );
+                    }
+                    assert!(engine.resources.charged <= engine.resources.budget);
+                    for working in &engine.resources.workings {
+                        if working.resource.slot != 0 {
+                            assert_eq!(working.info.image.format, r4gfx::format_abgr16161616f);
+                        }
+                    }
                     gpu::pump(
                         app,
                         device,

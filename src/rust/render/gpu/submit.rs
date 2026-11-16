@@ -2,6 +2,33 @@
 //! Every admitted job is tracked before metadata queries; no native wait here.
 use super::*;
 impl Engine {
+    pub(super) fn candidate_present_intent(&self, operations: u32) -> u32 {
+        if self.present_intent != 0 {
+            return self.present_intent;
+        }
+        let Some(info) = self.presentation else {
+            return 0;
+        };
+        let required = g::present_active | g::present_native | g::present_direct;
+        if self.chain.slot != 0
+            && self.present_blockers == 0
+            && operations & g::device_gpu_direct != 0
+            && info.flags & required == required
+            && info.flags & (g::present_lost | g::present_occluded) == 0
+            && info.format == self.output_format
+            && self.output_format == g::format_xrgb8888
+            && !self.color_output
+            && color::same_description(self.output_color, software::description(false, true))
+            && self.resources.outputs[self.output_index].resource.slot != 0
+            && self.resources.outputs[self.output_index].info.source_kind
+                == g::source_create_native_scanout
+        {
+            1
+        } else {
+            0
+        }
+    }
+
     fn finish_region(&mut self) {
         self.next_region += 1;
         if let Some(&area) = self.encode_regions.as_slice().get(self.next_region) {
@@ -137,10 +164,14 @@ impl Engine {
                     self.next_primitive += 1;
                 }
                 if self.next_primitive == frame.commands().len() {
-                    // Join physically completed layer writers before linear
-                    // composition. Independent layer chains never depend on
-                    // the last writer of a different target.
-                    if !self.jobs.physically_retired() {
+                    // External producer/consumer handoff keeps its physical
+                    // join. Private layers use exact source-writer fences in
+                    // Draw while the independent composition target starts.
+                    let private = cache.commands().iter().all(|command| {
+                        let i = command.entry as usize;
+                        !cache.entries()[i].external && self.external_source(i).is_none()
+                    });
+                    if !private && !self.jobs.physically_retired() {
                         return Err(Error::Busy);
                     }
                     self.jobs.last = None;
@@ -390,6 +421,29 @@ impl Engine {
                 if entry.external {
                     return Err(Error::State);
                 }
+                // Only the source layer writer and prior composition write
+                // order this draw. Other private layers may still be running.
+                let mut joined = [g::R4GfxCopyFence::default(); 2];
+                let mut dependency_count = 0;
+                if let Some(last) = dependencies.first() {
+                    joined[dependency_count] = *last;
+                    dependency_count += 1;
+                }
+                if let Some(writer) = self.jobs.layer_dependency(command.entry as usize)? {
+                    if !joined[..dependency_count]
+                        .iter()
+                        .any(|f| same_fence(*f, writer))
+                    {
+                        joined[dependency_count] = writer;
+                        dependency_count += 1;
+                    }
+                }
+                let dependencies = &joined[..dependency_count];
+                let pointer = if dependencies.is_empty() {
+                    0
+                } else {
+                    dependencies.as_ptr() as u64
+                };
                 let mut handle = g::R4GfxJob::default();
                 let request = g::R4GfxRenderRequest {
                     version: 1,
@@ -513,6 +567,17 @@ impl Engine {
             Phase::Present => {
                 if self.chain.slot != 0 {
                     let acquired = self.acquired.ok_or(Error::State)?;
+                    // The provider revalidates color, binding, blockers and
+                    // physical retirement of the offered final scanout image.
+                    let operations = if self
+                        .presentation
+                        .is_some_and(|v| v.flags & g::present_direct != 0)
+                    {
+                        s.refresh().map_err(|_| Error::Graphics)?.gpu_operations
+                    } else {
+                        0
+                    };
+                    let intent = self.candidate_present_intent(operations);
                     let request = g::R4GfxSwapchainPresent {
                         version: 1,
                         size: core::mem::size_of::<g::R4GfxSwapchainPresent>() as u32,
@@ -523,7 +588,7 @@ impl Engine {
                             .and_then(|i| self.jobs.job(i))
                             .map_or_else(g::R4GfxJob::default, |j| j.handle),
                         deadline_ns: self.deadline,
-                        intent: self.present_intent,
+                        intent,
                         blockers: self.present_blockers,
                     };
                     accepted(unsafe {

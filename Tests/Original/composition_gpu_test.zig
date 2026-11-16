@@ -65,7 +65,7 @@ const Model = struct {
     const List = struct { requests: [c.render_list_capacity]c.R4GfxRenderRequest = undefined,
         grids: [c.render_list_capacity]c.R4GfxLogicalGrid = @splat(std.mem.zeroes(c.R4GfxLogicalGrid)), count: usize = 0, color_flags: ?u32 = null };
     const Operation = union(enum) { copy: c.R4GfxCopyRequestEx, draw: c.R4GfxRenderRequest, list: List, present: c.R4GfxImagePresentRequest };
-    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependency: u64, external_wait: bool = false, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
+    const Job = struct { handle: c.R4GfxJob, operation: Operation, dependencies: [c.copy_max_dependencies]u64, external_wait: bool = false, result: u32 = 0, terminal: bool = false, cancelled: bool = false, pins: u32 = 0 };
     var buffers: [c.device_resource_capacity]?[]align(4) u8 = @splat(null);
     var imported: [c.device_resource_capacity]a.GfxBufferReference = @splat(.{});
     var producer_ready = true;
@@ -75,9 +75,10 @@ const Model = struct {
     var jobs: [c.device_job_capacity]?Job = @splat(null);
     var outcomes: [2048]u32 = @splat(0);
     var serial: u64 = 0;
+    var max_internal_dependencies: u32 = 0;
     // Retired client handles do not free common receipts while descendants
     // still reference them. Exercise a smaller finite pool than the kernel.
-    const Receipt = struct { live: bool = false, client: bool = false, parent: u64 = 0, children: u32 = 0 };
+    const Receipt = struct { live: bool = false, client: bool = false, parents: [c.copy_max_dependencies]u64 = @splat(0), children: u32 = 0 };
     var receipts: [2048]Receipt = @splat(.{});
     var retained_limit: usize = 0;
     var retained_count: usize = 0;
@@ -309,24 +310,26 @@ const Model = struct {
         if (busy_count != 0) { busy_count -= 1; return c.status_busy; }
         if (retained_limit != 0 and retained_count >= retained_limit) return c.status_busy;
         const index = for (&jobs,0..) |*slot,i| { if (slot.* == null) break i; } else return c.status_busy;
-        std.debug.assert(count <= 2 and serial+1 < outcomes.len);
-        var dependency: u64 = 0; var external_wait = false;
-        if (count != 0) for (@as([*]const c.R4GfxCopyFence, @ptrFromInt(address))[0..count]) |value| {
+        std.debug.assert(count <= c.copy_max_dependencies and serial+1 < outcomes.len);
+        var dependencies: [c.copy_max_dependencies]u64 = @splat(0); var external_wait = false;
+        var internal_count: u32 = 0;
+        if (count != 0) for (@as([*]const c.R4GfxCopyFence, @ptrFromInt(address))[0..count], 0..) |value, i| {
             if (value.timeline == 456) { std.debug.assert(value.point == 1); external_wait = true; }
-            else { std.debug.assert(value.timeline == 123); dependency = value.point; }
+            else { std.debug.assert(value.timeline == 123); dependencies[i] = value.point; internal_count += 1; }
         };
+        max_internal_dependencies = @max(max_internal_dependencies, internal_count);
         serial += 1;
         if (retained_limit != 0) {
-            if (dependency != 0) {
+            for (dependencies) |dependency| if (dependency != 0) {
                 std.debug.assert(receipts[dependency].live);
                 receipts[dependency].children += 1;
-            }
-            receipts[serial] = .{ .live = true, .client = true, .parent = dependency };
+            };
+            receipts[serial] = .{ .live = true, .client = true, .parents = dependencies };
             retained_count += 1;
             retained_peak = @max(retained_peak, retained_count);
         }
         const handle: c.R4GfxJob = .{ .slot=@intCast(index+1), .reserved=0, .generation=serial, .device_generation=device.generation, .device_address=device.address };
-        jobs[index] = .{ .handle=handle, .operation=operation, .dependency=dependency, .external_wait=external_wait }; out.*=handle;
+        jobs[index] = .{ .handle=handle, .operation=operation, .dependencies=dependencies, .external_wait=external_wait }; out.*=handle;
         return 0;
     }
     fn copy(device: *const c.R4GfxDevice, input: *const c.R4GfxCopyRequestEx, out: *c.R4GfxJob) callconv(.c) i32 {
@@ -405,7 +408,7 @@ const Model = struct {
             while (changed) {
                 changed = false;
                 for (&receipts) |*item| if (item.live and !item.client and item.children == 0) {
-                    if (item.parent != 0) { std.debug.assert(receipts[item.parent].children != 0); receipts[item.parent].children -= 1; }
+                    for (item.parents) |parent| if (parent != 0) { std.debug.assert(receipts[parent].children != 0); receipts[parent].children -= 1; };
                     item.* = .{}; retained_count -= 1; changed = true;
                 };
             }
@@ -478,8 +481,12 @@ const Model = struct {
         };
         const job = selected orelse return;
         if (job.external_wait and !producer_ready and !job.cancelled) return;
-        if (job.dependency != 0 and outcomes[job.dependency]==0) return;
-        job.result = if (job.cancelled or (job.dependency!=0 and outcomes[job.dependency]!=a.gfx_queue_result_complete)) a.gfx_queue_result_cancelled else a.gfx_queue_result_complete;
+        var failed = job.cancelled;
+        for (job.dependencies) |dependency| if (dependency != 0) {
+            if (outcomes[dependency] == 0) return;
+            failed = failed or outcomes[dependency] != a.gfx_queue_result_complete;
+        };
+        job.result = if (failed) a.gfx_queue_result_cancelled else a.gfx_queue_result_complete;
         if (job.result==a.gfx_queue_result_complete) switch(job.operation) {
             .copy => |value| {
                 const src=image(device,&value.copy.source); const dst=image(device,&value.copy.target);
@@ -510,7 +517,7 @@ pub fn nativeContext() ?*const @import("r4os").platform2.abi.R4XStartContext2 {
     for (Model.buffers) |v| if (v != null) return null;
     for (Model.jobs) |v| if (v != null) return null;
     if (Model.retained_count != 0 or WindowMemory.count() != 0 or WindowMemory.mapped != 0) return null;
-    Model.serial=0; Model.native_allocations=0; Model.presents=0; Model.busy_count=2; Model.reject_draw=false;
+    Model.serial=0; Model.max_internal_dependencies=0; Model.native_allocations=0; Model.presents=0; Model.busy_count=2; Model.reject_draw=false;
     Model.outcomes=@splat(0); Model.visible=@splat(0); Model.producer_ready=true; Model.auto_complete=false; Model.hold_terminal=false;
     Model.combined_enabled=true; Model.receipts=@splat(.{}); Model.retained_limit=0; Model.retained_peak=0;
     Model.cancel_during_create=null; Model.present_enabled=true; Model.presentation_queries=0; Model.presentation_result=c.status_ok;
@@ -545,7 +552,7 @@ pub fn nativeStats(out:*[16]u64) void {
     out.*=@splat(0);out[0]=Model.serial;out[1]=Model.native_allocations;out[2]=Model.presents;out[3]=Model.busy_count;
     out[4]=Model.batches;out[5]=Model.max_batch;out[6]=Model.retained_count;out[7]=Model.retained_peak;out[8]=Model.color_batches;
     for(Model.buffers)|v|{out[9]+=@intFromBool(v!=null);}for(Model.jobs)|v|{out[10]+=@intFromBool(v!=null);}
-    out[11]=WindowMemory.count();out[12]=WindowMemory.mapped;out[13]=Model.presentation_queries;
+    out[11]=WindowMemory.count();out[12]=WindowMemory.mapped;out[13]=Model.presentation_queries;out[14]=Model.max_internal_dependencies;
 }
 
 // Native Rust admission/retirement uses the same original BO and broker peer.
