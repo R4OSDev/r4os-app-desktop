@@ -17,6 +17,16 @@ impl<'loan, 'app, 'storage> SessionReader<'loan, 'app, 'storage> {
     }
 }
 impl Reader for SessionReader<'_, '_, '_> {
+    fn font_revision(&mut self) -> u32 {
+        let value = unsafe {
+            r4os_sdk::gui::raw::R4SdkGuiDrawContext_fontRevision(0, self.session.native_draw())
+        };
+        if value.status < 0 || value.flags & 2 != 0 {
+            0
+        } else {
+            u32::try_from(value.bits).unwrap_or(0)
+        }
+    }
     fn info(&mut self, owner: &ProgramProcessHandle, out: &mut GuiFrameInfo) -> i32 {
         // The compiler-projected optional-handle transport borrows this exact
         // record. Native decoding reads it; no mutable Rust loan is aliased.

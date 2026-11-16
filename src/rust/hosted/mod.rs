@@ -4,6 +4,7 @@ pub mod client;
 pub mod command_index;
 pub mod console_scroll;
 pub mod console_snapshot;
+mod frame_damage;
 pub mod frame_reader;
 pub mod frame_snapshot;
 pub mod gui;

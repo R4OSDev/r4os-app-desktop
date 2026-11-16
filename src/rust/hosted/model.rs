@@ -399,7 +399,11 @@ impl Model {
                 let mut reader = SessionReader::new(session);
                 client.frames_mut().refresh(&mut reader)
             };
-            if refresh != Refresh::Updated {
+            if !matches!(refresh, Refresh::Updated | Refresh::UpdatedNoDamage) {
+                continue;
+            }
+            if refresh == Refresh::UpdatedNoDamage {
+                report.changed = true;
                 continue;
             }
             let frame = client.frames().view();

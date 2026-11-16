@@ -15,6 +15,10 @@ const REGIONS: usize = a::gui_frame_max_damage_regions as usize;
 /// loan. A successful raster acquisition retains its native read lease until
 /// release succeeds. This interface itself never dereferences a guest address.
 pub trait Reader {
+    /// Zero is unknown and refuses text damage inference.
+    fn font_revision(&mut self) -> u32 {
+        0
+    }
     fn info(&mut self, owner: &ProgramProcessHandle, out: &mut GuiFrameInfo) -> i32;
     fn read(
         &mut self,
@@ -53,6 +57,8 @@ pub trait Reader {
 pub enum Refresh {
     Unchanged,
     Updated,
+    /// New immutable generation published with identical visible commands.
+    UpdatedNoDamage,
     NoFrame,
     Retry,
 }
@@ -69,6 +75,7 @@ pub struct View<'a> {
 #[derive(Default)]
 struct Buffer {
     info: GuiFrameInfo,
+    font_revision: u32,
     commands: Vec<GuiFrameCommand>,
     resources: Vec<u32>,
     command_len: usize,
@@ -412,15 +419,58 @@ impl Cache {
             return self.retry();
         }
         self.staging.info = read;
+        let font_revision = reader.font_revision();
+        self.staging.font_revision = font_revision;
         self.staging.full_damage = true;
         self.staging.damage.clear();
-        self.staging.update_index(0);
+        let same_fonts = font_revision != 0 && font_revision == self.active.font_revision;
+        let uses_fonts = self
+            .active
+            .commands()
+            .iter()
+            .chain(self.staging.commands())
+            .any(|c| c.kind == a::gui_frame_command_kind_text);
+        let damage = (self.active.valid && (same_fonts || !uses_fonts))
+            .then(|| {
+                super::frame_damage::difference(
+                    self.active.commands(),
+                    self.active.resources(),
+                    self.staging.commands(),
+                    self.staging.resources(),
+                )
+            })
+            .flatten();
+        let mut unchanged = false;
+        if let Some(regions) = damage {
+            // Allocation failure keeps full damage; it never drops a repaint.
+            if self.staging.ensure_damage() {
+                self.staging.full_damage = false;
+                for r in regions.as_slice() {
+                    self.staging.damage.push(DisplayDamageRect {
+                        x: r.x,
+                        y: r.y,
+                        w: r.w as u32,
+                        h: r.h as u32,
+                    });
+                }
+                unchanged = regions.is_empty();
+            }
+        }
+        if unchanged {
+            core::mem::swap(&mut self.staging.index, &mut self.active.index);
+        } else {
+            self.staging.update_index(0);
+        }
         self.publish(reader);
         #[cfg(test)]
         {
             self.stats.full = self.stats.full.wrapping_add(1);
         }
-        Refresh::Updated
+        if unchanged {
+            Refresh::UpdatedNoDamage
+        } else {
+            Refresh::Updated
+        }
     }
     fn publish(&mut self, reader: &mut impl Reader) {
         self.staging.valid = true;
@@ -492,6 +542,11 @@ impl Cache {
             return false;
         }
         self.staging.info = info;
+        self.staging.font_revision = if self.active.valid {
+            self.active.font_revision
+        } else {
+            reader.font_revision()
+        };
         self.staging.full_damage = !self.active.valid;
         self.staging.damage.clear();
         if self.active.valid {
@@ -762,6 +817,7 @@ mod tests {
     }
     struct Fake {
         info: GuiFrameInfo,
+        font_revision: u32,
         commands: Vec<GuiFrameCommand>,
         resources: Vec<u8>,
         stale: bool,
@@ -785,6 +841,7 @@ mod tests {
         ) -> Self {
             Self {
                 info: info(owner, g, commands.len(), resources.len()),
+                font_revision: 1,
                 commands: commands.to_vec(),
                 resources: resources.to_vec(),
                 stale: false,
@@ -802,6 +859,9 @@ mod tests {
         }
     }
     impl Reader for Fake {
+        fn font_revision(&mut self) -> u32 {
+            self.font_revision
+        }
         fn info(&mut self, owner: &ProgramProcessHandle, out: &mut GuiFrameInfo) -> i32 {
             if !same(*owner, self.info.owner) {
                 return a::gui_frame_error_invalid;
@@ -916,6 +976,137 @@ mod tests {
             rgb,
             ..Default::default()
         }
+    }
+    #[test]
+    fn complete_frames_preserve_local_draw_damage_and_acknowledge_identical_payloads() {
+        let owner = owner(7, 11);
+        let clear = GuiFrameCommand {
+            kind: a::gui_frame_command_kind_clear,
+            rgb: 0x112233,
+            ..Default::default()
+        };
+        let draw = GuiFrameCommand {
+            x: 7,
+            y: 9,
+            w: 40,
+            h: 30,
+            ..rect(0x334455)
+        };
+        let mut reader = Fake::new(owner, 1, &[clear, draw], &[]);
+        let mut cache = Cache::default();
+        assert!(cache.bind(owner, &mut reader));
+        assert_eq!(cache.refresh(&mut reader), Refresh::Updated);
+        assert!(cache.view().full_damage);
+        reader.info = info(owner, 2, 2, 0);
+        reader.commands[1].rgb = 0x556677;
+        assert_eq!(cache.refresh(&mut reader), Refresh::Updated);
+        let view = cache.view();
+        eprintln!(
+            "complete-frame full={} regions={}",
+            view.full_damage,
+            view.damage.len()
+        );
+        assert!(!view.full_damage);
+        assert_eq!(view.damage.len(), 1);
+        let r = view.damage[0];
+        assert_eq!((r.x, r.y, r.w, r.h), (7, 9, 40, 30));
+        reader.info = info(owner, 3, 2, 0);
+        assert_eq!(cache.refresh(&mut reader), Refresh::UpdatedNoDamage);
+        assert_eq!(cache.view().info.committed_generation, 3);
+        assert!(!cache.view().full_damage && cache.view().damage.is_empty());
+        assert!(cache.close(&mut reader));
+    }
+    #[test]
+    fn complete_text_damage_tracks_resources_and_font_catalog_revision() {
+        let owner = owner(7, 11);
+        let text = GuiFrameCommand {
+            kind: a::gui_frame_command_kind_text,
+            x: 10,
+            y: 12,
+            resource_bytes: 3,
+            ..Default::default()
+        };
+        let mut reader = Fake::new(owner, 1, &[text], b"abc");
+        let mut cache = Cache::default();
+        assert!(cache.bind(owner, &mut reader));
+        assert_eq!(cache.refresh(&mut reader), Refresh::Updated);
+        reader.info = info(owner, 2, 1, 4);
+        reader.commands[0].resource_offset = 1;
+        reader.resources = b"xabc".to_vec();
+        assert_eq!(cache.refresh(&mut reader), Refresh::UpdatedNoDamage);
+        assert_eq!(cache.view().info.committed_generation, 2);
+        reader.info.committed_generation = 3;
+        reader.resources[2] = b'z';
+        assert_eq!(cache.refresh(&mut reader), Refresh::Updated);
+        assert!(!cache.view().full_damage);
+        let r = cache.view().damage[0];
+        assert_eq!((r.x, r.y), (10, 12));
+        for revision in [2, 0] {
+            reader.font_revision = revision;
+            reader.info.committed_generation += 1;
+            assert_eq!(cache.refresh(&mut reader), Refresh::Updated);
+            assert!(cache.view().full_damage);
+        }
+        assert!(cache.close(&mut reader));
+    }
+    #[test]
+    fn complete_damage_covers_reorder_removal_and_retains_full_fallbacks() {
+        use super::super::frame_damage::difference;
+        let a = GuiFrameCommand {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 20,
+            ..rect(0xff0000)
+        };
+        let b = GuiFrameCommand {
+            x: 10,
+            y: 10,
+            w: 20,
+            h: 20,
+            ..rect(0x0000ff)
+        };
+        let regions = difference(&[a, b], &[], &[b, a], &[]).unwrap();
+        // Independent ordered rectangle oracle, including changed overlap.
+        let pixel = |commands: &[GuiFrameCommand], x: i32, y: i32| {
+            let mut color = 0;
+            for c in commands {
+                if x >= c.x
+                    && y >= c.y
+                    && i64::from(x) < i64::from(c.x) + i64::from(c.w)
+                    && i64::from(y) < i64::from(c.y) + i64::from(c.h)
+                {
+                    color = c.rgb;
+                }
+            }
+            color
+        };
+        for y in 0..32 {
+            for x in 0..32 {
+                if pixel(&[a, b], x, y) != pixel(&[b, a], x, y) {
+                    assert!(regions.as_slice().iter().any(|r| r.contains(x, y)));
+                }
+            }
+        }
+        let removed = difference(&[a, b], &[], &[a], &[]).unwrap();
+        assert!(removed.as_slice().iter().any(|r| r.contains(29, 29)));
+        for kind in [
+            a::gui_frame_command_kind_shared_raster,
+            a::gui_frame_command_kind_shadow,
+            u32::MAX,
+        ] {
+            let unknown = GuiFrameCommand { kind, ..a };
+            assert!(difference(&[unknown], &[], &[unknown], &[]).is_none());
+        }
+        let left = GuiFrameCommand {
+            x: i32::MIN + 1,
+            ..a
+        };
+        let right = GuiFrameCommand {
+            x: i32::MAX - 30,
+            ..b
+        };
+        assert!(difference(&[left, right], &[], &[a], &[]).is_none());
     }
     #[test]
     fn original_complete_generation_only() {

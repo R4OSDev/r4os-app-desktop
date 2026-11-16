@@ -50,7 +50,7 @@ impl Bounds {
         }
     }
 }
-fn command_bounds(command: &GuiFrameCommand, resources: &[u8]) -> Bounds {
+pub(super) fn command_bounds(command: &GuiFrameCommand, resources: &[u8]) -> Bounds {
     if command.version != abi::gui_frame_command_version
         || command.size != abi::gui_frame_command_size
     {
