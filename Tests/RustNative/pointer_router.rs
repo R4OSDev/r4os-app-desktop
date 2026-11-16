@@ -145,6 +145,62 @@ fn held(input: &mut State, remote: bool, buttons: u8) {
     }
 }
 #[test]
+fn hover_damage_tracks_chrome_taskbar_and_open_system_menu() {
+    with_router(|_, _, shell, hosted, _| {
+        hosted
+            .model
+            .windows
+            .window_mut(2)
+            .unwrap()
+            .bind_app(12, c"GUI");
+        hosted.model.windows.focus_or_restore(2);
+        for maximized in [false, true] {
+            if maximized {
+                hosted
+                    .model
+                    .windows
+                    .toggle_maximize(2, Rect::new(0, 0, 1280, 688));
+            }
+            let win = &hosted.model.windows.windows()[2];
+            let title = win.title_surface().rect;
+            let client = win.client_surface().rect;
+            let taskbar = Rect::new(0, 688, 1280, 32);
+            for (target, expected) in [
+                (Target::App2Taskbar, Some(taskbar)),
+                (Target::App2Close, Some(title)),
+                (Target::App2Min, Some(title)),
+                (Target::App2MaxNormal, Some(title)),
+                (Target::App2MaxFull, Some(title)),
+                (Target::App2Window, None),
+                (Target::App2Info, None),
+            ] {
+                let mut dirty = Dirty::default();
+                target_damage(target, hosted, shell, &mut dirty, 1280, 720);
+                eprintln!(
+                    "hover target={} damage={:?} client={:?}",
+                    target as u16,
+                    dirty.bounds(),
+                    client
+                );
+                assert_eq!(dirty.bounds(), expected);
+                assert!(!dirty.regions().iter().any(|r| r.intersects(client)));
+            }
+        }
+        shell.system_menu = Some(SystemMenu {
+            index: 2,
+            x: 10,
+            y: 40,
+        });
+        let menu = Rect::new(10, 40, 150, 108);
+        let mut dirty = Dirty::default();
+        target_damage(Target::App2Window, hosted, shell, &mut dirty, 1280, 720);
+        assert_eq!(dirty.bounds(), Some(menu));
+        let mut other = Dirty::default();
+        target_damage(Target::WmWindow, hosted, shell, &mut other, 1280, 720);
+        assert!(!other.active());
+    });
+}
+#[test]
 fn wheel_down_motion_and_release_finish_volume_drag_for_each_source() {
     with_router(|app, session, shell, hosted, outputs| {
         for remote in [false, true] {

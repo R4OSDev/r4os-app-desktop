@@ -131,10 +131,25 @@ fn target_damage(
     w: i32,
     h: i32,
 ) {
-    if let Some(i) = Controller::index_for_target(target) {
-        dirty.invalidate(hosted.model.windows.windows()[i].frame_surface().rect);
-    } else if (140..=149).contains(&(target as u16)) || (120..=133).contains(&(target as u16)) {
+    // Taskbar buttons share their window's action owner, but their hover is
+    // painted on the taskbar. Classify that surface before window ownership.
+    if (140..=149).contains(&(target as u16)) || (120..=133).contains(&(target as u16)) {
         dirty.invalidate(Rect::new(0, h - s::TASKBAR_H, w, s::TASKBAR_H));
+    } else if let Some(i) = Controller::index_for_target(target) {
+        let win = &hosted.model.windows.windows()[i];
+        if target != Controller::window_target(i)
+            && target != Controller::info_target(i)
+            && win.visible()
+            && !win.minimized()
+            && !win.fullscreen()
+        {
+            dirty.invalidate(win.title_surface().rect);
+        }
+        // Restore/Info have no hover on window content/chrome. The same IDs
+        // are also used by the open system menu, whose highlight must repaint.
+        if let Some(menu) = shell.system_menu.filter(|menu| menu.index == i) {
+            dirty.invalidate(Rect::new(menu.x, menu.y, 150, 108));
+        }
     } else if (150..=181).contains(&(target as u16)) {
         if let Some(item) = shell.folder.items.entries().get(target as usize - 150) {
             dirty.invalidate(item_rect(item));
