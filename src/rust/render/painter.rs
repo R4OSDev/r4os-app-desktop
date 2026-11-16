@@ -49,6 +49,12 @@ impl<'a, 'pixels> Painter<'a, 'pixels> {
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
+    pub(crate) fn unit_grid(&self) -> bool {
+        self.recording
+            .as_ref()
+            .and_then(|r| r.view())
+            .is_none_or(|v| v.scale == 120)
+    }
     pub fn records_primitives(&self) -> bool {
         self.recording.is_some()
     }

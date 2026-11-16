@@ -52,6 +52,8 @@ pub(super) fn coverage(
     y: usize,
     contains: impl Fn(Point) -> bool,
 ) -> u8 {
+    #[cfg(test)]
+    work::add();
     let mut covered = 0u32;
     for (dx, dy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
         let point = Point {
@@ -171,5 +173,19 @@ pub(super) fn blur_vertical(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: u
                 sum += u32::from(src[add * w + x]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod work {
+    std::thread_local! { static COUNT: core::cell::Cell<u64> = const { core::cell::Cell::new(0) }; }
+    pub fn reset() {
+        COUNT.with(|c| c.set(0));
+    }
+    pub fn add() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+    pub fn get() -> u64 {
+        COUNT.with(|c| c.get())
     }
 }

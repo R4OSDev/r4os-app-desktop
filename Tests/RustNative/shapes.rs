@@ -507,3 +507,297 @@ pub(super) fn conformance_probe() {
     malformed_or_overbudget_gradients_do_not_paint();
     scratch_reuse_keeps_mixed_pixels_and_recovers_after_invalid_input();
 }
+
+#[test]
+fn large_rounded_panels_reuse_small_corners_without_slot_exhaustion() {
+    use crate::render::{
+        content_hash::{Blake3, work},
+        primitive_frame::Frame,
+    };
+    let bounds = Rect::new(0, 0, 640, 360);
+    let resource = rounded(0.0, 0.0, 512.0, 256.0, [12.0; 8], 0xff4080c0);
+    let draw = command(a::gui_frame_command_kind_rounded_rect, 512, 256, &resource);
+    let mut pixels = vec![0x203040; 640 * 360];
+    let mut scene = CpuScene::new(&mut pixels, 640, 360).unwrap();
+    let mut renderer = Renderer::default();
+    mask::work::reset();
+    let started = std::time::Instant::now();
+    renderer
+        .paint(&mut Painter::cpu(&mut scene), bounds, &draw, &resource)
+        .unwrap();
+    let elapsed = started.elapsed().as_nanos();
+    let coverage = mask::work::get();
+    let mut hash = Blake3::new();
+    for p in &pixels {
+        hash.update(&p.to_le_bytes());
+    }
+    let digest = hash.finish();
+    assert_eq!(
+        digest,
+        core::array::from_fn(|i| u8::from_str_radix(
+            &"fc204ac4fa864c900818963f763cc37f1c0edcf967a8f9f9c3cb5700172be87f"[i * 2..i * 2 + 2],
+            16
+        )
+        .unwrap())
+    );
+    println!(
+        "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"shape CPU raster\",\"elapsed_ns\":{elapsed},\"coverage_pixels\":{coverage},\"pixel_blake3\":\"{}\",\"retained_mask_capacity\":{}}}",
+        digest
+            .iter()
+            .map(|v| format!("{v:02x}"))
+            .collect::<alloc::string::String>(),
+        renderer.pixels.capacity()
+    );
+    let mut frame = Frame::new().unwrap();
+    frame.set_mirror(false).unwrap();
+    frame.start(1).unwrap();
+    frame.begin(0, bounds).unwrap();
+    mask::work::reset();
+    work::reset();
+    let mut accepted = 0;
+    let mut failure = None;
+    for n in 0..48 {
+        let resource = rounded(0.0, 0.0, (512 + n) as f32, 256.0, [12.0; 8], 0xff4080c0);
+        let draw = command(
+            a::gui_frame_command_kind_rounded_rect,
+            512 + n,
+            256,
+            &resource,
+        );
+        let mut painter = Painter::recorded(None, &mut frame, bounds, bounds);
+        match renderer.paint(&mut painter, bounds, &draw, &resource) {
+            Ok(true) => accepted += 1,
+            Ok(false) => panic!("visible panel missing"),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+    let mut upload_bytes = 0u64;
+    let mut upload_jobs = 0u64;
+    for index in 0..crate::render::primitive_assets::TEXTURE_CAPACITY {
+        let texture = frame.assets.texture(index);
+        if let Some(d) = texture.dirty {
+            upload_bytes += d.w as u64 * d.h as u64 * 4;
+            upload_jobs += ((d.w as u64 + 511) / 512) * ((d.h as u64 + 511) / 512);
+        }
+    }
+    let (updates, bytes) = work::get();
+    let coverage = mask::work::get();
+    println!(
+        "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"shape native CPU recording\",\"panels\":{accepted},\"coverage_pixels\":{coverage},\"hash_updates\":{updates},\"hash_bytes\":{bytes},\"planned_upload_bytes\":{upload_bytes},\"planned_512_upload_jobs\":{upload_jobs},\"commands\":{},\"asset_misses\":{},\"asset_hits\":{},\"converted_pixels\":{},\"asset_reserved_bytes\":{},\"failure\":\"{failure:?}\"}}",
+        frame.commands().len(),
+        frame.assets.misses,
+        frame.assets.hits,
+        frame.assets.converted_pixels,
+        frame.assets.reserved()
+    );
+    assert_eq!(accepted, 48);
+    assert!(failure.is_none());
+    frame.end().unwrap();
+}
+
+#[test]
+fn partitioned_panels_match_original_raster_for_damage_offsets_radii_and_scale() {
+    let bounds = Rect::new(13, 11, 600, 320);
+    for radius in [0.0, 1.0, 12.0, 64.0] {
+        for (dx, dy) in [(-7, -4), (17, 9)] {
+            for clip in [
+                Rect::new(0, 0, 640, 360),
+                Rect::new(10, 5, 400, 200),
+                Rect::new(3, 6, 1, 1),
+                Rect::new(440, 210, 200, 150),
+            ] {
+                let resource = rounded(0.0, 0.0, 512.0, 256.0, [radius; 8], 0xff4080c0);
+                let mut draw = command(a::gui_frame_command_kind_rounded_rect, 512, 256, &resource);
+                draw.x = dx;
+                draw.y = dy;
+                let mut original = vec![0x203040; 640 * 360];
+                let mut pixels = original.clone();
+                let mut scene = CpuScene::new(&mut original, 640, 360).unwrap();
+                scene.set_paint_clip(clip);
+                let mut painter = Painter::cpu(&mut scene);
+                if let Some(area) = mask::area(painter.clip(), bounds, &draw, 0) {
+                    Renderer::default()
+                        .paint_raster(
+                            &mut painter,
+                            bounds,
+                            &draw,
+                            format::parse(&draw, &resource).unwrap(),
+                            area,
+                            0,
+                        )
+                        .unwrap();
+                }
+                let mut scene = CpuScene::new(&mut pixels, 640, 360).unwrap();
+                scene.set_paint_clip(clip);
+                Renderer::default()
+                    .paint(&mut Painter::cpu(&mut scene), bounds, &draw, &resource)
+                    .unwrap();
+                for (i, (actual, expected)) in pixels.iter().zip(&original).enumerate() {
+                    assert_eq!(
+                        actual,
+                        expected,
+                        "r{radius} offset{dx},{dy} clip{clip:?} pixel{},{}",
+                        i % 640,
+                        i / 640
+                    );
+                }
+            }
+        }
+    }
+    // Fractional output scale keeps the original full mask and sampling grid.
+    use crate::render::{output_geometry::topology::Viewport, primitive_frame::Frame};
+    let bounds = Rect::new(0, 0, 640, 360);
+    let resource = rounded(0.0, 0.0, 512.0, 256.0, [12.0; 8], 0xff4080c0);
+    let draw = command(a::gui_frame_command_kind_rounded_rect, 512, 256, &resource);
+    let mut frame = Frame::new().unwrap();
+    frame.set_mirror(false).unwrap();
+    frame
+        .set_view(Some(Viewport {
+            pixel_w: 800,
+            pixel_h: 600,
+            scale: 150,
+            ..Default::default()
+        }))
+        .unwrap();
+    frame.start(1).unwrap();
+    frame.begin(0, bounds).unwrap();
+    mask::work::reset();
+    Renderer::default()
+        .paint(
+            &mut Painter::recorded(None, &mut frame, bounds, bounds),
+            bounds,
+            &draw,
+            &resource,
+        )
+        .unwrap();
+    frame.end().unwrap();
+    assert_eq!(frame.commands().len(), 1);
+    assert_eq!(mask::work::get(), 512 * 256);
+}
+
+#[test]
+fn complex_shape_masks_keep_original_admission_and_upload_ownership() {
+    use crate::render::{content_hash::work, primitive_frame::Frame};
+    let bounds = Rect::new(0, 0, 640, 360);
+    for case in 0..4 {
+        let (kind, resource) = match case {
+            0 => {
+                let mut b = rounded(0.0, 0.0, 512.0, 256.0, [12.0; 8], 0x804080c0);
+                field!(&mut b, stroke_argb, 0xffff0022);
+                for name in [
+                    core::mem::offset_of!(a::GuiShapeResource, border_top_bits),
+                    core::mem::offset_of!(a::GuiShapeResource, border_right_bits),
+                    core::mem::offset_of!(a::GuiShapeResource, border_bottom_bits),
+                    core::mem::offset_of!(a::GuiShapeResource, border_left_bits),
+                ] {
+                    put(&mut b, name, 2f32.to_bits());
+                }
+                (a::gui_frame_command_kind_rounded_rect, b)
+            }
+            1 => {
+                let mut b = rounded(8.0, 8.0, 496.0, 240.0, [12.0; 8], 0);
+                field!(&mut b, shadow_argb, 0x804080c0);
+                scalar!(&mut b, shadow_blur_bits, 4.0);
+                (a::gui_frame_command_kind_shadow, b)
+            }
+            2 => {
+                let mut b = path(0xff4080c0, 0, 0.0, false);
+                segment(&mut b, a::gui_path_segment_kind_move, &[(0.0, 0.0)]);
+                segment(&mut b, a::gui_path_segment_kind_line, &[(512.0, 0.0)]);
+                segment(&mut b, a::gui_path_segment_kind_line, &[(512.0, 256.0)]);
+                segment(&mut b, a::gui_path_segment_kind_line, &[(0.0, 256.0)]);
+                segment(&mut b, a::gui_path_segment_kind_close, &[]);
+                (a::gui_frame_command_kind_path_fill, b)
+            }
+            _ => {
+                let mut b = rounded(8.0, 8.0, 496.0, 240.0, [12.0; 8], 0);
+                scalar!(&mut b, shadow_blur_bits, 4.0);
+                (a::gui_frame_command_kind_shadow, b)
+            }
+        };
+        let draw = command(kind, 512, 256, &resource);
+        let mut frame = Frame::new().unwrap();
+        frame.set_mirror(false).unwrap();
+        frame.start(1).unwrap();
+        frame.begin(0, bounds).unwrap();
+        let mut owner = Renderer::default();
+        mask::work::reset();
+        work::reset();
+        assert_eq!(
+            owner
+                .paint(
+                    &mut Painter::recorded(None, &mut frame, bounds, bounds),
+                    bounds,
+                    &draw,
+                    &resource
+                )
+                .unwrap(),
+            case != 3
+        );
+        frame.end().unwrap();
+        let (updates, bytes) = work::get();
+        let coverage = mask::work::get();
+        let mut upload_bytes = 0u64;
+        let mut jobs = 0u64;
+        for n in 0..crate::render::primitive_assets::TEXTURE_CAPACITY {
+            if let Some(d) = frame.assets.texture(n).dirty {
+                upload_bytes += d.w as u64 * d.h as u64 * 4;
+                jobs += ((d.w as u64 + 511) / 512) * ((d.h as u64 + 511) / 512);
+            }
+        }
+        println!(
+            "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"shape raster fallback and transparent elision\",\"case\":{case},\"coverage_pixels\":{coverage},\"hash_updates\":{updates},\"hash_bytes\":{bytes},\"planned_upload_bytes\":{upload_bytes},\"planned_512_upload_jobs\":{jobs},\"commands\":{},\"retained_mask_bytes\":{}}}",
+            frame.commands().len(),
+            owner.pixels.capacity() + owner.scratch.capacity()
+        );
+        assert_eq!(
+            coverage,
+            512 * 256
+                * if case == 3 {
+                    0
+                } else if case == 0 {
+                    2
+                } else {
+                    1
+                }
+        );
+        if case == 3 {
+            let mut original = Renderer::default();
+            let mut prior = Frame::new().unwrap();
+            prior.set_mirror(false).unwrap();
+            prior.start(1).unwrap();
+            prior.begin(0, bounds).unwrap();
+            let mut painter = Painter::recorded(None, &mut prior, bounds, bounds);
+            let parsed = format::parse(&draw, &resource).unwrap();
+            let area = mask::area(bounds, bounds, &draw, 4).unwrap();
+            mask::work::reset();
+            assert!(
+                !original
+                    .paint_raster(&mut painter, bounds, &draw, parsed, area, 4)
+                    .unwrap()
+            );
+            prior.end().unwrap();
+            assert_eq!(mask::work::get(), 512 * 256);
+            assert_eq!(prior.commands().len(), 0);
+            assert_eq!(owner.pixels.capacity() + owner.scratch.capacity(), 0);
+            println!(
+                "{{\"schema\":\"r4os.desktop-work\",\"scope\":\"original transparent shadow raster reference\",\"coverage_pixels\":{},\"mask_capacity\":{}}}",
+                mask::work::get(),
+                original.pixels.capacity() + original.scratch.capacity()
+            );
+        }
+        assert_eq!(
+            frame.commands().len(),
+            if case == 3 {
+                0
+            } else if case == 0 {
+                2
+            } else {
+                1
+            }
+        );
+    }
+}
