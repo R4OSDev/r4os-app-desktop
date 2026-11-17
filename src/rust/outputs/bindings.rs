@@ -2,21 +2,32 @@
 //! intersecting output must admit the same consumer; no adapter guessing.
 use super::manager::Manager;
 use crate::{
-    hosted::window_set::{self, Binding, KindOfConsumer},
+    hosted::window_set::{Binding, KindOfConsumer},
     render::{geometry::Rect, scene::intersect},
 };
 use r4os_sdk::{abi as a, graphics::Graphics};
+/// Each managed window resolves its own output. A primary-only refresh needs
+/// one backend read, including when that read reports no available binding.
+pub fn for_refresh(
+    managed: bool,
+    mut primary: impl FnMut() -> Option<Binding>,
+    mut per_output: impl FnMut(Rect) -> Option<Binding>,
+) -> impl FnMut(Rect) -> Option<Binding> {
+    let mut cached = None;
+    move |client| {
+        if managed {
+            per_output(client)
+        } else {
+            *cached.get_or_insert_with(&mut primary)
+        }
+    }
+}
 pub fn select(
     manager: &Manager<'_>,
     graphics: &Graphics<'_, '_>,
     client: Rect,
-    revision: u64,
     time: u64,
-    primary_ready: bool,
 ) -> Option<Binding> {
-    if !manager.active() {
-        return window_set::primary_software(graphics, revision, primary_ready);
-    }
     let required = r4gfx::device_gpu_render
         | r4gfx::device_gpu_render_list
         | r4gfx::device_gpu_grid

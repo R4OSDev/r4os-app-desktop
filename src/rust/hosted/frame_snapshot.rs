@@ -1498,4 +1498,120 @@ mod tests {
             &mut reader
         ));
     }
+    #[test]
+    fn window_refresh_queries_only_admitted_outputs() {
+        use crate::hosted::{
+            client::{Clients, Origin},
+            window_image::NativeMemory,
+            window_set::{Binding, KindOfConsumer, Set},
+        };
+        use crate::{outputs::bindings, render::geometry::Rect, windows::controller::Controller};
+        use core::cell::Cell;
+
+        let mut windows = Controller::default();
+        let mut clients = Clients::default();
+        let primary_calls = Cell::new(0);
+        let managed_calls = Cell::new(0);
+        let binding = |connector| Binding {
+            backend: Default::default(),
+            target: a::GfxOutputTarget {
+                connector_id: connector,
+                ..Default::default()
+            },
+            ready: true,
+            kind: KindOfConsumer::Cpu,
+            headless_revision: None,
+            scale: 120,
+        };
+        let refresh = |windows: &Controller,
+                       clients: &Clients,
+                       managed,
+                       available,
+                       primary: Option<u32>,
+                       mirrored| {
+            Set::<NativeMemory>::specifications(
+                windows,
+                clients,
+                mirrored,
+                available,
+                false,
+                bindings::for_refresh(
+                    managed,
+                    || {
+                        primary_calls.set(primary_calls.get() + 1);
+                        primary.map(binding)
+                    },
+                    |rect| {
+                        managed_calls.set(managed_calls.get() + 1);
+                        Some(binding(if rect.x < 500 { 1 } else { 2 }))
+                    },
+                ),
+            )
+            .map(|s| s.map(|s| s.config.output.connector_id))
+        };
+        let all = [true; 4];
+        assert_eq!(
+            refresh(&windows, &clients, false, true, Some(3), all),
+            [None; 4]
+        );
+        assert_eq!(primary_calls.get(), 0);
+        for (index, position) in [(1, 0), (2, 600), (3, 650)] {
+            let handle = owner(index as u32 + 10, 7);
+            let mut reader = Fake::new(handle, 1, &[], &[]);
+            assert!(clients.slot_mut(index).unwrap().bind(
+                handle,
+                Origin::Adopted,
+                b"app",
+                &mut reader
+            ));
+            let w = windows.window_mut(index).unwrap();
+            w.bind_app(handle.instance_id, c"App");
+            w.set_normal(Rect::new(position, 20, 250, 110));
+            if index == 1 {
+                assert_eq!(
+                    refresh(&windows, &clients, false, true, Some(3), all),
+                    [None, Some(3), None, None]
+                );
+                assert_eq!(primary_calls.get(), 1);
+            }
+        }
+        assert_eq!(
+            refresh(&windows, &clients, false, true, Some(4), all),
+            [None, Some(4), Some(4), Some(4)]
+        );
+        assert_eq!(primary_calls.get(), 2);
+        assert_eq!(
+            refresh(&windows, &clients, false, true, None, all),
+            [None; 4]
+        );
+        assert_eq!(primary_calls.get(), 3);
+        assert_eq!(
+            refresh(&windows, &clients, true, true, None, all),
+            [None, Some(1), Some(2), Some(2)]
+        );
+        assert_eq!(managed_calls.get(), 3);
+        windows
+            .window_mut(1)
+            .unwrap()
+            .set_normal(Rect::new(700, 30, 250, 110));
+        let retiring = clients.slots()[3].handle();
+        assert!(clients.slot_mut(3).unwrap().record_completion(retiring, 0));
+        assert_eq!(
+            refresh(
+                &windows,
+                &clients,
+                true,
+                true,
+                None,
+                [true, true, false, true]
+            ),
+            [None, Some(2), None, None]
+        );
+        assert_eq!(managed_calls.get(), 4);
+        assert_eq!(
+            refresh(&windows, &clients, false, false, Some(3), all),
+            [None; 4]
+        );
+        assert_eq!(primary_calls.get(), 3);
+    }
 }

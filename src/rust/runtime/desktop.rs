@@ -568,21 +568,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 .finish_pointer(index, request, time.tick.max(1), result);
         }
         self.poll_loads(env, session, programs, time, false);
-        let bindings = core::array::from_fn(|i| {
-            if !self.outputs.active()
-                && self.primary_admission == outputs::primary::Admission::Native
-            {
-                return None;
-            }
-            bindings::select(
-                &self.outputs,
-                env.graphics,
-                self.hosted.model.windows.windows()[i].client_surface().rect,
-                self.revision,
-                time.nanoseconds,
-                self.primary_admission != outputs::primary::Admission::Pending,
-            )
-        });
         let mirrored = core::array::from_fn(|i| self.hosted.mirror.mirrored(i));
         let specs = WindowImages::specifications(
             &self.hosted.model.windows,
@@ -590,7 +575,20 @@ impl<'a, 'input> Desktop<'a, 'input> {
             mirrored,
             self.hosted.mirror.gate.available(),
             self.hosted.terminal_mode,
-            bindings,
+            bindings::for_refresh(
+                self.outputs.active(),
+                || {
+                    if self.primary_admission == outputs::primary::Admission::Native {
+                        return None;
+                    }
+                    crate::hosted::window_set::primary_software(
+                        env.graphics,
+                        self.revision,
+                        self.primary_admission != outputs::primary::Admission::Pending,
+                    )
+                },
+                |client| bindings::select(&self.outputs, env.graphics, client, time.nanoseconds),
+            ),
         );
         let mut transport = NativeTransport { host, programs };
         self.windows

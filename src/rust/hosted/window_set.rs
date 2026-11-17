@@ -8,7 +8,11 @@ use super::{
     window_image::{Identity, Memory, NoReceipt, Receipt},
 };
 use crate::{
-    render::{color, geometry::Dirty, software::ExternalFrame},
+    render::{
+        color,
+        geometry::{Dirty, Rect},
+        software::ExternalFrame,
+    },
     runtime::{service::Host, wire::Wire},
     windows::{
         controller::Controller,
@@ -85,7 +89,7 @@ pub fn specification(
     mirrored: bool,
     service_available: bool,
     terminal_mode: bool,
-    binding: Binding,
+    binding: impl FnOnce(Rect) -> Option<Binding>,
 ) -> Option<Spec> {
     if index == 0
         || !mirrored
@@ -101,6 +105,7 @@ pub fn specification(
     if client.is_empty() || client.w > 32768 || client.h > 32768 {
         return None;
     }
+    let binding = binding(client)?;
     let (width, height) = if matches!(binding.kind, KindOfConsumer::Gpu) {
         let scale = u64::from(binding.scale);
         let width = (client.w as u64 * scale).div_ceil(120);
@@ -166,7 +171,7 @@ impl<M: Memory, R: Receipt> Set<M, R> {
         mirrored: [bool; 4],
         available: bool,
         terminal_mode: bool,
-        bindings: [Option<Binding>; 4],
+        mut binding: impl FnMut(Rect) -> Option<Binding>,
     ) -> [Option<Spec>; 4] {
         core::array::from_fn(|i| {
             if clients.slots()[i].retiring() {
@@ -179,7 +184,7 @@ impl<M: Memory, R: Receipt> Set<M, R> {
                     mirrored[i],
                     available,
                     terminal_mode,
-                    bindings[i]?,
+                    &mut binding,
                 )
             }
         })
