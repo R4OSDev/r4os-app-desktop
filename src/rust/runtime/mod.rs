@@ -14,6 +14,9 @@ pub mod service;
 mod shell_io;
 mod test_start;
 #[cfg(test)]
+#[path = "../../../Tests/RustNative/layout_transition.rs"]
+mod layout_transition;
+#[cfg(test)]
 #[path = "../../../Tests/RustNative/runtime_foundation.rs"]
 mod tests;
 pub mod views;

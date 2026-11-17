@@ -18,7 +18,7 @@ struct Save {
     raw: usize,
     expected: &'static StartupInfo<'static>,
     bytes: Vec<u8>,
-    generation: u32,
+    generation: u64,
 }
 impl Task for Save {
     fn run(&mut self, _: &Control) -> i32 {
@@ -43,7 +43,8 @@ impl Task for Save {
 }
 pub struct Owner<'a> {
     policy: c::R4StdSettingsWriteback,
-    generation: u32,
+    generation: u64,
+    saved_generation: u64,
     worker: Option<Worker<'a, Save>>,
     _standard: PhantomData<&'a Standard<'a>>,
 }
@@ -65,6 +66,7 @@ impl<'a> Owner<'a> {
         Ok(Self {
             policy: unsafe { state.assume_init() },
             generation: 0,
+            saved_generation: 0,
             worker: None,
             _standard: PhantomData,
         })
@@ -117,19 +119,64 @@ impl<'a> Owner<'a> {
             .is_ok_and(|v| v != 0)
     }
     pub fn poll(&mut self, app: &App2<'_>, tick: u64) -> bool {
+        self.collect(app, tick).unwrap_or(false)
+    }
+    fn collect(
+        &mut self,
+        app: &App2<'_>,
+        tick: u64,
+    ) -> Result<bool, crate::runtime::worker::Error> {
         let Some(worker) = self.worker.as_mut() else {
-            return false;
+            return Ok(false);
         };
-        let Ok(Some((code, save))) = worker.collect() else {
-            return false;
+        let Some((code, save)) = worker.collect()? else {
+            return Ok(false);
         };
         self.worker = None;
         let changed = self.complete(app, tick, code);
-        if code >= 0 && save.generation != self.generation {
-            let _ =
-                result(unsafe { c::R4StdSettingsWriteback_markDirty(0, &mut self.policy, tick) });
+        if code >= 0 {
+            self.saved_generation = save.generation;
+            if self.saved_generation != self.generation {
+                let _ = result(unsafe {
+                    c::R4StdSettingsWriteback_markDirty(0, &mut self.policy, tick)
+                });
+            }
         }
-        changed
+        Ok(changed)
+    }
+    /// # Safety
+    /// The caller keeps the loader context and task code resident through the join.
+    pub unsafe fn save_before_transition(
+        &mut self,
+        app: &App2<'_>,
+        resources: &'a Resources<'a>,
+        standard: &Standard<'_>,
+        expected: &'static StartupInfo<'static>,
+        items: &Items,
+        fallback_tick: u64,
+    ) -> bool {
+        let target = self.generation;
+        let mut attempted = false;
+        loop {
+            let tick = r4os_sdk::time::Clock::new2(app)
+                .ticks()
+                .unwrap_or(fallback_tick);
+            if self.collect(app, tick).is_err() {
+                return false;
+            }
+            if self.busy() {
+                app.sleep(1);
+            } else if self.saved_generation == target {
+                return true;
+            } else if attempted {
+                return false;
+            } else {
+                attempted = true;
+                unsafe {
+                    self.flush(app, resources, expected, standard, items, tick, true);
+                }
+            }
+        }
     }
     /// # Safety
     /// Loader context and this module's task code remain resident until `busy`

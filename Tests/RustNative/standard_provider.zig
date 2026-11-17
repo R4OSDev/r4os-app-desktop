@@ -161,6 +161,9 @@ export fn r4desk_wire_check(kind: u32, bytes: [*]const u8, count: usize) callcon
     return 0;
 }
 var system: r.platform2.abi.R4XStartR4Sys2 = .{};
+export fn r4desk_swap_test_system(value: *r.platform2.abi.R4XStartR4Sys2) callconv(.c) void {
+    @import("std").mem.swap(r.platform2.abi.R4XStartR4Sys2, &system, value);
+}
 var imports: [7]r.abi.R4XStartImport = undefined;
 var context: r.platform2.abi.R4XStartContext2 = undefined;
 fn keepOpen(_: *const r.platform2.abi.R4XStartContext2) callconv(.c) u32 {

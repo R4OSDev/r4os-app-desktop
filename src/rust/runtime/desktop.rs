@@ -1284,22 +1284,22 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.message(MessageKind::Error, b"Run", b"Invalid command or path.")
             }
             Action::System(action) => {
-                unsafe {
-                    self.layout.flush(
+                if !unsafe {
+                    self.layout.save_before_transition(
                         env.app,
                         env.resources,
-                        self.expected,
                         env.standard,
+                        self.expected,
                         &self.shell.folder.items,
                         time.tick,
-                        true,
+                    )
+                } {
+                    self.message(
+                        MessageKind::Error,
+                        b"Desktop layout could not be saved",
+                        b"Check storage and try again.",
                     );
-                }
-                while self.layout.busy() {
-                    env.app.sleep(1);
-                    let _ = self
-                        .layout
-                        .poll(env.app, env.time().map_or(time.tick, |v| v.tick));
+                    return;
                 }
                 let _ = super::shell_io::system(env, action);
                 self.message(MessageKind::Info,b"System transition refused",b"CPU requests could not be returned. The system remains running; inspect POWERSVC before retrying.");
