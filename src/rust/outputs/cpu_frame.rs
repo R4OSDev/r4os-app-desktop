@@ -172,9 +172,17 @@ impl State {
             ..Default::default()
         };
         let rc = unsafe {
-            session
-                .client
-                .swapchain_present(session.raw(), &self.chain, &request)
+            session.client.swapchain_present_region(
+                session.raw(),
+                &self.chain,
+                &request,
+                &g::R4GfxRect {
+                    x: native_damage.x.try_into().map_err(|_| Error::State)?,
+                    y: native_damage.y.try_into().map_err(|_| Error::State)?,
+                    width: native_damage.w.try_into().map_err(|_| Error::State)?,
+                    height: native_damage.h.try_into().map_err(|_| Error::State)?,
+                },
+            )
         };
         if rc != g::status_ok {
             if rc != g::status_busy && rc != g::status_occluded {

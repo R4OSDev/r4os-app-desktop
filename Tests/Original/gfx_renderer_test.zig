@@ -32,6 +32,7 @@ pub const table: provider.c.DeviceV1 = .{
     .swapchain_open = provider.swapchain.open,
     .swapchain_acquire = provider.swapchain.acquire,
     .swapchain_present = provider.swapchain.present,
+    .swapchain_present_region = provider.swapchain.presentRegion,
     .swapchain_poll = provider.swapchain.poll,
     .swapchain_release = provider.swapchain.release,
     .swapchain_resize = provider.swapchain.resize,
