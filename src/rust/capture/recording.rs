@@ -5,7 +5,7 @@ use super::{
     file::{self, Output, Retained},
     source::{Loans, Source},
 };
-use crate::runtime::worker::{Control, Task, Worker};
+use crate::runtime::worker::{ActivityNotify, Control, Task, Worker};
 use core::{fmt::Write, pin::pin};
 use r4enc as e;
 use r4os_library_helpers::media::Mux;
@@ -52,6 +52,7 @@ pub struct Manager<'a> {
     expected: &'static StartupInfo<'static>,
     runtime: Option<e::R4EncRuntime>,
     job: Option<Worker<'a, Job>>,
+    notify: Option<ActivityNotify>,
     retained: Option<Job>,
 }
 impl<'a> Manager<'a> {
@@ -68,8 +69,30 @@ impl<'a> Manager<'a> {
             expected,
             runtime: None,
             job: None,
+            notify: app
+                .context()
+                .lookup(
+                    2,
+                    core::mem::offset_of!(a::generation2::R4XStartR4Desk2, desktop_activity_notify)
+                        as u32,
+                )
+                .ok()
+                .map(|slot| unsafe { core::mem::transmute::<u64, ActivityNotify>(slot) }),
             retained: None,
         })
+    }
+    pub fn wait_ticks(&self, now: u64, hz: u32, limit: u64) -> u64 {
+        if self.retained.is_some() {
+            return limit.min(1);
+        }
+        let Some(job) = &self.job else { return limit };
+        if job.finished() || (self.notify.is_none() && job.stopping()) {
+            return limit.min(1);
+        }
+        if job.stopping() {
+            return limit;
+        }
+        deadline_ticks(job.deadline(), now, hz, limit)
     }
     pub fn active(&self) -> bool {
         self.job.is_some() || self.retained.is_some()
@@ -97,7 +120,7 @@ impl<'a> Manager<'a> {
             part: 0,
             software_only: false,
         };
-        match unsafe { Worker::start(self.resources, job, 256 * 1024) } {
+        match unsafe { Worker::start_with_notify(self.resources, job, 256 * 1024, self.notify) } {
             Ok(worker) => {
                 self.job = Some(worker);
                 true
@@ -199,6 +222,25 @@ impl Task for Job {
             let _ = app.write("Recording failed\r\n");
         }
         if self.report.ok { 0 } else { -1 }
+    }
+}
+fn deadline_ticks(deadline: u64, now: u64, hz: u32, limit: u64) -> u64 {
+    if deadline == 0 {
+        return limit;
+    }
+    let ns = u128::from(deadline.saturating_sub(now));
+    let ticks = (ns * u128::from(hz)).div_ceil(1_000_000_000);
+    ticks.max(1).min(u128::from(limit)) as u64
+}
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    #[test]
+    fn recording_deadline_preserves_idle_ticks_and_independent_input_budget() {
+        assert_eq!(deadline_ticks(35_000_001, 5_000_000, 1000, 500), 31);
+        assert_eq!(deadline_ticks(35_000_001, 5_000_000, 1000, 7), 7);
+        assert_eq!(deadline_ticks(35, 35, 1000, 500), 1);
+        assert_eq!(deadline_ticks(0, 35, 1000, 500), 500);
     }
 }
 #[derive(Clone, Copy)]
@@ -399,11 +441,18 @@ impl Job {
             if control.stopped() {
                 return Ok(Next::Stopped);
             }
-            let time = encoder::now(app)?;
+            let sample = app.clock().monotonic().map_err(|_| Error::Clock)?;
+            let time = sample.instant_ns;
             if time < self.next {
-                app.sleep(1);
+                app.sleep(deadline_ticks(
+                    self.next,
+                    time,
+                    sample.event_requested_hz,
+                    u64::MAX,
+                ));
                 continue;
             }
+            control.publish_deadline(0);
             if source.snapshot(&mut self.loans).is_err() {
                 if self.loans.info().is_some() {
                     return Err(Error::Capture);
@@ -426,6 +475,7 @@ impl Job {
                     return Err(Error::Retirement);
                 }
                 self.next = time.saturating_add(INTERVAL);
+                control.publish_deadline(self.next);
                 continue;
             }
             let converted = codec.convert(
@@ -447,6 +497,7 @@ impl Job {
             let pts = encoder::now(app)?;
             self.last = pts;
             self.next = pts.saturating_add(INTERVAL);
+            control.publish_deadline(self.next);
             match codec.encode(pts, mux, output) {
                 Ok(previous) => {
                     if previous {

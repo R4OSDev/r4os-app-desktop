@@ -15,12 +15,30 @@ pub trait Task: Send + 'static {
     const COMPUTE: bool = true;
     fn run(&mut self, control: &Control) -> i32;
 }
+pub type ActivityNotify = r4os_sdk::abi::R4DeskFns::desktop_activity_notify;
 pub struct Control {
+    deadline_ns: AtomicU64,
+    notify: Option<ActivityNotify>,
     stop_ns: AtomicU64,
     phase: AtomicU32,
     done: AtomicBool,
 }
 impl Control {
+    pub fn publish_deadline(&self, next: u64) {
+        let previous = self.deadline_ns.swap(next, Ordering::AcqRel);
+        if next != 0 && (previous == 0 || next < previous) {
+            self.notify_activity();
+        }
+    }
+    fn notify_activity(&self) {
+        if let Some(notify) = self.notify {
+            unsafe { notify() };
+        }
+    }
+    fn complete(&self) {
+        self.done.store(true, Ordering::Release);
+        self.notify_activity();
+    }
     pub fn phase(&self) -> u32 {
         self.phase.load(Ordering::Acquire)
     }
@@ -74,6 +92,16 @@ impl<'a, P: Task> Worker<'a, P> {
         task: P,
         stack: u64,
     ) -> Result<Self, StartError<P>> {
+        unsafe { Self::start_with_notify(resources, task, stack, None) }
+    }
+    /// # Safety
+    /// The optional platform callback stays resident until the thread has joined.
+    pub unsafe fn start_with_notify(
+        resources: &'a Resources<'a>,
+        task: P,
+        stack: u64,
+        notify: Option<ActivityNotify>,
+    ) -> Result<Self, StartError<P>> {
         let layout = Layout::new::<Shared<P>>();
         let pointer = match NonNull::new(unsafe { alloc(layout) }.cast::<Shared<P>>()) {
             Some(pointer) => pointer,
@@ -87,6 +115,8 @@ impl<'a, P: Task> Worker<'a, P> {
         unsafe {
             pointer.as_ptr().write(Shared {
                 control: Control {
+                    deadline_ns: AtomicU64::new(0),
+                    notify,
                     stop_ns: AtomicU64::new(0),
                     phase: AtomicU32::new(0),
                     done: AtomicBool::new(false),
@@ -135,6 +165,11 @@ impl<'a, P: Task> Worker<'a, P> {
         self.pointer
             .map_or(0, |p| unsafe { &(*p.as_ptr()).control }.phase())
     }
+    pub fn deadline(&self) -> u64 {
+        self.pointer.map_or(0, |p| unsafe {
+            p.as_ref().control.deadline_ns.load(Ordering::Acquire)
+        })
+    }
     pub fn finished(&self) -> bool {
         self.pointer.is_none_or(|pointer| {
             unsafe { &(*pointer.as_ptr()).control }
@@ -169,9 +204,38 @@ impl<P: Task> Drop for Worker<'_, P> {
 unsafe extern "C" fn run<P: Task>(raw: u64) -> i32 {
     let shared = unsafe { &*(raw as *const Shared<P>) };
     let code = unsafe { &mut *shared.task.get() }.run(&shared.control);
-    shared.control.done.store(true, Ordering::Release);
+    shared.control.complete();
     code
 }
 #[cfg(test)]
 #[path = "../../../Tests/RustNative/worker.rs"]
 mod tests;
+
+#[cfg(test)]
+mod recording_notify_tests {
+    use super::*;
+    #[test]
+    fn recording_deadline_publication_and_completion_notify_after_state_change() {
+        static SIGNALS: AtomicU32 = AtomicU32::new(0);
+        unsafe extern "C" fn notify() -> i32 {
+            SIGNALS.fetch_add(1, Ordering::Release);
+            0
+        }
+        let ctrl = Control {
+            deadline_ns: AtomicU64::new(0),
+            notify: Some(notify),
+            stop_ns: AtomicU64::new(0),
+            phase: AtomicU32::new(0),
+            done: AtomicBool::new(false),
+        };
+        ctrl.publish_deadline(40);
+        ctrl.publish_deadline(80);
+        ctrl.publish_deadline(20);
+        assert_eq!(ctrl.deadline_ns.load(Ordering::Acquire), 20);
+        assert_eq!(SIGNALS.load(Ordering::Acquire), 2);
+        ctrl.stop(10);
+        ctrl.complete();
+        assert!(ctrl.done.load(Ordering::Acquire));
+        assert_eq!(SIGNALS.load(Ordering::Acquire), 3);
+    }
+}

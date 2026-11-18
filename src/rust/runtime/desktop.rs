@@ -2009,13 +2009,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .outputs
             .capture_wait_ticks(time.nanoseconds, time.hz, delay);
         delay = self.primary.wait_ticks(time.nanoseconds, time.hz, delay);
+        if let Some(recorder) = &self.capture.recorder {
+            delay = recorder.wait_ticks(time.nanoseconds, time.hz, delay);
+        }
         if self.outputs.needs_polling()
             || self.primary.needs_polling()
             || self.windows.needs_polling()
             || self.cursor.retry_pending()
             || self.loads.busy()
             || self.capture.screenshot_busy()
-            || self.capture.recording_state() != 0
             || self.layout.busy()
             || self.modes.busy()
             || self.audio_io.busy()
