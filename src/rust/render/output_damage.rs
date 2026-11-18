@@ -1,31 +1,36 @@
 //! Three independently aged output images. Only an accepted presentation
 //! clears the selected image's repair debt; submission alone does not.
-use super::geometry::Rect;
+use super::geometry::{Rect, Regions};
 
 #[derive(Default)]
 pub struct History {
     valid: [bool; 3],
-    missing: [Option<Rect>; 3],
+    missing: [Regions; 3],
 }
 impl History {
-    pub fn invalidate(&mut self, damage: Rect) {
+    pub fn invalidate(&mut self, damage: Regions) {
         if damage.is_empty() {
             return;
         }
         for pending in &mut self.missing {
-            *pending = Some(pending.map_or(damage, |old| old.merged(damage)));
+            *pending = pending.merged(damage);
         }
     }
-    pub fn required(&self, index: usize, bounds: Rect) -> Rect {
+    pub fn required(&self, index: usize, bounds: Rect) -> Regions {
         if !self.valid[index] {
-            bounds
-        } else {
-            self.missing[index].unwrap_or(Rect::new(bounds.x, bounds.y, 0, 0))
+            return bounds.into();
         }
+        let missing = self.missing[index];
+        if let Some(union) = missing.bounds() {
+            if missing.len() > 1 && union.area() <= missing.area() {
+                return union.into();
+            }
+        }
+        missing
     }
     pub fn accepted(&mut self, index: usize) {
         self.valid[index] = true;
-        self.missing[index] = None;
+        self.missing[index] = Regions::default();
     }
     pub fn rejected(&mut self, index: usize) {
         self.valid[index] = false;
@@ -48,15 +53,17 @@ mod tests {
             for row in y..y + 2 {
                 reference[row * 32 + x..row * 32 + x + 2].fill(generation as u32 + 1);
             }
-            history.invalidate(Rect::new(x as i32 - 4, y as i32 + 3, 2, 2));
+            history.invalidate(Rect::new(x as i32 - 4, y as i32 + 3, 2, 2).into());
             let repair = history.required(index, bounds);
-            if repair.w * repair.h < bounds.w * bounds.h {
+            if repair.area() < bounds.area() {
                 partial += 1;
             }
-            for row in repair.y - bounds.y..repair.bottom() - bounds.y {
-                let start = row as usize * 32 + (repair.x - bounds.x) as usize;
-                images[index][start..start + repair.w as usize]
-                    .copy_from_slice(&reference[start..start + repair.w as usize]);
+            for repair in repair.as_slice() {
+                for row in repair.y - bounds.y..repair.bottom() - bounds.y {
+                    let start = row as usize * 32 + (repair.x - bounds.x) as usize;
+                    images[index][start..start + repair.w as usize]
+                        .copy_from_slice(&reference[start..start + repair.w as usize]);
+                }
             }
             assert_eq!(images[index], reference);
             if generation == 20 {
@@ -70,7 +77,61 @@ mod tests {
             }
         }
         assert!(partial > 80);
-        assert_eq!(History::default().required(0, bounds), bounds);
+        assert_eq!(
+            History::default().required(0, bounds),
+            Regions::from(bounds)
+        );
         assert!(history.valid[0]);
+    }
+
+    #[test]
+    fn distant_repairs_preserve_gap_pixels_and_repair_each_output_slot() {
+        let bounds = Rect::new(0, 0, 64, 32);
+        let changes = [Rect::new(1, 2, 2, 2), Rect::new(57, 26, 3, 2)];
+        let mut history = History::default();
+        let mut outputs = [[0u8; 64 * 32]; 3];
+        let mut scene = [17u8; 64 * 32];
+        let paint = |pixels: &mut [u8], image: &[u8], regions: Regions| {
+            for rect in regions.as_slice() {
+                for y in rect.y..rect.bottom() {
+                    let start = (y * 64 + rect.x) as usize;
+                    let row = start..start + rect.w as usize;
+                    pixels[row.clone()].copy_from_slice(&image[row]);
+                }
+            }
+        };
+        for (index, output) in outputs.iter_mut().enumerate() {
+            let repair = history.required(index, bounds);
+            assert_eq!(repair, Regions::from(bounds));
+            paint(output, &scene, repair);
+            history.accepted(index);
+        }
+        for rect in changes {
+            for y in rect.y..rect.bottom() {
+                let start = (y * 64 + rect.x) as usize;
+                scene[start..start + rect.w as usize].fill(71);
+            }
+            history.invalidate(rect.into());
+        }
+        history.rejected(1);
+        outputs[1].fill(0xff);
+        for (index, output) in outputs.iter_mut().enumerate() {
+            let repair = history.required(index, bounds);
+            if index == 1 {
+                assert_eq!(repair, bounds.into());
+            } else {
+                assert_eq!(repair.as_slice(), &changes);
+                assert_eq!(repair.area(), 10);
+            }
+            paint(output, &scene, repair);
+            assert_eq!(output[..], scene[..]);
+            history.accepted(index);
+        }
+        history.invalidate(Regions::from_slice(&[
+            Rect::new(0, 0, 2, 2),
+            Rect::new(2, 0, 3, 2),
+        ]));
+        assert_eq!(history.required(2, bounds), Rect::new(0, 0, 5, 2).into());
+        assert_eq!(History::default().required(2, bounds), bounds.into());
     }
 }

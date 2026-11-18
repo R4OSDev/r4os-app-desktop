@@ -1,13 +1,15 @@
 //! Main-task frame scheduling. CPU pixels, painter caches and copied counters
 //! have one owner; output receipts and GUI buffer lifetimes stay external.
 #[cfg(test)]
+use super::geometry::MAX_DAMAGE_REGIONS;
+#[cfg(test)]
 #[path = "../../../Tests/RustNative/frame_timing.rs"]
 mod tests;
 use super::{
     compositor::{self, Completed, Scene},
     coverage::Path,
     display::{Display, Presentation},
-    geometry::{Dirty, MAX_DAMAGE_REGIONS, Rect},
+    geometry::{Dirty, Rect, Regions},
     icons,
     layers::Mode,
     primitive_assets::{Error, Result},
@@ -271,9 +273,6 @@ impl Frames {
             let Some(bounds) = slot.bounds() else {
                 continue;
             };
-            let Some(damage) = slot.damage.bounds() else {
-                continue;
-            };
             let ready = if let Some(output) = slot.resource.gpu_mut() {
                 output.available(app, manager.revision, time, input_ns)
             } else {
@@ -284,6 +283,7 @@ impl Frames {
             if !ready {
                 continue;
             }
+            let damage = Regions::from_slice(slot.damage.regions());
             let mut fonts = SessionFonts::new(session, app);
             let mut icons = icons::Paint {
                 cache: &mut self.icons,
@@ -293,14 +293,12 @@ impl Frames {
             scene.disabled = slot.disabled;
             let captured = if let Some(output) = slot.resource.gpu_mut() {
                 scene.path = Path::Native;
-                let mut damage_regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
-                let count = slot.damage.take_regions(&mut damage_regions);
                 let result = unsafe {
                     output.capture(
                         windows,
                         Mode::NativeOutput(slot.view),
                         scene,
-                        &damage_regions[..count],
+                        damage.as_slice(),
                         &mut self.fonts,
                         &mut fonts,
                         &mut icons,
@@ -317,7 +315,7 @@ impl Frames {
                             output.execution_observation(),
                             stats.rendered_windows,
                             bounds,
-                            &damage_regions[..count],
+                            damage.as_slice(),
                         );
                     }
                     unsafe { output.start(app, resources, expected, time) }
@@ -345,12 +343,12 @@ impl Frames {
                     )
                 };
                 match result {
-                    Ok(completed) => {
+                    Ok((completed, repair)) => {
                         if let Some(tracker) = proof.as_deref_mut() {
                             tracker.software_composed(
                                 completed.cull.rendered_windows,
                                 bounds,
-                                &[damage],
+                                repair.as_slice(),
                             );
                         }
                         true
@@ -367,7 +365,6 @@ impl Frames {
                 changed = true;
                 self.current = false;
             } else {
-                slot.damage.invalidate(damage);
                 failures |= 1 << index;
             }
             let _ = bounds;

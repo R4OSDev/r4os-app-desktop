@@ -26,7 +26,7 @@ impl Output {
         colors: &impl Colors,
         scene: &Scene<'_>,
         external: [Option<&'f mut dyn ExternalFrame>; 4],
-        damage: Rect,
+        damage: Regions,
         input_ns: u64,
         time: u64,
         deadline: u64,
@@ -34,17 +34,17 @@ impl Output {
         fonts: &mut impl Fonts,
         icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
         shapes: &mut impl Shapes,
-    ) -> Result<Completed> {
+    ) -> Result<(Completed, Regions)> {
         if scene.path != Path::CpuOutput || damage.is_empty() {
             return Err(Error::State);
         }
         self.poll(app, time);
         let state = self.state.as_deref_mut().ok_or(Error::State)?;
-        state.capture_damage = Some(damage);
+        state.capture_damage = damage.bounds();
         let result = unsafe {
             state.render_frame(
-                app, graphics, colors, scene, external, input_ns, time, deadline, cache, fonts,
-                icons, shapes,
+                app, graphics, colors, scene, external, damage, input_ns, time, deadline, cache,
+                fonts, icons, shapes,
             )
         };
         if result.is_err() {
@@ -61,6 +61,7 @@ impl State {
         colors: &impl Colors,
         scene: &Scene<'_>,
         external: [Option<&'f mut dyn ExternalFrame>; 4],
+        damage: Regions,
         input_ns: u64,
         time: u64,
         deadline: u64,
@@ -68,8 +69,8 @@ impl State {
         fonts: &mut impl Fonts,
         icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
         shapes: &mut impl Shapes,
-    ) -> Result<Completed> {
-        let (bounds, scratch) = self.begin_frame(app, graphics, input_ns, time)?;
+    ) -> Result<(Completed, Regions)> {
+        let (bounds, scratch, repair) = self.begin_frame(app, graphics, input_ns, time, damage)?;
         let count = CpuScene::required_bytes(bounds.w, bounds.h).ok_or(Error::Limit)? / 4;
         let pixels = if scratch {
             &mut self.scratch[..count]
@@ -88,7 +89,7 @@ impl State {
                 &mut canvas,
                 scene,
                 external,
-                &[self.repaint],
+                repair.as_slice(),
                 cache,
                 fonts,
                 icons,
@@ -111,7 +112,11 @@ impl State {
         );
         self.capture
             .stage_profile(frame.slot as usize - 1, pixels, time);
-        let native_damage = physical_damage(self.view, self.repaint)?;
+        let mut native_regions = Regions::default();
+        for &logical in repair.as_slice() {
+            native_regions.add(physical_damage(self.view, logical)?);
+        }
+        let native_damage = native_regions.bounds().ok_or(Error::State)?;
         if scratch {
             let output = unsafe {
                 core::slice::from_raw_parts_mut(
@@ -119,7 +124,9 @@ impl State {
                     self.view.pixel_w as usize * self.view.pixel_h as usize,
                 )
             };
-            transform_region(self.view, pixels, bounds.w as usize, output, native_damage)?;
+            for &region in native_regions.as_slice() {
+                transform_region(self.view, pixels, bounds.w as usize, output, region)?;
+            }
         }
         if self.profile.is_some() || self.limited {
             // The scene loan has ended. Profiles/limited quantization operate
@@ -130,17 +137,19 @@ impl State {
                     self.view.pixel_w as usize * self.view.pixel_h as usize,
                 )
             };
-            for row in native_damage.y..native_damage.bottom() {
-                let start = row as usize * self.view.pixel_w as usize + native_damage.x as usize;
-                let line = &mut output[start..start + native_damage.w as usize];
-                if let Some(profile) = &self.profile {
-                    profile
-                        .apply(line, line.len() as u32, 1)
-                        .map_err(|_| Error::Graphics)?;
-                }
-                if self.limited {
-                    for pixel in line {
-                        *pixel = limited_rgb8(*pixel);
+            for region in native_regions.as_slice() {
+                for row in region.y..region.bottom() {
+                    let start = row as usize * self.view.pixel_w as usize + region.x as usize;
+                    let line = &mut output[start..start + region.w as usize];
+                    if let Some(profile) = &self.profile {
+                        profile
+                            .apply(line, line.len() as u32, 1)
+                            .map_err(|_| Error::Graphics)?;
+                    }
+                    if self.limited {
+                        for pixel in line {
+                            *pixel = limited_rgb8(*pixel);
+                        }
                     }
                 }
             }
@@ -208,7 +217,7 @@ impl State {
                     .max(self.stats.frame_submit_last_ns);
             }
         }
-        Ok(completed)
+        Ok((completed, repair))
     }
     fn begin_frame(
         &mut self,
@@ -216,7 +225,8 @@ impl State {
         graphics: &Graphics<'_, '_>,
         input_ns: u64,
         time: u64,
-    ) -> Result<(Rect, bool)> {
+        damage: Regions,
+    ) -> Result<(Rect, bool, Regions)> {
         if !self.ready || self.lost || self.acquired.is_some() || self.mapping.lease.id != 0 {
             return Err(Error::Busy);
         }
@@ -311,8 +321,7 @@ impl State {
             self.history_profile = profile;
             self.history_limited = self.limited;
         }
-        self.history
-            .invalidate(self.capture_damage.unwrap_or(bounds));
+        self.history.invalidate(damage);
         let scratch = self.profile.is_some()
             || self.limited
             || self.view.rotation != Rotation::Normal
@@ -332,8 +341,8 @@ impl State {
                 self.history = History::default();
             }
         }
-        self.repaint = self.history.required(frame.slot as usize - 1, bounds);
-        Ok((bounds, scratch))
+        let repair = self.history.required(frame.slot as usize - 1, bounds);
+        Ok((bounds, scratch, repair))
     }
 }
 pub(super) fn physical_damage(view: Viewport, damage: Rect) -> Result<Rect> {

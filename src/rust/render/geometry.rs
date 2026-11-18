@@ -80,7 +80,7 @@ impl Rect {
             h,
         )
     }
-    fn area(self) -> u64 {
+    pub(super) fn area(self) -> u64 {
         self.w.max(0) as u64 * self.h.max(0) as u64
     }
 }

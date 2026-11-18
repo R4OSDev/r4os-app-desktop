@@ -4,7 +4,7 @@ use super::profile::Profile;
 use crate::{
     capture::remote::{Capture, Cursor, Image},
     render::{
-        geometry::Rect,
+        geometry::{Rect, Regions},
         gpu::{
             Error, Result, accepted,
             device::{Device, OpenError},
@@ -40,7 +40,6 @@ struct State {
     capture_cursor: Cursor,
     capture_damage: Option<Rect>,
     history: History,
-    repaint: Rect,
     history_view: Option<Viewport>,
     history_profile: g::R4GfxColorProfile,
     history_limited: bool,
@@ -106,7 +105,6 @@ impl Output {
             capture_cursor: Cursor::default(),
             capture_damage: None,
             history: History::default(),
-            repaint: Rect::ZERO,
             history_view: None,
             history_profile: g::R4GfxColorProfile::default(),
             history_limited: false,
