@@ -4,16 +4,10 @@ use crate::{
     hosted::runtime as hosted,
     input::runtime as input,
     render::{
-        compositor::{Hosted, Interaction, Overlay, Scene, Shell},
+        compositor::{Hosted, Interaction, Scene, Shell},
         coverage::Path,
-        runtime::Stats,
     },
-    shell::{
-        state::{Dialog, State},
-        status::Status,
-        tasks,
-        tray_sync::Mirror,
-    },
+    shell::{state::State, status::Status, tray_sync::Mirror},
 };
 pub fn scene<'a>(
     width: i32,
@@ -23,32 +17,10 @@ pub fn scene<'a>(
     input: &'a input::State,
     tray: &'a Mirror,
     status: &'a Status,
-    stats: &Stats,
     software_cursor: bool,
     recording: u32,
     blink: bool,
 ) -> Scene<'a> {
-    let overlay = if shell.dialog == Dialog::Tasks {
-        let entries = hosted.model.inventory.visible();
-        let start = shell.task_scroll.min(entries.len());
-        let end = (start + tasks::PAGE_ROWS).min(entries.len());
-        Overlay::Tasks(tasks::View {
-            windows: hosted.model.windows.windows(),
-            active: hosted.model.windows.active(),
-            status: status.program,
-            instances: &entries[start..end],
-            render: tasks::Render {
-                redraws: stats.redraws as u32,
-                cursor_moves: input.stats.cursor_moves as u32,
-                cursor_presents: stats.cursor as u32,
-                full: stats.full as u32,
-                last_damage: stats.last_damage,
-            },
-            focus: shell.dialog_focus,
-        })
-    } else {
-        shell.overlay()
-    };
     Scene {
         width,
         height,
@@ -80,7 +52,7 @@ pub fn scene<'a>(
             tray_pressed: input.tray_pressed,
             system: shell.system_menu,
             time_menu: shell.time_menu,
-            overlay,
+            overlay: shell.overlay(),
             cursor_x: input.cursor.x,
             cursor_y: input.cursor.y,
             cursor_visible: software_cursor,

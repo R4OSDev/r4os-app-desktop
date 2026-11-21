@@ -23,7 +23,6 @@ pub mod status;
 pub mod status_view;
 pub mod style;
 pub mod taskbar_view;
-pub mod tasks;
 pub mod tray;
 pub mod tray_sync;
 pub mod volume;

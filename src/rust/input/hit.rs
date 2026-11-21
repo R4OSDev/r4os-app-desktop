@@ -143,13 +143,6 @@ pub fn target(scene: &Scene<'_>, x: i32, y: i32) -> Target {
                 }
                 Target::MessageBackdrop
             }
-            Overlay::Tasks(_) => {
-                if Rect::new(r.x + 210, r.y + 378, 80, 26).contains(x, y) {
-                    Target::TaskOverviewOk
-                } else {
-                    Target::MessageBackdrop
-                }
-            }
             Overlay::None => Target::None,
         };
     }

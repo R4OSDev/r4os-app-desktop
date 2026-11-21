@@ -158,7 +158,7 @@ fn scene<M: Memory>(
     use crate::{
         hosted::runtime as hosted,
         input::runtime as input,
-        render::{icons, runtime::Stats as FrameStats, shapes::Renderer, text::cache::Fonts},
+        render::{icons, shapes::Renderer, text::cache::Fonts},
         runtime::views,
         shell::{state::State, status::Status, tray_sync::Mirror},
     };
@@ -194,17 +194,7 @@ fn scene<M: Memory>(
     .unwrap();
     let status = Status::default();
     let mut scene = views::scene(
-        640,
-        480,
-        &hosted,
-        &shell,
-        &input,
-        &tray,
-        &status,
-        &FrameStats::default(),
-        false,
-        0,
-        false,
+        640, 480, &hosted, &shell, &input, &tray, &status, false, 0, false,
     );
     scene.path = crate::render::coverage::Path::Native;
     let mut fonts = FontCache::new().unwrap();

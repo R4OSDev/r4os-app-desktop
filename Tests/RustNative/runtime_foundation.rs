@@ -48,34 +48,24 @@ fn actual_association_copied_launch_editor_and_writeback_policy_admission() {
             input::event::Target,
             shell::{
                 controller::{self, Action},
-                state::{Dialog, SystemAction},
+                state::SystemAction,
             },
         };
         use r4os_sdk::gui::raw as key;
         shell.dialog_focus = Target::RunInput;
-        controller::key(&mut shell, key::R4SdkGuiKey_backspace as u32, 0);
+        controller::key(&mut shell, key::R4SdkGuiKey_backspace as u32);
         assert_eq!(shell.run.text().unwrap(), "C:\\A\u{308}中.R".as_bytes());
-        controller::key(&mut shell, key::R4SdkGuiKey_tab as u32, 0);
+        controller::key(&mut shell, key::R4SdkGuiKey_tab as u32);
         assert_eq!(shell.dialog_focus, Target::RunBrowse);
         assert!(matches!(
-            controller::key(&mut shell, 13, 0),
+            controller::key(&mut shell, 13),
             Some(Action::RunBrowse)
         ));
-        controller::activate(&mut shell, Target::MenuTasks);
-        assert_eq!(shell.dialog, Dialog::Tasks);
-        assert_eq!(
-            shell.dialog_rect(1280, 720),
-            Some(crate::render::geometry::Rect::new(390, 150, 500, 420))
-        );
-        controller::key(&mut shell, key::R4SdkGuiKey_end as u32, 18);
-        assert_eq!(shell.task_scroll, 13);
-        controller::key(&mut shell, key::R4SdkGuiKey_home as u32, 18);
-        assert_eq!(shell.task_scroll, 0);
         controller::activate(&mut shell, Target::MenuPoweroff);
         assert_eq!(shell.dialog_focus, Target::MessageNo);
-        controller::key(&mut shell, key::R4SdkGuiKey_tab as u32, 0);
+        controller::key(&mut shell, key::R4SdkGuiKey_tab as u32);
         assert!(matches!(
-            controller::key(&mut shell, 13, 0),
+            controller::key(&mut shell, 13),
             Some(Action::System(SystemAction::Poweroff))
         ));
         let mut info = [0; 160];

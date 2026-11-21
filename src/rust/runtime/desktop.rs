@@ -483,7 +483,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 time.hz,
                 &areas,
                 true,
-                self.shell.dialog == crate::shell::state::Dialog::Tasks,
                 self.shell.config.terminal_size,
                 self.shell.config.terminal_codepage,
             );
@@ -1005,7 +1004,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.input,
             &self.tray,
             &self.status,
-            &self.frames.stats,
             software_cursor,
             self.capture.recording_state(),
             self.blink,
@@ -1506,11 +1504,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             return;
         }
         self.shell_damage();
-        if let Some(action) = controller::key(
-            &mut self.shell,
-            value,
-            self.hosted.model.inventory.visible().len(),
-        ) {
+        if let Some(action) = controller::key(&mut self.shell, value) {
             self.action(action, env, session, host, programs, time);
             self.shell_damage();
             return;
@@ -1547,7 +1541,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             10 | 13 | 32 => Some(controller::activate(&mut self.shell, Target::StartButton)),
             82 | 114 => Some(controller::activate(&mut self.shell, Target::MenuRun)),
-            84 | 116 => Some(controller::activate(&mut self.shell, Target::MenuTasks)),
             68 | 100 => Some(controller::activate(&mut self.shell, Target::MenuTerminal)),
             _ => None,
         };
@@ -1647,7 +1640,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 &self.input,
                 &self.tray,
                 &self.status,
-                &self.frames.stats,
                 self.cursor.software(),
                 self.capture.recording_state(),
                 self.blink,
@@ -1819,7 +1811,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.input,
             &self.tray,
             &self.status,
-            &self.frames.stats,
             self.cursor.software(),
             self.capture.recording_state(),
             self.blink,
@@ -1932,7 +1923,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             b"",
                             b"Control Center",
                             a::LaunchPolicy::gui,
-                        ).expect("fixed Control Center launch");
+                        )
+                        .expect("fixed Control Center launch");
                         self.launch(request, env, session, programs, time);
                     }
                     Sample::Key { key } => self.key(key, env, session, host, programs, time),
@@ -2096,7 +2088,6 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             time.tick,
                             time.hz,
                             0,
-                            self.shell.dialog == crate::shell::state::Dialog::Tasks,
                             &areas,
                         );
                     }

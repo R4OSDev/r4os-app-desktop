@@ -17,14 +17,16 @@ pub enum DefaultLink {
     Devices,
     Computer,
     Portex,
+    ControlCenter,
 }
-pub const DEFAULTS: [DefaultLink; 6] = [
+pub const DEFAULTS: [DefaultLink; 7] = [
     DefaultLink::Terminal,
     DefaultLink::Notepad,
     DefaultLink::Synth,
     DefaultLink::Devices,
     DefaultLink::Computer,
     DefaultLink::Portex,
+    DefaultLink::ControlCenter,
 ];
 impl DefaultLink {
     pub fn file(self) -> &'static [u8] {
@@ -35,6 +37,7 @@ impl DefaultLink {
             Self::Devices => b"DEVICES.LNK",
             Self::Computer => b"COMPUTER.LNK",
             Self::Portex => b"PORTEX.LNK",
+            Self::ControlCenter => b"CTRLCTR.LNK",
         }
     }
     pub fn title(self) -> &'static [u8] {
@@ -45,6 +48,7 @@ impl DefaultLink {
             Self::Devices => b"Devices",
             Self::Computer => b"Computer",
             Self::Portex => b"Portex",
+            Self::ControlCenter => b"Control Center",
         }
     }
     pub fn target(self) -> &'static [u8] {
@@ -55,6 +59,7 @@ impl DefaultLink {
             Self::Devices => b"C:\\R4OS\\SOFTWARE\\DESKTOP\\DEVMGR.R4X",
             Self::Computer => b"C:\\R4OS\\SOFTWARE\\DESKTOP\\EXPLORER.R4X",
             Self::Portex => b"C:\\R4OS\\SOFTWARE\\DESKTOP\\PORTEX.R4X",
+            Self::ControlCenter => b"C:\\R4OS\\SOFTWARE\\DESKTOP\\CTRLCTR.R4X",
         }
     }
     pub fn args(self) -> &'static [u8] {
@@ -78,6 +83,7 @@ impl DefaultLink {
             Self::Devices => b"C:\\R4OS\\Media\\Icons\\Config.ico",
             Self::Computer => b"C:\\R4OS\\Media\\Icons\\Computer.ico",
             Self::Portex => b"C:\\R4OS\\Media\\Icons\\Application.ico",
+            Self::ControlCenter => b"INTERNAL",
         }
     }
     pub fn write<'out>(self, standard: &Standard<'_>, out: &'out mut [u8]) -> Result<&'out [u8]> {
@@ -119,7 +125,7 @@ mod tests {
     #[test]
     fn original_five_canonical_r4lnk_files() {
         crate::standard_fixture::with(|standard| {
-            assert_eq!(DEFAULTS.len(), 6);
+            assert_eq!(DEFAULTS.len(), 7);
             for spec in DEFAULTS {
                 let mut buffer = [0; MAX_LINK_BYTES];
                 let bytes = spec.write(standard, &mut buffer).unwrap();

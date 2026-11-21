@@ -32,7 +32,6 @@ pub enum Dialog {
     Settings,
     Message,
     Confirm(SystemAction),
-    Tasks,
 }
 pub struct Message {
     kind: message_box::Kind,
@@ -99,7 +98,6 @@ pub struct State<'input> {
     pub time_menu: bool,
     pub item_drag: Option<usize>,
     pub folder_error_pending: bool,
-    pub task_scroll: usize,
 }
 #[derive(Debug)]
 pub enum Error {
@@ -130,7 +128,6 @@ impl<'input> State<'input> {
             time_menu: false,
             item_drag: None,
             folder_error_pending: false,
-            task_scroll: 0,
         })
     }
     pub fn load(&mut self, env: &Environment<'_>, width: i32, height: i32) {
@@ -262,14 +259,6 @@ impl<'input> State<'input> {
             || self.dialog != Dialog::None
     }
     pub fn dialog_rect(&self, width: i32, height: i32) -> Option<Rect> {
-        if self.dialog == Dialog::Tasks {
-            return Some(Rect::new(
-                (width - super::tasks::WIDTH) / 2,
-                (height - super::tasks::HEIGHT) / 2,
-                super::tasks::WIDTH,
-                super::tasks::HEIGHT,
-            ));
-        }
         crate::render::compositor::overlay_rect(self.overlay(), width, height)
     }
     pub fn selected_item(&self) -> usize {

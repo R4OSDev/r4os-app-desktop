@@ -832,7 +832,6 @@ fn volume_targets(v: &mut View<'_, '_>) -> bool {
         v.input,
         v.tray,
         v.status,
-        &Stats::default(),
         true,
         0,
         true,

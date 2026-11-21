@@ -12,7 +12,7 @@ use crate::{
     shell::{
         controller::{self, Action},
         desktop_items,
-        state::{Dialog, State as Shell},
+        state::State as Shell,
         style as s,
         tray::Identity,
     },
@@ -236,14 +236,6 @@ impl Router {
             } else {
                 -1
             }))
-        } else if shell.dialog == Dialog::Tasks {
-            shell_damage(shell, dirty, width, height);
-            controller::task_scroll(
-                shell,
-                if mouse.wheel > 0 { -3 } else { 3 },
-                hosted.model.inventory.visible().len(),
-            );
-            None
         } else if identity.valid() {
             Some(PointerEffect::Tray {
                 identity,

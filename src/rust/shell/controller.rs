@@ -6,7 +6,6 @@ use super::{
     message_box::Buttons,
     start_menu::Kind,
     state::{Dialog, State, SystemAction},
-    tasks::PAGE_ROWS,
 };
 use crate::input::{event::Target, keys::is_text_key};
 use r4os_sdk::{abi::LaunchPolicy, gui::raw as key};
@@ -65,12 +64,6 @@ pub fn activate(state: &mut State<'_>, target: Target) -> Action {
             state.menu_control.navigate(&state.menu, Direction::Right);
         }
         Target::MenuRun => state.open_run(),
-        Target::MenuTasks => {
-            state.close_top();
-            state.dialog = Dialog::Tasks;
-            state.dialog_focus = Target::TaskOverviewOk;
-            state.task_scroll = 0;
-        }
         Target::MenuSettings => {
             // A configured submenu is navigated; the action form opens the
             // existing read-only settings summary.
@@ -115,8 +108,6 @@ pub fn activate(state: &mut State<'_>, target: Target) -> Action {
         | Target::MessageNo
         | Target::MessageBackdrop
         | Target::SettingsCancel
-        | Target::TaskOverviewClose
-        | Target::TaskOverviewOk
         | Target::StartMenuBackdrop
         | Target::TimeMenuBackdrop
         | Target::VolumePopupBackdrop => state.close_top(),
@@ -184,7 +175,6 @@ fn cycle_focus(state: &mut State<'_>, backwards: bool) {
                 SettingsOk
             }
         }
-        Dialog::Tasks => TaskOverviewOk,
         Dialog::Message | Dialog::Confirm(_) => match state.message.view().buttons {
             Buttons::Ok => MessageOk,
             Buttons::OkCancel => {
@@ -206,15 +196,8 @@ fn cycle_focus(state: &mut State<'_>, backwards: bool) {
     };
     state.message.focus = state.dialog_focus;
 }
-pub fn task_scroll(state: &mut State<'_>, delta: i32, total: usize) {
-    let limit = total.saturating_sub(PAGE_ROWS);
-    state.task_scroll = state
-        .task_scroll
-        .saturating_add_signed(delta as isize)
-        .min(limit);
-}
 /// None leaves delivery to the window owner; Some(None) consumed the key.
-pub fn key(state: &mut State<'_>, value: u32, tasks: usize) -> Option<Action> {
+pub fn key(state: &mut State<'_>, value: u32) -> Option<Action> {
     let value = i32::try_from(value).ok()?;
     if state.audio.ui.popup_open {
         return Some(match value {
@@ -243,7 +226,6 @@ pub fn key(state: &mut State<'_>, value: u32, tasks: usize) -> Option<Action> {
                         Target::RunBrowse | Target::RunCancel => state.dialog_focus,
                         _ => Target::RunOk,
                     },
-                    Dialog::Tasks => Target::TaskOverviewOk,
                     _ => state.dialog_focus,
                 };
                 return Some(activate(state, target));
@@ -270,18 +252,6 @@ pub fn key(state: &mut State<'_>, value: u32, tasks: usize) -> Option<Action> {
                 }
                 _ => return None,
             },
-            _ if state.dialog == Dialog::Tasks => {
-                let delta = match value {
-                    key::R4SdkGuiKey_up => -1,
-                    key::R4SdkGuiKey_down => 1,
-                    key::R4SdkGuiKey_page_up => -(PAGE_ROWS as i32),
-                    key::R4SdkGuiKey_page_down => PAGE_ROWS as i32,
-                    key::R4SdkGuiKey_home => i32::MIN,
-                    key::R4SdkGuiKey_end => i32::MAX,
-                    _ => return None,
-                };
-                task_scroll(state, delta, tasks);
-            }
             _ => return None,
         }
         return Some(Action::None);

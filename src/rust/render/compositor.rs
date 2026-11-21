@@ -62,7 +62,6 @@ pub enum Overlay<'a> {
     Run { path: &'a [u8], focus: Target },
     Settings { config: &'a Config, focus: Target },
     Message(message_box::View<'a>),
-    Tasks(crate::shell::tasks::View<'a>),
 }
 pub struct Hosted<'a> {
     pub windows: &'a Controller,
@@ -288,7 +287,6 @@ pub fn overlay_rect(overlay: Overlay<'_>, width: i32, height: i32) -> Option<Rec
         Overlay::Run { .. } => (420, 178),
         Overlay::Settings { .. } => (500, 294),
         Overlay::Message(_) => (380, 172),
-        Overlay::Tasks(_) => (crate::shell::tasks::WIDTH, crate::shell::tasks::HEIGHT),
     };
     Some(Rect::new((width - w) / 2, (height - h) / 2, w, h))
 }
@@ -740,14 +738,6 @@ pub(crate) unsafe fn draw(
                                 },
                             ),
                             Overlay::Message(view) => dialog_view::message(
-                                ui,
-                                scene.width,
-                                scene.height,
-                                view,
-                                input.hover,
-                                input.pressed,
-                            ),
-                            Overlay::Tasks(view) => crate::shell::tasks::paint(
                                 ui,
                                 scene.width,
                                 scene.height,

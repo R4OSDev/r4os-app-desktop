@@ -336,7 +336,6 @@ impl<'input> State<'input> {
         hz: u32,
         areas: &[Rect; 4],
         lifecycle_due: bool,
-        diagnostics: bool,
         font_size: u8,
         codepage: u16,
     ) -> bool {
@@ -356,17 +355,7 @@ impl<'input> State<'input> {
         let report = if lifecycle_due {
             unsafe {
                 self.model.synchronize(
-                    app,
-                    resources,
-                    programs,
-                    session,
-                    graphics,
-                    dirty,
-                    tick,
-                    hz,
-                    last,
-                    diagnostics,
-                    areas,
+                    app, resources, programs, session, graphics, dirty, tick, hz, last, areas,
                 )
             }
         } else {

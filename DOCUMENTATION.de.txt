@@ -532,3 +532,8 @@ Die vorhandenen Pixelorakel erhalten explizite historische Menue-Fixdaten.
 Die aktuellen Spectra-/Portex-Menueeintraege haben eigene Fachpruefungen.
 
 Der Packager und Kernel476 nehmen die22 benoetigten Imports vollstaendig auf. Ihre endliche32er-Kapazitaet wird ueber die gesamte Start- und Codebindungslebensdauer erhalten. Der Software-KVM4-Gast pruefte den regulaeren208-Desktop mit echtem PS2-Maus-/Tastatureingang, gestartetem Calculator, Verschieben um40/30Pixel und Alt-F4. Run kopierte, schnitt und fuegte den Text R4OS-Ä中-65 bytegleich ueber die typisierten Clipboardangebote ein. Ein eigener Beobachter bestaetigte den Desktopabschluss0 und sein urspruenglicher Parent dessen Reap. Die Cursorprobe aenderte187sichtbare Pixel, das anschliessende ruhige Bild blieb bytegleich. Diese Bildbeobachtung misst keine physische Cursorlatenz oder interne Presentflaeche.
+
+0.95.3: Die Aufgaben- und Fensterübersicht gehört zu Control Center. Der Desktop
+liefert Fenster- und Renderstatus und pflegt seine Prozessgeneration für den
+Fensterlebenszyklus. Installierte Desktops ergänzen den fehlenden Standardlink
+CTRLCTR.LNK, sobald das Modul vorhanden ist.

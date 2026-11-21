@@ -385,8 +385,7 @@ impl Menu {
             b"/DISPLAY",
         ));
         for (target, title) in [
-            (Target::MenuTasks, b"Tasks".as_slice()),
-            (Target::MenuRestart, b"Restart"),
+            (Target::MenuRestart, b"Restart".as_slice()),
             (Target::MenuPoweroff, b"Poweroff"),
             (Target::MenuHalt, b"Halt"),
             (Target::MenuScreenOff, b"Screen off"),
@@ -606,10 +605,7 @@ impl Menu {
             | Target::MenuPoweroff
             | Target::MenuHalt
             | Target::MenuScreenOff => Group::Power,
-            Target::MenuTerminalMode
-            | Target::MenuRun
-            | Target::MenuSettings
-            | Target::MenuTasks => Group::System,
+            Target::MenuTerminalMode | Target::MenuRun | Target::MenuSettings => Group::System,
             _ => Group::Programs,
         }
     }
@@ -746,7 +742,6 @@ fn action_target(action: &[u8]) -> Target {
     [
         (b"run".as_slice(), Target::MenuRun),
         (b"terminal_mode", Target::MenuTerminalMode),
-        (b"tasks", Target::MenuTasks),
         (b"restart", Target::MenuRestart),
         (b"poweroff", Target::MenuPoweroff),
         (b"halt", Target::MenuHalt),
@@ -832,7 +827,7 @@ mod tests {
         assert_eq!(menu.target(0), Target::MenuSpectra);
         assert_eq!(menu.launch(0).unwrap().policy, Policy::Gui);
         assert_eq!(menu.launch(0).unwrap().args, b"/GUI");
-        assert_eq!(menu.entries().len(), 10);
+        assert_eq!(menu.entries().len(), 9);
         assert_eq!(menu.submenu_count(), 3);
         assert_eq!(menu.target(1), Target::MenuPrograms);
         assert_eq!(menu.launch(1).unwrap().kind, Kind::Submenu);
@@ -851,9 +846,9 @@ mod tests {
         );
         assert_eq!(menu.target(2), Target::MenuTerminalMode);
         assert_eq!(menu.target(4), Target::MenuSettings);
-        assert_eq!(menu.target(6), Target::MenuRestart);
-        assert_eq!(menu.target(8), Target::MenuHalt);
-        assert_eq!(menu.target(9), Target::MenuScreenOff);
+        assert_eq!(menu.target(5), Target::MenuRestart);
+        assert_eq!(menu.target(7), Target::MenuHalt);
+        assert_eq!(menu.target(8), Target::MenuScreenOff);
         assert_eq!(menu.submenu_target(4, 0), Target::MenuSettingsAppearance);
         assert_eq!(menu.submenu_target(4, 7), Target::MenuSettingsDisplay);
         assert_eq!(menu.submenu_launch(4, 7).unwrap().args, b"/DISPLAY");
@@ -868,7 +863,7 @@ mod tests {
         let mut menu = Menu::defaults();
         assert!(menu.load(b"# comment\nSUBMENU;title=Programs;id=programs\nSUBITEM;menu=programs;title=Terminal;path=/R4OS/SOFTWARE/TERMINAL/TERMINAL.R4X;class=console;policy=console\nSUBITEM;menu=programs;title=Notepad;path=/R4OS/SOFTWARE/DESKTOP/NOTEPAD.R4X;class=gui;policy=gui\nCHILDMENU;menu=programs;title=Internet;id=internet\nSUBITEM;menu=internet;title=Klickifax;path=/R4OS/SOFTWARE/INTERNET/KLICKIFAX.R4X;class=gui;policy=gui\nACTION;title=Terminal Mode;action=terminal_mode\nACTION;title=Run...;action=run\nSUBMENU;title=Settings;id=settings\nSUBITEM;menu=settings;title=Appearance;path=/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X;class=gui;policy=gui\nSUBITEM;menu=settings;title=Display;path=/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X;args=/DISPLAY;class=gui;policy=gui\nACTION;title=Tasks;action=tasks\nACTION;title=Restart;action=restart\nACTION;title=Poweroff;action=poweroff\nACTION;title=Halt;action=halt\n"));
         assert!(menu.loaded_from_config);
-        assert_eq!(menu.entries().len(), 8);
+        assert_eq!(menu.entries().len(), 7);
         assert_eq!(menu.submenu_count(), 3);
         assert_eq!(menu.target(0), Target::MenuPrograms);
         assert_eq!(menu.submenu_target(0, 0), Target::MenuTerminal);
@@ -884,13 +879,13 @@ mod tests {
         assert_eq!(menu.submenu_target(3, 0), Target::MenuSettingsAppearance);
         assert_eq!(menu.submenu_target(3, 1), Target::MenuSettingsDisplay);
         assert_eq!(menu.submenu_launch(3, 1).unwrap().args, b"/DISPLAY");
-        assert_eq!(menu.target(6), Target::MenuPoweroff);
+        assert_eq!(menu.target(5), Target::MenuPoweroff);
     }
     #[test]
     fn original_unknown_config_keeps_defaults() {
         let mut menu = Menu::defaults();
         assert!(!menu.load(b"ITEM;title=Unknown;path=/R4OS/SOFTWARE/DESKTOP/UNKNOWN.R4X;policy=gui\nACTION;title=Settings;action=settings\nACTION;title=Nope;action=unknown\n"));
-        assert_eq!(menu.entries().len(), 10);
+        assert_eq!(menu.entries().len(), 9);
         assert_eq!(menu.target(0), Target::MenuSpectra);
         assert!(
             !menu.load(
@@ -911,10 +906,10 @@ mod tests {
         assert!(menu.starts_group(0));
         assert!(!menu.starts_group(3));
         assert!(menu.starts_group(2));
-        assert!(menu.starts_group(6));
+        assert!(menu.starts_group(5));
         assert_eq!(menu.group_label(0), b"Programs");
         assert_eq!(menu.group_label(2), b"System");
-        assert_eq!(menu.group_label(6), b"Power");
+        assert_eq!(menu.group_label(5), b"Power");
         assert_eq!(
             menu.item_y(height, 0),
             top + style::MENU_TOP_PAD + style::MENU_GROUP_H
@@ -922,7 +917,8 @@ mod tests {
         assert_eq!(menu.hit(height, 40, menu.item_y(height, 1) + 3), Some(1));
         assert_eq!(menu.hit(height, 40, menu.item_y(height, 2) - 3), None);
         assert!(menu.item_y(height, 9) + style::MENU_ITEM_H <= top + style::MENU_H);
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, 9) + 3), Some(9));
+        let last = menu.entries().len() - 1;
+        assert_eq!(menu.hit(height, 40, menu.item_y(height, last) + 3), Some(last));
         let rect = menu.submenu_rect(1280, height, 1).unwrap();
         assert_eq!(rect.x, style::MENU_W - 4);
         assert_eq!(

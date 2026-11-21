@@ -110,28 +110,8 @@ fn collect<T: r4os_sdk::inventory::Row>(
     }
 }
 
-// Full diagnostic acquisition is opt-in and bounded while Tasks is visible.
-// Process metadata checks the current registry epoch independently each round.
-#[derive(Default)]
-struct DiagnosticRefresh {
-    next: Option<u64>,
-    last_tick: Option<u64>,
-}
-impl DiagnosticRefresh {
-    fn due(&mut self, requested: bool, tick: u64) -> bool {
-        if !requested || self.last_tick.is_some_and(|last| tick < last) {
-            self.next = None;
-        }
-        self.last_tick = Some(tick);
-        requested && self.next.is_none_or(|next| tick >= next)
-    }
-    fn captured(&mut self, tick: u64, interval: u64) {
-        self.next = Some(tick.saturating_add(interval.max(1)));
-    }
-}
 #[derive(Default)]
 pub struct Inventory {
-    diagnostic_refresh: DiagnosticRefresh,
     active: Vec<a::ProgramInstanceSnapshot>,
     staging: Vec<a::ProgramInstanceSnapshot>,
     lifecycle: Vec<a::ProgramLifecycleSnapshot>,
@@ -165,7 +145,7 @@ impl core::ops::Deref for CurrentGeneration<'_> {
     }
 }
 impl Inventory {
-    /// The last complete snapshot remains suitable for task-list display.
+    #[cfg(test)]
     pub fn visible(&self) -> &[a::ProgramInstanceSnapshot] {
         &self.active
     }
@@ -175,43 +155,19 @@ impl Inventory {
             items: &self.active,
         })
     }
-    pub fn refresh(
-        &mut self,
-        app: &r4os_sdk::App2<'_>,
-        diagnostics: bool,
-        tick: u64,
-        interval: u64,
-    ) -> bool {
-        let full = self.diagnostic_refresh.due(diagnostics, tick);
-        let complete = self.refresh_current(app, !full);
-        if complete && full {
-            self.diagnostic_refresh.captured(tick, interval);
-        }
-        complete
-    }
-    fn refresh_current(&mut self, app: &r4os_sdk::App2<'_>, reuse: bool) -> bool {
+    pub fn refresh(&mut self, app: &r4os_sdk::App2<'_>) -> bool {
         let reusable_epoch = core::mem::replace(&mut self.complete_epoch, 0);
         self.authoritative = false;
         self.pages = 0;
-        let result = if reuse {
-            collect(
-                app,
-                &mut self.lifecycle,
-                reusable_epoch,
-                &mut self.pages,
-                &mut self.restarts,
-            )
-        } else {
-            collect(
-                app,
-                &mut self.staging,
-                0,
-                &mut self.pages,
-                &mut self.restarts,
-            )
-        };
+        let result = collect(
+            app,
+            &mut self.lifecycle,
+            reusable_epoch,
+            &mut self.pages,
+            &mut self.restarts,
+        );
         let result = result.and_then(|epoch| {
-            if reuse && epoch.is_some() {
+            if epoch.is_some() {
                 self.staging.clear();
                 self.staging
                     .try_reserve(self.lifecycle.len())
@@ -267,7 +223,7 @@ mod tests {
     use r4os_sdk::{resources::Result, storage::Error};
     trait Read {
         fn cursor(&self) -> &a::ProgramInventoryCursor;
-        fn reserve_total(&self) -> usize;
+
         fn programs(
             &mut self,
             out: &mut [a::ProgramInstanceSnapshot],
@@ -297,65 +253,18 @@ mod tests {
                     .cast::<Self>()
             }
         }
-        unsafe fn begin(
-            cursor: *mut a::ProgramInventoryCursor,
-            summary: Option<*mut a::ProgramInventorySummary>,
-            life: bool,
-        ) -> i32 {
+        unsafe extern "C" fn life_begin(cursor: *mut a::ProgramInventoryCursor) -> i32 {
             let state = unsafe { Self::current() };
             let source = match (state.begin)() {
                 Ok(source) => source,
                 Err(error) => return error_code(error),
             };
             let mut value = *source.cursor();
-            if life {
-                value.flags |= a::program_inventory_cursor_flag_lifecycle;
-            }
+            value.flags |= a::program_inventory_cursor_flag_lifecycle;
             unsafe {
                 cursor.write(value);
             }
-            if let Some(summary) = summary {
-                unsafe {
-                    summary.write(a::ProgramInventorySummary {
-                        snapshot_generation: value.snapshot_generation,
-                        program_epoch: value.program_epoch,
-                        task_epoch: value.task_epoch,
-                        thread_epoch: value.thread_epoch,
-                        program_total: source.reserve_total() as u32,
-                        flags: a::program_inventory_summary_flag_stable,
-                        ..Default::default()
-                    });
-                }
-            }
             state.source = Some(source);
-            0
-        }
-        unsafe extern "C" fn full_begin(
-            cursor: *mut a::ProgramInventoryCursor,
-            summary: *mut a::ProgramInventorySummary,
-        ) -> i32 {
-            unsafe { Self::begin(cursor, Some(summary), false) }
-        }
-        unsafe extern "C" fn life_begin(cursor: *mut a::ProgramInventoryCursor) -> i32 {
-            unsafe { Self::begin(cursor, None, true) }
-        }
-        unsafe extern "C" fn full_page(
-            cursor: *mut a::ProgramInventoryCursor,
-            rows: *mut a::ProgramInstanceSnapshot,
-            capacity: u32,
-            output: *mut a::ProgramInventoryPageInfo,
-        ) -> i32 {
-            let source = unsafe { Self::current() }.source.as_mut().unwrap();
-            let page = match source
-                .programs(unsafe { core::slice::from_raw_parts_mut(rows, capacity as usize) })
-            {
-                Ok(page) => page,
-                Err(error) => return error_code(error),
-            };
-            unsafe {
-                cursor.write(*source.cursor());
-                output.write(page);
-            }
             0
         }
         unsafe extern "C" fn life_page(
@@ -411,18 +320,14 @@ mod tests {
         1
     }
     impl Inventory {
-        fn refresh_with<S: Read>(&mut self, reuse: bool, begin: impl FnMut() -> Result<S>) -> bool {
-            self.refresh_fixture(
-                reuse,
-                Bridge {
-                    begin,
-                    source: None::<S>,
-                },
-            )
+        fn refresh_with<S: Read>(&mut self, begin: impl FnMut() -> Result<S>) -> bool {
+            self.refresh_fixture(Bridge {
+                begin,
+                source: None::<S>,
+            })
         }
         fn refresh_fixture<S: Read, F: FnMut() -> Result<S>>(
             &mut self,
-            reuse: bool,
             mut bridge: Bridge<S, F>,
         ) -> bool {
             let _guard = SOURCE_LOCK.lock().unwrap();
@@ -431,8 +336,6 @@ mod tests {
                 std::sync::atomic::Ordering::Release,
             );
             let system = a::generation2::R4XStartR4Sys2 {
-                program_inventory_begin: Bridge::<S, F>::full_begin as *const () as u64,
-                program_inventory_programs: Bridge::<S, F>::full_page as *const () as u64,
                 program_lifecycle_begin: Bridge::<S, F>::life_begin as *const () as u64,
                 program_lifecycle_programs: Bridge::<S, F>::life_page as *const () as u64,
                 monotonic_clock: clock as *const () as u64,
@@ -458,7 +361,7 @@ mod tests {
             };
             let context = unsafe { r4os_sdk::platform2::Context::new(&raw) }.unwrap();
             let app = r4os_sdk::App2::from_context(&context, c"INVENTORYFIX").unwrap();
-            let result = self.refresh_current(&app, reuse);
+            let result = self.refresh(&app);
             SOURCE.store(core::ptr::null_mut(), std::sync::atomic::Ordering::Release);
             result
         }
@@ -499,9 +402,6 @@ mod tests {
     impl Read for Reader {
         fn cursor(&self) -> &a::ProgramInventoryCursor {
             &self.cursor
-        }
-        fn reserve_total(&self) -> usize {
-            self.summary.program_total as usize
         }
         fn programs(
             &mut self,
@@ -565,23 +465,19 @@ mod tests {
             Ok(reader)
         };
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(false, source));
-        assert_eq!(inventory.pages, 2);
-        assert_eq!(inventory.current().unwrap().len(), count);
-        inventory.complete_epoch = 0;
-        assert!(inventory.refresh_with(true, source));
+        assert!(inventory.refresh_with(source));
         assert_eq!(inventory.pages, 2);
         let current = inventory.current().unwrap();
         assert_eq!(current.len(), count);
         assert_eq!(current[count - 1].handle.generation, count as u64);
     }
     #[test]
-    fn complete_epoch_reuses_without_pages_but_diagnostics_read_again() {
+    fn complete_epoch_reuses_without_pages() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(10, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(10, 42))));
         let handle = inventory.current().unwrap()[0].handle;
         for generation in 11..1011 {
-            assert!(inventory.refresh_with(true, || {
+            assert!(inventory.refresh_with(|| {
                 let mut reader = Reader::one(generation, 99);
                 reader.cursor.program_epoch = 10;
                 reader.pages.clear(); // a page call would fail
@@ -590,37 +486,22 @@ mod tests {
             assert_eq!(inventory.pages, 0);
             assert!(inventory.current().unwrap().find(handle).is_some());
         }
-        // A full diagnostic snapshot may change memory values at the same
-        // lifecycle epoch. Its independent generation is never the cache key.
-        assert!(inventory.refresh_with(false, || {
-            let mut reader = Reader::one(2000, 42);
-            reader.cursor.program_epoch = 10;
-            reader.pages[0].1[0].handle = handle;
-            reader.pages[0].1[0].info.memory_committed_bytes = 4096;
-            Ok(reader)
-        }));
-        assert_eq!(inventory.pages, 1);
-        assert_eq!(
-            inventory.current().unwrap()[0].info.memory_committed_bytes,
-            4096
-        );
-        assert!(inventory.current().unwrap().find(handle).is_some());
     }
     #[test]
     fn busy_or_restart_requires_complete_resync_even_at_the_old_epoch() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(10, 42))));
-        assert!(!inventory.refresh_with::<Reader>(true, || Err(Error::Raw(-5))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(10, 42))));
+        assert!(!inventory.refresh_with::<Reader>(|| Err(Error::Raw(-5))));
         assert!(inventory.current().is_none());
         assert_eq!(inventory.visible()[0].handle.instance_id, 42);
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(10, 42);
             reader.pages.clear();
             Ok(reader)
         }));
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(10, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(10, 42))));
         let mut attempt = 0;
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             attempt += 1;
             let mut reader = Reader::one(if attempt == 1 { 11 } else { 10 }, 99);
             if attempt == 1 {
@@ -634,13 +515,13 @@ mod tests {
         assert_eq!(attempt, 2);
         assert!(inventory.current().is_none());
         assert_eq!(inventory.visible()[0].handle.instance_id, 42);
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(10, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(10, 42))));
         assert_eq!(inventory.pages, 1);
     }
     #[test]
     fn complete_empty_snapshot_is_reusable_and_changed_epoch_refreshes() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || {
+        assert!(inventory.refresh_with(|| {
             let mut reader = Reader::one(1, 0);
             reader.pages[0].0.returned = 0;
             reader.pages[0].0.total = 0;
@@ -649,27 +530,27 @@ mod tests {
             Ok(reader)
         }));
         assert!(inventory.current().unwrap().is_empty());
-        assert!(inventory.refresh_with(true, || {
+        assert!(inventory.refresh_with(|| {
             let mut reader = Reader::one(1, 99);
             reader.pages.clear();
             Ok(reader)
         }));
         assert_eq!(inventory.pages, 0);
         assert!(inventory.current().unwrap().is_empty());
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(2, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(2, 42))));
         assert_eq!(inventory.pages, 1);
         assert_eq!(inventory.current().unwrap()[0].handle.instance_id, 42);
     }
     #[test]
     fn invalid_or_changing_cursor_epoch_cannot_authorize_a_snapshot() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(1, 42))));
-        assert!(!inventory.refresh_with(true, || {
+        assert!(inventory.refresh_with(|| Ok(Reader::one(1, 42))));
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(2, 99);
             reader.cursor.program_epoch = 0;
             Ok(reader)
         }));
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(2, 99);
             reader.changed_epoch = Some(3);
             Ok(reader)
@@ -678,33 +559,9 @@ mod tests {
         assert_eq!(inventory.visible()[0].handle.instance_id, 42);
     }
     #[test]
-    fn explicit_task_diagnostics_are_bounded_retry_without_authority_and_reopen_fresh() {
-        let mut schedule = DiagnosticRefresh::default();
-        for tick in 0..100 {
-            assert!(!schedule.due(false, tick));
-        }
-        assert!(schedule.due(true, 100));
-        schedule.captured(100, 25);
-        for tick in 101..125 {
-            assert!(!schedule.due(true, tick));
-        }
-        assert!(schedule.due(true, 125));
-        // A failed/Busy full snapshot does not acknowledge a refresh or defer
-        // the next attempt. Inventory's existing cases below check authority.
-        assert!(schedule.due(true, 126));
-        schedule.captured(126, 25);
-        assert!(!schedule.due(true, 127));
-        assert!(!schedule.due(false, 128));
-        assert!(schedule.due(true, 129));
-        schedule.captured(129, 25);
-        assert!(schedule.due(true, 1)); // clock rollback cannot freeze Tasks
-        schedule.captured(1, 0);
-        assert!(schedule.due(true, 2));
-    }
-    #[test]
     fn current_restart_or_partial_failure_never_replaces_complete_generation() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(10, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(10, 42))));
         assert_eq!(inventory.current().unwrap()[0].handle.generation, 10);
         let handle = inventory.current().unwrap()[0].handle;
         assert!(inventory.current().unwrap().find(handle).is_some());
@@ -712,7 +569,7 @@ mod tests {
         reused.generation += 1;
         assert!(inventory.current().unwrap().find(reused).is_none());
         let mut begins = 0;
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             begins += 1;
             let mut reader = Reader::one(11, 99);
             reader.pages[0].0.status = i32::from(a::program_inventory_status_restart);
@@ -723,7 +580,7 @@ mod tests {
         assert_eq!(inventory.restarts, 8);
         assert!(inventory.current().is_none());
         assert_eq!(inventory.visible()[0].handle.instance_id, 42);
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(12, 99);
             reader.pages[0].0.status = i32::from(a::program_inventory_status_more);
             reader.pages[0].0.has_more = 1;
@@ -733,20 +590,20 @@ mod tests {
         }));
         assert_eq!(inventory.visible()[0].handle.instance_id, 42);
         assert!(inventory.current().is_none());
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(12, 42))));
+        assert!(inventory.refresh_with(|| Ok(Reader::one(12, 42))));
         assert_eq!(inventory.current().unwrap()[0].handle.generation, 12);
         assert!(!inventory.restart_pending);
     }
     #[test]
     fn current_page_generation_and_progress_are_required_for_commit() {
         let mut inventory = Inventory::default();
-        assert!(inventory.refresh_with(true, || Ok(Reader::one(1, 7))));
-        assert!(!inventory.refresh_with(true, || {
+        assert!(inventory.refresh_with(|| Ok(Reader::one(1, 7))));
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(2, 8);
             reader.pages[0].0.snapshot_generation = 3;
             Ok(reader)
         }));
-        assert!(!inventory.refresh_with(true, || {
+        assert!(!inventory.refresh_with(|| {
             let mut reader = Reader::one(2, 8);
             reader.pages[0].0.returned = 0;
             reader.pages[0].0.total = 0;
@@ -758,10 +615,10 @@ mod tests {
             reader.summary.program_total = 2;
             Ok(reader)
         }));
-        assert!(!inventory.refresh_with::<Reader>(true, || Err(Error::Raw(-9))));
+        assert!(!inventory.refresh_with::<Reader>(|| Err(Error::Raw(-9))));
         assert!(inventory.current().is_none());
         assert_eq!(inventory.visible()[0].handle.instance_id, 7);
-        assert!(inventory.refresh_with(true, || {
+        assert!(inventory.refresh_with(|| {
             let mut reader = Reader::one(3, 0);
             reader.pages[0].0.returned = 0;
             reader.pages[0].0.total = 0;

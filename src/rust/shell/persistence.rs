@@ -189,10 +189,11 @@ impl<'app, 'start> Store<'app, 'start> {
         let mut name = [0; desktop_folder::MAX_LINK_PATH + 1];
         let mut bytes = [0; desktop_folder::MAX_LINK_BYTES];
         for link in desktop_folder::DEFAULTS {
-            // Existing installations may receive Desktop before Portex.
-            // Publish its new default only once the module is present.
-            if link == desktop_folder::DefaultLink::Portex
-                && !matches!(files.info(&path(link.target())?), Ok(Some(_)))
+            // An update can deliver Desktop before these applications.
+            if matches!(
+                link,
+                desktop_folder::DefaultLink::Portex | desktop_folder::DefaultLink::ControlCenter
+            ) && !matches!(files.info(&path(link.target())?), Ok(Some(_)))
             {
                 continue;
             }

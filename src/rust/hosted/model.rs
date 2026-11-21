@@ -164,14 +164,10 @@ impl Model {
         now: u64,
         tick_hz: u32,
         last_global_exit: i32,
-        diagnostics: bool,
         work_areas: &[Rect; SLOT_COUNT],
     ) -> Report {
         let mut report = Report::default();
-        if !self
-            .inventory
-            .refresh(app, diagnostics, now, u64::from(tick_hz).div_ceil(4).max(1))
-        {
+        if !self.inventory.refresh(app) {
             return report;
         }
         let Some(current) = self.inventory.current() else {
