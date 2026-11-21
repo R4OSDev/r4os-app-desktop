@@ -90,14 +90,21 @@ pub fn paint_item(
                 s::TEXT,
             )?;
         }
-        let width = (e.title().len() as i32 * 8).min(items::ICON_W - 8);
-        ui.text(
-            e.x + (items::ICON_W - width) / 2,
-            e.y + 47,
-            e.title(),
-            fg,
-            bg,
-        )?;
+        let title = e.title();
+        // Multiword shortcuts can use two lines inside the existing hit area.
+        let split = (title.len() * 8 > (items::CELL_W - 4) as usize)
+            .then(|| title.iter().enumerate()
+                .filter(|(_, c)| **c == b' ')
+                .map(|(i, _)| i)
+                .min_by_key(|i| i.abs_diff(title.len() / 2)))
+            .flatten();
+        let (first, second) = split.map_or((title, &[][..]), |i| (&title[..i], &title[i + 1..]));
+        let top = if second.is_empty() { 47 } else { 43 };
+        for (row, label) in [first, second].into_iter().enumerate() {
+            if label.is_empty() { continue; }
+            let width = (label.len() as i32 * 8).min(items::ICON_W - 8);
+            ui.text(e.x + (items::ICON_W - width) / 2, e.y + top + row as i32 * 8, label, fg, bg)?;
+        }
     }
     Ok(())
 }

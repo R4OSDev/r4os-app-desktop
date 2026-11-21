@@ -832,6 +832,7 @@ pub(crate) fn single_instance_name(path: &[u8]) -> bool {
         b"CALC.R4X",
         b"APPDEF.R4X",
         b"LOGCENTER.R4X",
+        b"CTRLCTR.R4X",
     ]
     .iter()
     .any(|v| name.eq_ignore_ascii_case(v))

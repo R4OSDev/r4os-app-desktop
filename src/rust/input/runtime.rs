@@ -18,6 +18,7 @@ use r4os_sdk::{
 #[derive(Clone, Copy)]
 pub enum Sample {
     Activity,
+    ControlCenter,
     Key {
         key: u32,
     },
@@ -48,6 +49,7 @@ pub struct State {
     pub tray_pressed: Identity,
     pub right_tray: Identity,
     pub physical_sequence: u64,
+    shortcut_delete: bool,
     pub physical_buttons: u8,
     pub remote_buttons: u8,
     pub revision: u64,
@@ -83,6 +85,10 @@ impl State {
         }
         match value.kind {
             a::remote_input_kind_key_down => {
+                let chord = a::remote_input_modifier_ctrl | a::remote_input_modifier_alt;
+                if value.key == key::R4SdkGuiKey_delete as u32 && value.modifiers & chord == chord {
+                    return Poll::Event(Sample::ControlCenter);
+                }
                 if !keys::is_app_key(value.key) && value.key != key::R4SdkGuiKey_start_menu as u32 {
                     return Poll::Event(Sample::Activity);
                 }
@@ -119,6 +125,26 @@ impl State {
             return Poll::Ignored;
         }
         self.physical_sequence = input.sequence;
+        if input.kind == a::physical_key_kind_reset {
+            self.shortcut_delete = false;
+        } else if input.key == 0x4c {
+            // HID Keyboard Delete Forward. Keep repeats and the matching
+            // release out of the newly focused window, even after Alt is up.
+            if input.kind == a::physical_key_kind_up {
+                if core::mem::take(&mut self.shortcut_delete) {
+                    return Poll::Ignored;
+                }
+            } else if input.flags & a::physical_key_flag_repeat == 0 {
+                let ctrl = a::physical_key_modifier_left_control | a::physical_key_modifier_right_control;
+                let alt = a::physical_key_modifier_left_alt | a::physical_key_modifier_right_alt;
+                self.shortcut_delete = input.modifiers & ctrl != 0 && input.modifiers & alt != 0;
+                if self.shortcut_delete {
+                    return Poll::Event(Sample::ControlCenter);
+                }
+            } else if self.shortcut_delete {
+                return Poll::Ignored;
+            }
+        }
         Poll::Event(Sample::Physical(input))
     }
     pub fn keyboard(&mut self, session: &mut Session<'_, '_>) -> Poll {

@@ -1926,6 +1926,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 }
                 match sample {
                     Sample::Activity => {}
+                    Sample::ControlCenter => {
+                        let request = Launch::new(
+                            b"C:\\R4OS\\SOFTWARE\\DESKTOP\\CTRLCTR.R4X",
+                            b"",
+                            b"Control Center",
+                            a::LaunchPolicy::gui,
+                        ).expect("fixed Control Center launch");
+                        self.launch(request, env, session, programs, time);
+                    }
                     Sample::Key { key } => self.key(key, env, session, host, programs, time),
                     Sample::Physical(value) => {
                         if value.kind == a::physical_key_kind_down
