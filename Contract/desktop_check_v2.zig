@@ -8,7 +8,7 @@ pub const complete_operation: u16 = 4503;
 pub const request_size = 80;
 pub const response_size = 144;
 const magic: u32 = 0x31434452;
-pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel, begin_benchmark, software_profile, snes_prepare, snes_finish, maximize, launch_status, capture_stats };
+pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel, begin_benchmark, software_profile, snes_prepare, snes_finish, maximize, launch_status, capture_stats, render_status };
 /// One explicit read-only owner snapshot. No frame is forced by this request.
 pub fn captureReportPath(buffer: []u8, owner: Identity, sequence: u64) ![:0]u8 {
     if (!owner.valid() or sequence > 2) return error.InvalidOwner;
@@ -58,7 +58,16 @@ pub const Request = struct {
     item: u64 = 0,
     deadline_tick: u64,
 };
+/// Read-only compositor counters. Only render_status uses this response body.
+pub const RenderStats = struct {
+    redraws: u64 = 0,
+    cursor_moves: u64 = 0,
+    cursor_presents: u64 = 0,
+    full: u64 = 0,
+    last_damage: u8 = 0,
+};
 pub const Response = struct {
+    render: RenderStats = .{},
     op: Op,
     result: i32 = 0,
     desktop: Identity,
@@ -142,6 +151,14 @@ pub fn encodeResponse(bytes: *[response_size]u8, value: Response) void {
     put(i32, bytes, 12, value.result);
     writeIdentity(bytes, 16, value.desktop);
     writeIdentity(bytes, 32, value.target);
+    if (value.op == .render_status) {
+        put(u64, bytes, 48, value.render.redraws);
+        put(u64, bytes, 56, value.render.cursor_moves);
+        put(u64, bytes, 64, value.render.cursor_presents);
+        put(u64, bytes, 72, value.render.full);
+        bytes[80] = value.render.last_damage;
+        return;
+    }
     put(i32, bytes, 48, value.x);
     put(i32, bytes, 52, value.y);
     put(i32, bytes, 56, value.w);
@@ -162,6 +179,16 @@ pub fn encodeResponse(bytes: *[response_size]u8, value: Response) void {
 }
 pub fn decodeResponse(bytes: []const u8) !Response {
     const op = try valid(bytes, response_size);
+    if (op == .render_status) {
+        const owner = identity(bytes, 16);
+        if (!owner.valid()) return error.InvalidOwner;
+        if (get(u32, bytes, 20) != 0 or get(u32, bytes, 36) != 0 or bytes[80] > 3 or
+            !std.mem.allEqual(u8, bytes[81..], 0)) return error.Reserved;
+        return .{ .op = op, .result = get(i32, bytes, 12), .desktop = owner, .target = identity(bytes, 32), .render = .{
+            .redraws = get(u64, bytes, 48), .cursor_moves = get(u64, bytes, 56),
+            .cursor_presents = get(u64, bytes, 64), .full = get(u64, bytes, 72), .last_damage = bytes[80],
+        } };
+    }
     if (get(u32, bytes, 20) != 0 or get(u32, bytes, 36) != 0 or get(u32, bytes, 68) & ~@as(u32, 127) != 0 or
         get(u32, bytes, 100) > 2 or get(u32, bytes, 112) > 3 or get(u32, bytes, 124) != 0) return error.Reserved;
     const result: Response = .{ .op = op, .result = get(i32, bytes, 12), .desktop = identity(bytes, 16), .target = identity(bytes, 32), .x = get(i32, bytes, 48), .y = get(i32, bytes, 52), .w = get(i32, bytes, 56), .h = get(i32, bytes, 60), .gui_revision = get(u32, bytes, 64), .flags = get(u32, bytes, 68), .idle_timeouts = get(u64, bytes, 72), .redraws = get(u64, bytes, 80), .input_generation = get(u64, bytes, 88), .service_handle = get(u32, bytes, 96), .screenshot_state = get(u32, bytes, 100), .screenshot_bytes = get(u64, bytes, 104), .restart_state = get(u32, bytes, 112), .restart_old_handle = get(u32, bytes, 116), .restart_result = get(i32, bytes, 120), .present_failures = get(u64, bytes, 128), .present_lost_frames = get(u64, bytes, 136) };

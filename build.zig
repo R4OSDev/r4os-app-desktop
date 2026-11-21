@@ -1,6 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    // Wire consumers need only the versioned contract file from this package.
+    if (b.option(bool, "contract-only", "Use exported Desktop wire contracts") orelse false) return;
+
     // Rust product builds use the SDK's shared manifest/Cargo owner. The
     // independent original Zig oracles remain available as explicit targets.
     const sdk_build = b.lazyImport(@This(), "r4os_sdk") orelse return;

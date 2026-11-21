@@ -245,6 +245,13 @@ impl Owner {
         effects: &mut Effects,
     ) -> Response {
         let mut out = Response::new(r, Identity::of(host.owner()));
+        if r.op == Op::RenderStatus {
+            out.render = w::RenderStats {
+                redraws: stats.redraws, cursor_moves, cursor_presents: stats.cursor,
+                full: stats.full, last_damage: stats.last_damage,
+            };
+            return out;
+        }
         out.idle_timeouts = self.idle_timeouts;
         out.redraws = stats.redraws;
         out.present_failures = stats.present_errors;
@@ -295,7 +302,7 @@ impl Owner {
             return out;
         }
         match r.op {
-            Op::LaunchStatus => unreachable!("status has no scene mutation"),
+            Op::LaunchStatus | Op::RenderStatus => unreachable!("status has no scene mutation"),
             Op::Begin | Op::BeginBenchmark => {
                 self.restart_state = 0;
                 self.restart_at = 0;

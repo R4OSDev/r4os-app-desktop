@@ -34,6 +34,7 @@ pub enum Op {
     Maximize,
     LaunchStatus,
     CaptureStats,
+    RenderStatus,
 }
 impl Op {
     fn decode(value: u32) -> Option<Self> {
@@ -61,6 +62,7 @@ impl Op {
             21 => Self::Maximize,
             22 => Self::LaunchStatus,
             23 => Self::CaptureStats,
+            24 => Self::RenderStatus,
             _ => return None,
         })
     }
@@ -112,7 +114,19 @@ pub struct Work {
     pub request: Request,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenderStats {
+    pub redraws: u64,
+    pub cursor_moves: u64,
+    pub cursor_presents: u64,
+    pub full: u64,
+    pub last_damage: u8,
+}
+impl RenderStats {
+    const EMPTY: Self = Self { redraws: 0, cursor_moves: 0, cursor_presents: 0, full: 0, last_damage: 0 };
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Response {
+    pub render: RenderStats,
     pub op: Op,
     pub result: i32,
     pub desktop: Identity,
@@ -144,11 +158,15 @@ pub const ISOLATED: u32 = 16;
 pub const SERVICE_AVAILABLE: u32 = 32;
 impl Response {
     pub fn new(request: Request, desktop: Identity) -> Self {
+        Self::empty(request.op, desktop, request.target)
+    }
+    fn empty(op: Op, desktop: Identity, target: Identity) -> Self {
         Self {
-            op: request.op,
+            render: RenderStats::EMPTY,
+            op,
             result: 0,
             desktop,
-            target: request.target,
+            target,
             x: 0,
             y: 0,
             w: 0,
@@ -272,6 +290,14 @@ pub fn encode_response(b: &mut [u8; RESPONSE_SIZE], v: Response) {
     put(b, 12, v.result);
     put_id(b, 16, v.desktop);
     put_id(b, 32, v.target);
+    if v.op == Op::RenderStatus {
+        put(b, 48, v.render.redraws);
+        put(b, 56, v.render.cursor_moves);
+        put(b, 64, v.render.cursor_presents);
+        put(b, 72, v.render.full);
+        b[80] = v.render.last_damage;
+        return;
+    }
     put(b, 48, v.x);
     put(b, 52, v.y);
     put(b, 56, v.w);
@@ -291,8 +317,23 @@ pub fn encode_response(b: &mut [u8; RESPONSE_SIZE], v: Response) {
     put(b, 136, v.present_lost_frames);
 }
 pub fn decode_response(b: &[u8]) -> Option<Response> {
-    if !valid(b, RESPONSE_SIZE)
-        || get::<u32>(b, 20) != 0
+    if !valid(b, RESPONSE_SIZE) {
+        return None;
+    }
+    let op = Op::decode(get(b, 8))?;
+    if op == Op::RenderStatus {
+        let desktop = id(b, 16);
+        if !desktop.valid() || get::<u32>(b, 20) != 0 || get::<u32>(b, 36) != 0
+            || b[80] > 3 || b[81..].iter().any(|byte| *byte != 0) {
+            return None;
+        }
+        let mut result = Response::empty(op, desktop, id(b, 32));
+        result.result = get(b, 12);
+        result.render = RenderStats { redraws: get(b, 48), cursor_moves: get(b, 56),
+            cursor_presents: get(b, 64), full: get(b, 72), last_damage: b[80] };
+        return Some(result);
+    }
+    if get::<u32>(b, 20) != 0
         || get::<u32>(b, 36) != 0
         || get::<u32>(b, 68) & !127 != 0
         || get::<u32>(b, 100) > 2
@@ -302,7 +343,8 @@ pub fn decode_response(b: &[u8]) -> Option<Response> {
         return None;
     }
     let r = Response {
-        op: Op::decode(get(b, 8))?,
+        render: RenderStats::EMPTY,
+        op,
         result: get(b, 12),
         desktop: id(b, 16),
         target: id(b, 32),
