@@ -955,6 +955,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             1_000_000_000 / u64::from(time.hz.max(1)),
         );
         let mut regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
+        let damage_kind = self.dirty.kind(Rect::new(0, 0, self.width, self.height));
         let count = self.dirty.take_regions(&mut regions);
         let trace_input = self.diagnostics.benchmark.trace.as_ref().and_then(|trace| {
             let i = trace.window_index;
@@ -1228,8 +1229,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.drag_pacing.reset();
             }
         }
-        if rendered {
-            self.frames.stats.last_damage = count as u8;
+        if rendered && count != 0 {
+            self.frames.stats.last_damage = damage_kind as u8;
+            if damage_kind == crate::render::geometry::DamageKind::Cursor {
+                self.frames.stats.cursor = self.frames.stats.cursor.saturating_add(1);
+            }
         }
         if let Some(output) = self.primary.output_mut() {
             if let Some(image) = output.capture_image() {
@@ -1846,7 +1850,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     let rect = output_geometry::cursor_rect(self.hosted.bounds, point);
                     self.publisher.cursor_damage.invalidate(rect);
                     if self.cursor.software() {
-                        self.dirty.invalidate(rect);
+                        self.dirty.invalidate_cursor(rect);
                     }
                 }
             }
@@ -1935,9 +1939,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             if pacing && new != old {
                 self.drag_pacing.motion(old, new, moved);
             } else {
-                for &r in moved.regions() {
-                    self.dirty.invalidate(r);
-                }
+                self.dirty.merge(&moved);
                 if self.hosted.model.windows.dragged_window().is_none()
                     && self.drag_pacing.pending()
                 {

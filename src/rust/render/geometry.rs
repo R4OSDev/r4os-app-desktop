@@ -228,9 +228,20 @@ fn absorb_overlaps(
     merged
 }
 
+/// Discriminants are the Desktop render_status wire values.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageKind {
+    None = 0,
+    Cursor = 1,
+    Mixed = 2,
+    Full = 3,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Dirty {
     active: bool,
+    cursor_only: bool,
     bounds: Rect,
     regions: [Rect; MAX_DAMAGE_REGIONS],
     count: usize,
@@ -246,9 +257,16 @@ impl Dirty {
         &self.regions[..self.count]
     }
     pub fn invalidate(&mut self, rect: Rect) {
+        self.add(rect, false);
+    }
+    pub fn invalidate_cursor(&mut self, rect: Rect) {
+        self.add(rect, true);
+    }
+    fn add(&mut self, rect: Rect, cursor: bool) {
         if rect.is_empty() {
             return;
         }
+        self.cursor_only = cursor && (!self.active || self.cursor_only);
         self.bounds = if self.active {
             self.bounds.merged(rect)
         } else {
@@ -257,8 +275,24 @@ impl Dirty {
         self.active = true;
         append_damage_region(&mut self.regions, &mut self.count, rect);
     }
+    pub fn kind(&self, screen: Rect) -> DamageKind {
+        if !self.active {
+            DamageKind::None
+        } else if self.count == 1 && self.bounds == screen {
+            DamageKind::Full
+        } else if self.cursor_only {
+            DamageKind::Cursor
+        } else {
+            DamageKind::Mixed
+        }
+    }
     pub fn invalidate_surface(&mut self, surface: Surface) {
-        self.invalidate(surface.rect);
+        self.add(surface.rect, surface.kind == SurfaceKind::Cursor);
+    }
+    pub fn merge(&mut self, other: &Self) {
+        for &rect in other.regions() {
+            self.add(rect, other.cursor_only);
+        }
     }
     pub fn invalidate_full(&mut self, screen_w: i32, screen_h: i32) {
         self.invalidate(desktop(screen_w, screen_h).rect);
@@ -392,6 +426,24 @@ mod tests {
         assert_eq!(dirty.take(), Some(Rect::new(10, 4, 35, 26)));
         assert!(!dirty.active());
         assert_eq!(dirty.take(), None);
+    }
+    #[test]
+    fn render_status_classifies_content_independently_of_rectangle_count() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let mut dirty = Dirty::default();
+        assert_eq!(dirty.kind(screen), DamageKind::None);
+        for i in 0..6 {
+            dirty.invalidate_cursor(Rect::new(40 * i, 32, 12, 18));
+        }
+        assert_eq!(dirty.regions().len(), 6);
+        assert_eq!(dirty.kind(screen), DamageKind::Cursor);
+        dirty.invalidate(Rect::new(300, 100, 2, 2));
+        dirty.invalidate_cursor(Rect::new(0, 0, 1, 1));
+        assert_eq!(dirty.kind(screen), DamageKind::Mixed);
+        dirty.invalidate_full(screen.w, screen.h);
+        assert_eq!(dirty.kind(screen), DamageKind::Full);
+        dirty.take();
+        assert_eq!(dirty.kind(screen), DamageKind::None);
     }
     #[test]
     fn separated_damage_and_capacity_fallback() {
