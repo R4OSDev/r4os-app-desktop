@@ -37,10 +37,12 @@ pub struct Stats {
     pub present_lost_frames: u64,
     present_generation_last: u64,
 }
+#[derive(Clone, Copy)]
 pub struct Timing {
     pub started_ns: u64,
     pub completed_ns: u64,
     pub composition_ns: u64,
+    pub raster_end_ns: Option<u64>,
     pub present_ns: u64,
 }
 pub struct Frame {
@@ -132,6 +134,7 @@ impl Frames {
         regions: &[Rect],
         input_tick: u64,
         trace: bool,
+        trace_raster: bool,
     ) -> Result<Frame> {
         self.resize(scene.width, scene.height)?;
         if regions.is_empty() {
@@ -148,6 +151,7 @@ impl Frames {
         };
         let old = scene.path;
         scene.path = Path::PrimaryCpu;
+        let mut raster_end_ns = None;
         let composed = unsafe {
             compositor::compose(
                 &mut self.software,
@@ -160,6 +164,11 @@ impl Frames {
                 &mut fonts,
                 &mut icons,
                 &mut self.shapes,
+                || {
+                    if trace_raster {
+                        raster_end_ns = crate::runtime::environment::precise(app);
+                    }
+                },
             )
         };
         scene.path = old;
@@ -170,7 +179,7 @@ impl Frames {
                 return Err(e);
             }
         };
-        let composed = if trace {
+        let composed = if trace || trace_raster {
             Some(crate::runtime::environment::precise(app).ok_or(Error::State)?)
         } else {
             None
@@ -190,6 +199,7 @@ impl Frames {
                 started_ns: start,
                 completed_ns: completed,
                 composition_ns: composed.saturating_sub(start),
+                raster_end_ns,
                 present_ns: completed.saturating_sub(composed),
             })
         } else {

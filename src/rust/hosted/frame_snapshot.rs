@@ -764,7 +764,7 @@ fn valid_map(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     fn owner(id: u32, generation: u64) -> ProgramProcessHandle {
         ProgramProcessHandle {
@@ -815,7 +815,7 @@ mod tests {
             ..Default::default()
         }
     }
-    struct Fake {
+    pub(crate) struct Fake {
         info: GuiFrameInfo,
         font_revision: u32,
         commands: Vec<GuiFrameCommand>,
@@ -833,7 +833,7 @@ mod tests {
         releases: u32,
     }
     impl Fake {
-        fn new(
+        pub(crate) fn new(
             owner: ProgramProcessHandle,
             g: u64,
             commands: &[GuiFrameCommand],

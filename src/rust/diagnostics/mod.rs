@@ -2,6 +2,7 @@
 //! copied through WINSVC; normal painting never runs a diagnostic controller.
 mod capture;
 mod capture_stats;
+pub mod drag;
 pub mod reservation;
 pub mod runtime;
 pub mod snes;

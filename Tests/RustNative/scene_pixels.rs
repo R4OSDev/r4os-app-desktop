@@ -55,7 +55,6 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
     for (case, expected) in expected.into_iter().enumerate() {
         let (w, h) = (640, 480);
         let mut pixels = vec![0x123456; w * h];
-        let mut canvas = CpuScene::new(&mut pixels, w as i32, h as i32).unwrap();
         let mut windows = Controller::default();
         if case > 0 && case < 9 {
             windows.window_mut(0).unwrap().bind_console(13, c"Term");
@@ -71,7 +70,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
                 work_area(640, 480, 32),
             );
         }
-        let clients = Clients::default();
+        let mut clients = Clients::default();
         let consoles = core::array::from_fn(|_| Snapshot::new().unwrap());
         let texts = core::array::from_fn(|_| Surface::default());
         let mut items = Items::new().unwrap();
@@ -115,6 +114,38 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
             }),
             _ => Overlay::None,
         };
+        let full = Rect::new(0, 0, w as i32, h as i32);
+        let mut owner = software::Owner::new(128 * 1024 * 1024).unwrap();
+        let mut shapes = Renderer::default();
+        // Exercise the same scene one update at a time. The reference below
+        // starts with an empty target and a fresh raster cache on every step.
+        for step in 0..if case == 1 { 9 } else { 1 } {
+        let mut changed = full;
+        if step > 0 {
+            let win = windows.window_mut(2).unwrap();
+            let old = win.frame_surface().rect;
+            let x = [180, 180, 194, 208, 208, -22, 60, 220, 220][step];
+            let width = if step >= 7 { 318 } else { 300 };
+            win.set_normal(Rect::new(x, 140, width, 220));
+            changed = intersect(old.merged(win.frame_surface().rect), full).unwrap();
+            if step == 1 || step == 4 {
+                let handle = a::ProgramProcessHandle { instance_id:17, generation:42, ..Default::default() };
+                let commands = [a::GuiFrameCommand {
+                    kind: a::gui_frame_command_kind_clear,
+                    rgb: if step == 1 {0x334455} else {0xf0a030},
+                    ..Default::default()
+                }];
+                let mut reader = crate::hosted::frame_snapshot::tests::Fake::new(handle, step as u64, &commands, &[]);
+                let client = clients.slot_mut(2).unwrap();
+                assert!(client.bind(handle, crate::hosted::client::Origin::Adopted, b"Test", &mut reader));
+                client.frames_mut().mark_pending();
+                assert_eq!(client.frames_mut().refresh(&mut reader), crate::hosted::frame_snapshot::Refresh::Updated);
+            }
+            if step == 8 {
+                windows.focus_or_restore(0);
+                changed = full;
+            }
+        }
         let scene = Scene {
             width: 640,
             height: 480,
@@ -173,15 +204,14 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
                 recording: 0,
             },
         };
-        let regions = if case == 7 {
+        let regions = if step > 0 { vec![changed] } else if case == 7 {
             vec![Rect::new(160, 190, 70, 80)]
         } else if case == 8 {
             vec![Rect::new(180, 190, 20, 40), Rect::new(220, 190, 20, 40)]
         } else {
             vec![Rect::new(0, 0, 640, 480)]
         };
-        let mut owner = software::Owner::new(128 * 1024 * 1024).unwrap();
-        let mut shapes = Renderer::default();
+        let mut canvas = CpuScene::new(&mut pixels, w as i32, h as i32).unwrap();
         let result = unsafe {
             compose(
                 &mut owner,
@@ -194,11 +224,22 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
                 &mut Builtin,
                 &mut NoIcons,
                 &mut shapes,
+                || {},
             )
         }
         .unwrap();
         assert!(result.composition.commands != 0);
         drop(canvas);
+        if step > 0 {
+            let mut reference = vec![0xabcdef; w*h];
+            let mut fresh = software::Owner::new(128 * 1024 * 1024).unwrap();
+            let mut target = CpuScene::new(&mut reference, w as i32, h as i32).unwrap();
+            unsafe { compose(&mut fresh, &OriginalColors, &mut target, &scene,
+                core::array::from_fn(|_| None), &[full], &mut Cache::new().unwrap(),
+                &mut Builtin, &mut NoIcons, &mut Renderer::default(), || {}) }.unwrap();
+            assert_eq!(pixels.iter().zip(&reference).position(|(a,b)| a!=b), None, "incremental scene step {step}");
+            continue;
+        }
         let mut hash = Blake3::new();
         hash.update(PixelBytes::from_words(&pixels).bytes());
         let actual = hash
@@ -207,6 +248,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
             .map(|b| format!("{b:02x}"))
             .collect::<alloc::string::String>();
         assert_eq!(actual, expected, "original whole scene case {case}");
+        }
     }
 }
 #[test]

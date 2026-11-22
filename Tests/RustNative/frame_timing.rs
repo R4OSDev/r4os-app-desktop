@@ -392,6 +392,7 @@ fn frame_damage(
             regions,
             77,
             trace,
+            false,
         )
     }
 }

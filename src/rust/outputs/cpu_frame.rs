@@ -94,6 +94,7 @@ impl State {
                 fonts,
                 icons,
                 shapes,
+                || {},
             )
         }
         .map_err(|_| Error::Graphics)?;

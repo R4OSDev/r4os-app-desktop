@@ -35,6 +35,8 @@ pub enum Op {
     LaunchStatus,
     CaptureStats,
     RenderStatus,
+    DragTraceBegin,
+    DragTraceFinish,
 }
 impl Op {
     fn decode(value: u32) -> Option<Self> {
@@ -63,6 +65,8 @@ impl Op {
             22 => Self::LaunchStatus,
             23 => Self::CaptureStats,
             24 => Self::RenderStatus,
+            25 => Self::DragTraceBegin,
+            26 => Self::DragTraceFinish,
             _ => return None,
         })
     }

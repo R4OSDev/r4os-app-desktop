@@ -306,6 +306,7 @@ pub unsafe fn compose<'frames>(
     fonts: &mut impl Fonts,
     icons: &mut (impl desktop_view::Icons + taskbar_view::Icons),
     shapes: &mut impl Shapes,
+    raster_complete: impl FnOnce(),
 ) -> Result<Completed> {
     let is_external = external.each_ref().map(Option::is_some);
     let mut capture = CpuCapture {
@@ -325,6 +326,7 @@ pub unsafe fn compose<'frames>(
             shapes,
         )
     }?;
+    raster_complete();
     let composition = capture.capture.finish(colors, target)?;
     Ok(Completed { cull, composition })
 }

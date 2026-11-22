@@ -52,6 +52,7 @@ struct AudioProbe {
 #[derive(Default)]
 pub struct Owner {
     session: Session,
+    pub drag: Option<super::drag::Trace>,
     pub benchmark: Ledger,
     pub input_generation: u64,
     pub idle_timeouts: u64,
@@ -245,6 +246,32 @@ impl Owner {
         effects: &mut Effects,
     ) -> Response {
         let mut out = Response::new(r, Identity::of(host.owner()));
+        if matches!(r.op, Op::DragTraceBegin | Op::DragTraceFinish) {
+            if !r.target.valid() || r.dx != 0 || r.dy != 0 || r.item != 0 {
+                out.result = a::service_api_result_invalid;
+            } else if r.op == Op::DragTraceBegin {
+                if self.drag.as_ref().is_some_and(|t| t.active(time.tick)) {
+                    out.result = a::service_api_result_busy;
+                } else if let Some(slot) = v.hosted.model.clients.find(r.target.handle()) {
+                    self.drag = super::drag::Trace::new(r.caller, r.target, slot,
+                        time.tick.saturating_add(15 * u64::from(time.hz)));
+                    if self.drag.is_none() {
+                        out.result = a::service_api_result_busy;
+                    }
+                } else {
+                    out.result = a::service_api_result_invalid;
+                }
+            } else if let Some(trace) = self.drag.as_ref().filter(|t| t.caller.same(r.caller) && t.target.same(r.target)) {
+                if trace.export(env).is_ok() {
+                    self.drag = None;
+                } else {
+                    out.result = a::service_api_result_invalid;
+                }
+            } else {
+                out.result = a::service_api_result_invalid;
+            }
+            return out;
+        }
         if r.op == Op::RenderStatus {
             out.render = w::RenderStats {
                 redraws: stats.redraws, cursor_moves, cursor_presents: stats.cursor,
@@ -302,7 +329,7 @@ impl Owner {
             return out;
         }
         match r.op {
-            Op::LaunchStatus | Op::RenderStatus => unreachable!("status has no scene mutation"),
+            Op::LaunchStatus | Op::RenderStatus | Op::DragTraceBegin | Op::DragTraceFinish => unreachable!("handled before reservation"),
             Op::Begin | Op::BeginBenchmark => {
                 self.restart_state = 0;
                 self.restart_at = 0;

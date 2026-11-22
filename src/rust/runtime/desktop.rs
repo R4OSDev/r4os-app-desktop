@@ -1092,6 +1092,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             captured
         } else if count != 0 {
+            let drag_slot = self.diagnostics.drag.as_ref()
+                .filter(|t| t.active(time.tick) && t.target.same(diagnostics::wire::Identity::of(
+                    self.hosted.model.clients.slots()[t.slot].handle())))
+                .map(|t| t.slot);
             let result = unsafe {
                 self.frames.primary(
                     env.app,
@@ -1103,6 +1107,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     &regions[..count],
                     self.input.last_event_tick,
                     trace_input.is_some(),
+                    drag_slot.is_some(),
                 )
             }
             .map_err(|_| "software frame")?;
@@ -1112,6 +1117,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 &regions[..count],
                 &result.presentation,
             );
+            if let (Some(i), Some(trace), Some(timing)) = (drag_slot, &mut self.diagnostics.drag, result.timing) {
+                trace.frame(self.hosted.model.windows.windows()[i].geometry(), result.generation, timing,
+                    accepted, result.completion.cull.rendered_windows & (1 << i) != 0);
+            }
             if accepted {
                 if action_frame {
                     self.modes.actions.software_composed(
@@ -1803,6 +1812,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.input.last_event_tick = time.tick;
         let before = self.input.cursor;
         let captured = self.hosted.model.windows.pointer_window();
+        let observed = self.diagnostics.drag.as_ref().filter(|t| {
+            t.active(time.tick) && t.target.same(diagnostics::wire::Identity::of(self.hosted.model.clients.slots()[t.slot].handle()))
+        }).and_then(|t| super::environment::precise(env.app).map(|ns|
+            (t.slot, ns, self.hosted.model.windows.windows()[t.slot].geometry())));
         let scene = views::scene(
             self.width,
             self.height,
@@ -1865,6 +1878,15 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         let delivered = actions.delivered;
         self.action(actions.primary, env, session, host, programs, time);
+        if let (Some((i, ns, old)), Some(trace)) = (observed, &mut self.diagnostics.drag) {
+            let now = self.hosted.model.windows.pointer_window();
+            let down = captured != Some(i) && now == Some(i);
+            let up = captured == Some(i) && now != Some(i);
+            let rect = self.hosted.model.windows.windows()[i].geometry();
+            if down || up || (captured == Some(i) && rect != old) {
+                trace.input(value.packets, ns, rect, down, up);
+            }
+        }
         delivered
     }
     fn poll_input(

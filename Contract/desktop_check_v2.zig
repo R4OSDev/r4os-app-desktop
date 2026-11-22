@@ -8,7 +8,12 @@ pub const complete_operation: u16 = 4503;
 pub const request_size = 80;
 pub const response_size = 144;
 const magic: u32 = 0x31434452;
-pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel, begin_benchmark, software_profile, snes_prepare, snes_finish, maximize, launch_status, capture_stats, render_status };
+pub const Op = enum(u32) { begin = 1, bind, snapshot, drag, resize, focus, close, tray, volume, end, restart, audio, capture, screenshot, screenshot_status, screenshot_cancel, begin_benchmark, software_profile, snes_prepare, snes_finish, maximize, launch_status, capture_stats, render_status, drag_trace_begin, drag_trace_finish };
+/// Both requests carry the same caller and target process generations.
+pub fn dragReportPath(buffer: []u8, owner: Identity) ![:0]u8 {
+    if (!owner.valid()) return error.InvalidOwner;
+    return std.fmt.bufPrintZ(buffer, "C:\\TEMP\\DR{X:0>8}-{X:0>16}.CSV", .{ owner.instance, owner.generation });
+}
 /// One explicit read-only owner snapshot. No frame is forced by this request.
 pub fn captureReportPath(buffer: []u8, owner: Identity, sequence: u64) ![:0]u8 {
     if (!owner.valid() or sequence > 2) return error.InvalidOwner;
