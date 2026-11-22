@@ -188,6 +188,14 @@ impl<'input> State<'input> {
         if change.full_damage {
             dirty.invalidate(self.bounds);
         }
+        self.announce_changes(change, session, tick);
+    }
+    pub(crate) fn announce_changes(
+        &mut self,
+        change: &Changes,
+        session: &mut Session<'_, '_>,
+        tick: u64,
+    ) {
         model::announce(
             &self.model.windows,
             &self.model.clients,

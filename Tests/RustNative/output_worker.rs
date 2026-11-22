@@ -34,7 +34,7 @@ static SPECS: [ImportSpec; 6] = [
     r4os_sdk::app2::ImportSpec {
         module_name: (c"R4GFX").as_ptr().cast(),
         symbol_name: (c"DEVICE_V1").as_ptr().cast(),
-        minimum: 10,
+        minimum: r4gfx::device_v1_expectation.min_revision as u32,
         optional: 0,
         group_id: 0,
         reserved: 0,

@@ -237,6 +237,22 @@ impl<'a> Manager<'a> {
         self.desired = layout;
         self.reconcile = true;
     }
+    pub fn primary_interval_ns(&self) -> Option<u64> {
+        let snapshot = self.snapshot.as_ref()?;
+        let mut active = snapshot.entries().iter().filter(|e| e.active());
+        let e = active.next()?;
+        let p = &e.presentation;
+        let required =
+            a::display_presentation_info_active | a::display_presentation_info_synchronized;
+        (active.next().is_none()
+            && p.flags & required == required
+            && p.flags & a::display_presentation_info_lost == 0
+            && p.display_generation != 0
+            && p.display_generation == e.target.display_generation
+            && p.observed_sequence != 0
+            && p.observed_ns != 0)
+            .then_some(p.interval_ns)
+    }
     pub fn active(&self) -> bool {
         !self.layout.outputs().is_empty()
     }
@@ -478,8 +494,7 @@ impl<'a> Manager<'a> {
         });
         if !slot.failed && !capacity {
             if let Some(observation) = failure {
-                let at =
-                    (self.native_failure_count % self.native_failures.len() as u64) as usize;
+                let at = (self.native_failure_count % self.native_failures.len() as u64) as usize;
                 self.native_failures[at] = Some(observation);
                 self.native_failure_count = self.native_failure_count.saturating_add(1);
             }

@@ -4,6 +4,7 @@ pub(crate) mod allocation;
 pub(crate) mod audio_io;
 pub mod bootstrap;
 pub mod desktop;
+mod drag_pacing;
 pub mod environment;
 pub(crate) mod file_checks;
 pub(crate) mod icon_io;

@@ -77,6 +77,7 @@ impl PointerActions {
 }
 #[derive(Default)]
 pub struct Router {
+    pub(crate) defer_drag_damage: bool,
     item: Option<ItemDrag>,
 }
 pub fn shell_damage(shell: &Shell<'_>, dirty: &mut Dirty, width: i32, height: i32) {
@@ -384,7 +385,11 @@ impl Router {
                                 s::TITLE_H as u32,
                             ))
                         });
-                    hosted.changes(&change, session, app, tick, dirty);
+                    if self.defer_drag_damage {
+                        hosted.announce_changes(&change, session, tick);
+                    } else {
+                        hosted.changes(&change, session, app, tick, dirty);
+                    }
                 }
             } else if previous & 1 != 0 {
                 let pressed = core::mem::replace(&mut input.pressed, Target::None);

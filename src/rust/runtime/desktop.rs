@@ -128,6 +128,7 @@ struct Desktop<'a, 'input> {
     power: Owned<Power>,
     input: input::runtime::State,
     delegated_pointer: Option<DelegatedPointer>,
+    drag_pacing: super::drag_pacing::Pacing,
     focus_observed: Option<usize>,
     router: Router,
     platform_input: input::platform::Owner,
@@ -205,6 +206,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             power: owned(|| Ok(Power::default()), "screen power")?,
             input: input::runtime::State::default(),
             delegated_pointer: None,
+            drag_pacing: Default::default(),
             focus_observed: None,
             router: Router::default(),
             platform_input: input::platform::Owner::default(),
@@ -355,6 +357,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if !changed && self.revision == revision.revision {
             return;
         }
+        self.drag_pacing.reset();
         self.frames.software.invalidate_rasters();
         self.revision = revision.revision;
         let dimensions = self
@@ -941,6 +944,16 @@ impl<'a, 'input> Desktop<'a, 'input> {
         {
             self.full();
         }
+        let software_primary =
+            !self.outputs.active() && self.primary_admission == outputs::primary::Admission::Cpu;
+        if !software_primary {
+            self.drag_pacing.flush();
+        }
+        let paced = self.drag_pacing.stage(
+            &mut self.dirty,
+            time.nanoseconds,
+            1_000_000_000 / u64::from(time.hz.max(1)),
+        );
         let mut regions = [Rect::ZERO; MAX_DAMAGE_REGIONS];
         let count = self.dirty.take_regions(&mut regions);
         let trace_input = self.diagnostics.benchmark.trace.as_ref().and_then(|trace| {
@@ -1093,9 +1106,16 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             captured
         } else if count != 0 {
-            let drag_slot = self.diagnostics.drag.as_ref()
-                .filter(|t| t.active(time.tick) && t.target.same(diagnostics::wire::Identity::of(
-                    self.hosted.model.clients.slots()[t.slot].handle())))
+            let drag_slot = self
+                .diagnostics
+                .drag
+                .as_ref()
+                .filter(|t| {
+                    t.active(time.tick)
+                        && t.target.same(diagnostics::wire::Identity::of(
+                            self.hosted.model.clients.slots()[t.slot].handle(),
+                        ))
+                })
                 .map(|t| t.slot);
             let result = unsafe {
                 self.frames.primary(
@@ -1118,10 +1138,18 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 &regions[..count],
                 &result.presentation,
             );
-            if let (Some(i), Some(trace), Some(timing)) = (drag_slot, &mut self.diagnostics.drag, result.timing) {
-                trace.frame(self.hosted.model.windows.windows()[i].geometry(), result.generation, timing,
-                    accepted, result.completion.cull.rendered_windows & (1 << i) != 0,
-                    self.frames.software.window_reuses, self.frames.software.cache.reserved());
+            if let (Some(i), Some(trace), Some(timing)) =
+                (drag_slot, &mut self.diagnostics.drag, result.timing)
+            {
+                trace.frame(
+                    self.hosted.model.windows.windows()[i].geometry(),
+                    result.generation,
+                    timing,
+                    accepted,
+                    result.completion.cull.rendered_windows & (1 << i) != 0,
+                    self.frames.software.window_reuses,
+                    self.frames.software.cache.reserved(),
+                );
             }
             if accepted {
                 if action_frame {
@@ -1187,6 +1215,19 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
             false
         };
+        if paced {
+            if software_primary {
+                self.drag_pacing.receipt(
+                    rendered,
+                    time.nanoseconds,
+                    self.outputs.primary_interval_ns(),
+                );
+            } else {
+                // Per-output owners now hold their own damage, clocks and generation receipts.
+                // A fresh complete redraw is queued when switching back to the primary.
+                self.drag_pacing.reset();
+            }
+        }
         if rendered {
             self.frames.stats.last_damage = count as u8;
         }
@@ -1814,10 +1855,25 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.input.last_event_tick = time.tick;
         let before = self.input.cursor;
         let captured = self.hosted.model.windows.pointer_window();
-        let observed = self.diagnostics.drag.as_ref().filter(|t| {
-            t.active(time.tick) && t.target.same(diagnostics::wire::Identity::of(self.hosted.model.clients.slots()[t.slot].handle()))
-        }).and_then(|t| super::environment::precise(env.app).map(|ns|
-            (t.slot, ns, self.hosted.model.windows.windows()[t.slot].geometry())));
+        let observed = self
+            .diagnostics
+            .drag
+            .as_ref()
+            .filter(|t| {
+                t.active(time.tick)
+                    && t.target.same(diagnostics::wire::Identity::of(
+                        self.hosted.model.clients.slots()[t.slot].handle(),
+                    ))
+            })
+            .and_then(|t| {
+                super::environment::precise(env.app).map(|ns| {
+                    (
+                        t.slot,
+                        ns,
+                        self.hosted.model.windows.windows()[t.slot].geometry(),
+                    )
+                })
+            });
         let scene = views::scene(
             self.width,
             self.height,
@@ -1836,6 +1892,24 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .registry()
             .hit(value.x, value.y)
             .unwrap_or_default();
+        let drag = self.hosted.model.windows.dragged_window();
+        let previous_buttons = if remote {
+            self.input.remote_buttons
+        } else {
+            self.input.physical_buttons
+        };
+        let pacing = drag.is_some()
+            && previous_buttons == 1
+            && value.buttons == 1
+            && value.wheel == 0
+            && !self.outputs.active()
+            && self.primary_admission == outputs::primary::Admission::Cpu;
+        if !pacing {
+            self.drag_pacing.edge();
+        }
+        let old_rect = drag.map(|i| self.hosted.model.windows.windows()[i].geometry());
+        let mut moved = Dirty::default();
+        self.router.defer_drag_damage = pacing;
         let actions = self.router.pointer(
             &mut self.input,
             &mut self.shell,
@@ -1843,7 +1917,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             &self.outputs,
             env.app,
             session,
-            &mut self.dirty,
+            if pacing { &mut moved } else { &mut self.dirty },
             target,
             identity,
             self.tray.registry(),
@@ -1855,6 +1929,23 @@ impl<'a, 'input> Desktop<'a, 'input> {
             time.tick,
             time.hz,
         );
+        self.router.defer_drag_damage = false;
+        if let (Some(i), Some(old)) = (drag, old_rect) {
+            let new = self.hosted.model.windows.windows()[i].geometry();
+            if pacing && new != old {
+                self.drag_pacing.motion(old, new, moved);
+            } else {
+                for &r in moved.regions() {
+                    self.dirty.invalidate(r);
+                }
+                if self.hosted.model.windows.dragged_window().is_none()
+                    && self.drag_pacing.pending()
+                {
+                    self.drag_pacing.motion(old, new, Dirty::default());
+                    self.drag_pacing.flush();
+                }
+            }
+        }
         if before != self.input.cursor {
             self.cursor_queued_tick = time.tick;
             self.publisher
@@ -2034,6 +2125,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .outputs
             .capture_wait_ticks(time.nanoseconds, time.hz, delay);
         delay = self.primary.wait_ticks(time.nanoseconds, time.hz, delay);
+        delay = self.drag_pacing.wait(time.nanoseconds, time.hz, delay);
         if let Some(recorder) = &self.capture.recorder {
             delay = recorder.wait_ticks(time.nanoseconds, time.hz, delay);
         }

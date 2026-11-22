@@ -123,6 +123,12 @@ impl Controller {
     pub fn set_keyboard_focus(&mut self, target: Target) {
         self.keyboard_focus = target;
     }
+    pub fn dragged_window(&self) -> Option<usize> {
+        match self.pointer {
+            Some(Pointer::Drag { index, .. }) => Some(index),
+            _ => None,
+        }
+    }
     pub fn pointer_window(&self) -> Option<usize> {
         self.pointer.map(Pointer::index)
     }
