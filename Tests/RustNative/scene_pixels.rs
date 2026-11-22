@@ -40,6 +40,13 @@ impl taskbar_view::Icons for NoIcons {
 }
 #[test]
 fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels() {
+    check_scene_sequence(false);
+}
+#[test]
+fn moving_window_incremental_pixels_match_fresh_full_render() {
+    check_scene_sequence(true);
+}
+fn check_scene_sequence(movement: bool) {
     let expected = [
         "24ea02cf8dfe6af45085bd6bbe611cc4cb11df69fa9f4e6e2e586452161a2ba8",
         "b2367be750cafdd415c010a3e24191380281cbd11d5452857b9ef4104bf84ca6",
@@ -53,6 +60,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
         "5b1c2a415cd8f81eb029fd5c106560ba2ad2a3dd22a18e635a48994f171e1130",
     ];
     for (case, expected) in expected.into_iter().enumerate() {
+        if movement && case != 1 { continue; }
         let (w, h) = (640, 480);
         let mut pixels = vec![0x123456; w * h];
         let mut windows = Controller::default();
@@ -119,7 +127,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
         let mut shapes = Renderer::default();
         // Exercise the same scene one update at a time. The reference below
         // starts with an empty target and a fresh raster cache on every step.
-        for step in 0..if case == 1 { 9 } else { 1 } {
+        for step in 0..if movement { 9 } else { 1 } {
         let mut changed = full;
         if step > 0 {
             let win = windows.window_mut(2).unwrap();
@@ -230,7 +238,7 @@ fn original_ten_complete_cpu_scene_order_fullscreen_damage_and_wallpaper_pixels(
         .unwrap();
         assert!(result.composition.commands != 0);
         drop(canvas);
-        if step > 0 {
+        if movement {
             let mut reference = vec![0xabcdef; w*h];
             let mut fresh = software::Owner::new(128 * 1024 * 1024).unwrap();
             let mut target = CpuScene::new(&mut reference, w as i32, h as i32).unwrap();
