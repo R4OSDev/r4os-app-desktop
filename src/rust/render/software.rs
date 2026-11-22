@@ -57,6 +57,32 @@ pub struct Capture<'owner, 'frame> {
     failed: bool,
 }
 impl Capture<'_, '_> {
+    pub(crate) fn place_window(&mut self, index: usize, source: Option<WindowPixels>, bounds: Rect, damage: Rect) -> Result<bool> {
+        if source.is_some() && self.owner.windows[index] == source &&
+            self.owner.cache.place(64 + index as u32, bounds, damage)? {
+            self.owner.window_reuses = self.owner.window_reuses.saturating_add(1);
+            return Ok(true);
+        }
+        self.owner.windows[index] = None;
+        Ok(false)
+    }
+    pub(crate) fn remember_window(&mut self, index: usize, source: Option<WindowPixels>, bounds: Rect, damage: Rect) {
+        // A clipped or partial repaint cannot certify all local pixels.
+        if intersect(self.owner.cache.screen(), bounds) == Some(bounds) && intersect(damage, bounds) == Some(bounds) {
+            self.owner.windows[index] = source;
+        }
+    }
+    pub(crate) fn background(&mut self, bounds: Rect, damage: Rect, rgb: u32) -> Result<()> {
+        if self.owner.background == Some(rgb) && self.owner.cache.place(1, bounds, damage)? {
+            return Ok(());
+        }
+        self.owner.background = None;
+        self.paint_filled(1, bounds, damage, rgb, |_| Ok(()))?;
+        if bounds == damage {
+            self.owner.background = Some(rgb);
+        }
+        Ok(())
+    }
     pub fn paint(
         &mut self,
         key: u32,
@@ -236,7 +262,22 @@ impl Scratch {
         Ok(unsafe { Box::from_raw(raw) })
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowPixels {
+    pub instance: u32,
+    pub process_generation: u64,
+    pub frame_generation: u64,
+    pub decoration: crate::windows::window::Decoration,
+    pub active: bool,
+    pub hover: crate::input::event::Target,
+    pub pressed: crate::input::event::Target,
+    pub font: u32,
+    pub font_revision: u32,
+}
 pub struct Owner {
+    windows: [Option<WindowPixels>; 4],
+    pub window_reuses: u64,
+    background: Option<u32>,
     pub cache: Cache,
     scratch: Option<Box<Scratch>>,
     pub frames: u64,
@@ -245,11 +286,18 @@ pub struct Owner {
 impl Owner {
     pub fn new(budget: usize) -> Result<Self> {
         Ok(Self {
+            windows: [None; 4],
+            window_reuses: 0,
+            background: None,
             cache: Cache::new(budget)?,
             scratch: None,
             frames: 0,
             stats: Stats::default(),
         })
+    }
+    pub fn invalidate_rasters(&mut self) {
+        self.windows.fill(None);
+        self.background = None;
     }
     pub fn begin(&mut self, bounds: Rect) -> Result<()> {
         self.cache.start(Mode::CpuOutput(bounds), None)
@@ -533,6 +581,32 @@ fn copy_opaque(
     }
     false
 }
+fn copy_opaque_layers(cache: &Cache, tile: Rect, target: &mut CpuScene<'_>, candidates: Mask, stats: &mut Stats) -> bool {
+    // Validate the complete list before touching any output pixel. Unknown
+    // alpha and external/profiled surfaces use the original color provider.
+    let overlaps = || candidates.iter().filter_map(|i| {
+        let c = cache.commands()[i];
+        intersect(tile, c.scissor).map(|clip| (&cache.entries()[c.entry as usize], clip))
+    });
+    if !overlaps().all(|(e, _)| !e.external && e.opaque) {
+        return false;
+    }
+    let output = target.full_rect();
+    for (entry, clip) in overlaps() {
+        let first = offset(entry, clip);
+        let dest = (clip.y - output.y) as usize * output.w as usize + (clip.x-output.x) as usize;
+        let pixels = PixelBytes::from_words(entry.pixels());
+        for y in 0..clip.h as usize {
+            let row = dest + y * output.w as usize;
+            pixels.copy_masked_to(first + y * entry.bounds.w as usize, &mut target.pixels[row..row+clip.w as usize], 0xffffff, 0);
+        }
+        let pixels = clip.w as u64 * clip.h as u64;
+        stats.commands += 1;
+        stats.pixels += pixels;
+        stats.direct_pixels += pixels;
+    }
+    true
+}
 fn paint(
     colors: &impl Colors,
     cache: &Cache,
@@ -602,6 +676,9 @@ fn paint(
                     stats.commands = stats.commands.saturating_add(1);
                     stats.pixels = stats.pixels.saturating_add(count);
                     stats.direct_pixels = stats.direct_pixels.saturating_add(count);
+                    continue;
+                }
+                if copy_opaque_layers(cache, tile, target, block.candidates, &mut stats) {
                     continue;
                 }
                 scratch.touched.fill(0);

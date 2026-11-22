@@ -12,7 +12,7 @@ use r4os_contract::{self as a, GuiFontInfo, GuiGlyphBitmap};
 struct Builtin;
 impl Fonts for Builtin {
     fn revision(&mut self) -> u32 {
-        0
+        1
     }
     fn has_glyph_row(&self) -> bool {
         false
@@ -220,6 +220,7 @@ fn check_scene_sequence(movement: bool) {
             vec![Rect::new(0, 0, 640, 480)]
         };
         let mut canvas = CpuScene::new(&mut pixels, w as i32, h as i32).unwrap();
+        let warm = (owner.window_reuses, owner.cache.reserved());
         let result = unsafe {
             compose(
                 &mut owner,
@@ -238,6 +239,13 @@ fn check_scene_sequence(movement: bool) {
         .unwrap();
         assert!(result.composition.commands != 0);
         drop(canvas);
+        if step == 2 || step == 3 {
+            assert_eq!(owner.window_reuses, warm.0 + 1, "unchanged full window");
+            assert_eq!(owner.cache.reserved(), warm.1, "resident raster reused without growing storage");
+        }
+        if step == 4 || step == 5 || step == 6 || step == 7 {
+            assert_eq!(owner.window_reuses, warm.0, "changed, clipped or resized source");
+        }
         if movement {
             let mut reference = vec![0xabcdef; w*h];
             let mut fresh = software::Owner::new(128 * 1024 * 1024).unwrap();

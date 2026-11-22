@@ -355,6 +355,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if !changed && self.revision == revision.revision {
             return;
         }
+        self.frames.software.invalidate_rasters();
         self.revision = revision.revision;
         let dimensions = self
             .outputs
@@ -1119,7 +1120,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
             );
             if let (Some(i), Some(trace), Some(timing)) = (drag_slot, &mut self.diagnostics.drag, result.timing) {
                 trace.frame(self.hosted.model.windows.windows()[i].geometry(), result.generation, timing,
-                    accepted, result.completion.cull.rendered_windows & (1 << i) != 0);
+                    accepted, result.completion.cull.rendered_windows & (1 << i) != 0,
+                    self.frames.software.window_reuses, self.frames.software.cache.reserved());
             }
             if accepted {
                 if action_frame {

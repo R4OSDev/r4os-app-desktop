@@ -27,6 +27,8 @@ struct Receipt {
     timing: Timing,
     accepted: bool,
     painted: bool,
+    window_reuses: u64,
+    reserved_bytes: usize,
 }
 pub struct Trace {
     pub caller: Identity,
@@ -56,12 +58,12 @@ impl Trace {
             self.up = self.input;
         }
     }
-    pub fn frame(&mut self, rect: Rect, frame: u64, timing: Timing, accepted: bool, painted: bool) {
+    pub fn frame(&mut self, rect: Rect, frame: u64, timing: Timing, accepted: bool, painted: bool, window_reuses: u64, reserved_bytes: usize) {
         if self.rows.len() == LIMIT {
             self.overflow = self.overflow.saturating_add(1);
             return;
         }
-        self.rows.push(Receipt { input: self.input, rect, frame, timing, accepted, painted });
+        self.rows.push(Receipt { input: self.input, rect, frame, timing, accepted, painted, window_reuses, reserved_bytes });
     }
     pub fn export(&self, env: &Environment<'_>) -> Result<(), ()> {
         let name = format!("C:\\TEMP\\DR{:08X}-{:016X}.CSV", self.caller.instance, self.caller.generation);
@@ -70,14 +72,14 @@ impl Trace {
         }
         let mut out = String::new();
         // Max decimal digits of the fixed set of integer fields plus header.
-        out.try_reserve_exact(240 * self.rows.len() + 512).map_err(|_| ())?;
+        out.try_reserve_exact(280 * self.rows.len() + 512).map_err(|_| ())?;
         let u = self.up;
         writeln!(out,"# drag-v1 target={},{} overflow={} up={},{},{},{}",self.target.instance,self.target.generation,self.overflow,u.serial,u.ns,u.x,u.y).unwrap();
-        out.push_str("seq,input_ns,input_x,input_y,edge,x,y,frame,start_ns,raster_end_ns,composed_ns,completed_ns,accepted,painted\n");
+        out.push_str("seq,input_ns,input_x,input_y,edge,x,y,frame,start_ns,raster_end_ns,composed_ns,completed_ns,accepted,painted,window_reuses,reserved_bytes\n");
         for row in &self.rows {
             let i = row.input;
             let t = row.timing;
-            writeln!(out,"{},{},{},{},{},{},{},{},{},{},{},{},{},{}",i.serial,i.ns,i.x,i.y,i.edge,row.rect.x,row.rect.y,row.frame,t.started_ns,t.raster_end_ns.unwrap_or(0),t.started_ns.saturating_add(t.composition_ns),t.completed_ns,u8::from(row.accepted),u8::from(row.painted)).unwrap();
+            writeln!(out,"{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",i.serial,i.ns,i.x,i.y,i.edge,row.rect.x,row.rect.y,row.frame,t.started_ns,t.raster_end_ns.unwrap_or(0),t.started_ns.saturating_add(t.composition_ns),t.completed_ns,u8::from(row.accepted),u8::from(row.painted),row.window_reuses,row.reserved_bytes).unwrap();
         }
         let path = FilePath::parse(name.as_bytes()).map_err(|_| ())?;
         let written = env.system.files().write(&path, out.as_bytes()).map_err(|_| ())?;

@@ -389,6 +389,33 @@ impl Cache {
         *buffer = next;
         Ok(())
     }
+    /// Reposition an entire resident 1:1 CPU layer. The caller proves that
+    /// its source is unchanged. The command still clips to current damage.
+    pub(crate) fn place(&mut self, key: u32, bounds: Rect, damage: Rect) -> Result<bool> {
+        if !self.collecting || self.failure.is_some() || self.view.is_some() {
+            return Err(Error::State);
+        }
+        if self.commands.len() == COMMAND_CAPACITY {
+            return Err(Error::Capacity);
+        }
+        if intersect(self.screen, bounds) != Some(bounds) {
+            return Ok(false);
+        }
+        let Some(scissor) = intersect(bounds, damage) else { return Ok(false) };
+        let Some(index) = self.entries.iter().position(|e| e.key == key) else { return Ok(false) };
+        let e = &mut self.entries[index];
+        if !e.initialized || e.external || e.bounds != e.capture_bounds ||
+            e.bounds.w != bounds.w || e.bounds.h != bounds.h ||
+            (e.frame == self.frame && e.bounds != bounds) {
+            return Ok(false);
+        }
+        e.bounds = bounds;
+        e.capture_bounds = bounds;
+        e.frame = self.frame;
+        self.commands.push(Command { entry: index as u8, scissor });
+        self.reused_captures = self.reused_captures.saturating_add(1);
+        Ok(true)
+    }
     pub fn paint(
         &mut self,
         key: u32,

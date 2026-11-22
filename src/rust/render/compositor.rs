@@ -124,6 +124,11 @@ pub struct Completed {
 /// Both output paths use this same layer traversal and the same paint calls.
 /// Only pixel/primitive storage and the external BO admission differ.
 pub(crate) trait Capture {
+    fn place_window(&mut self, _index: usize, _source: Option<software::WindowPixels>, _bounds: Rect, _damage: Rect) -> Result<bool> { Ok(false) }
+    fn remember_window(&mut self, _index: usize, _source: Option<software::WindowPixels>, _bounds: Rect, _damage: Rect) {}
+    fn background(&mut self, bounds: Rect, damage: Rect, rgb: u32) -> Result<()> {
+        self.paint_filled(1, bounds, damage, rgb, |_| Ok(())).map(|_| ())
+    }
     fn paint(
         &mut self,
         key: u32,
@@ -162,6 +167,15 @@ struct CpuCapture<'o, 'f> {
     external: [Option<&'f mut dyn ExternalFrame>; 4],
 }
 impl Capture for CpuCapture<'_, '_> {
+    fn place_window(&mut self, index: usize, source: Option<software::WindowPixels>, bounds: Rect, damage: Rect) -> Result<bool> {
+        self.capture.place_window(index, source, bounds, damage)
+    }
+    fn remember_window(&mut self, index: usize, source: Option<software::WindowPixels>, bounds: Rect, damage: Rect) {
+        self.capture.remember_window(index, source, bounds, damage)
+    }
+    fn background(&mut self, bounds: Rect, damage: Rect, rgb: u32) -> Result<()> {
+        self.capture.background(bounds, damage, rgb)
+    }
     fn paint(
         &mut self,
         key: u32,
@@ -363,7 +377,7 @@ pub(crate) unsafe fn draw(
     }
     if scene.disabled {
         for &damage in regions {
-            capture.paint(1, desktop, damage, |paint| paint.fill(desktop, 0))?;
+            capture.background(desktop, damage, 0)?;
         }
         return Ok(Stats::default());
     }
@@ -407,7 +421,7 @@ pub(crate) unsafe fn draw(
                 d,
             );
             if cover.visible(d, desktop) {
-                capture.paint_filled(1, desktop, d, shell.config.background, |_| Ok(()))?;
+                capture.background(desktop, d, shell.config.background)?;
             }
             let info = &shell.info[..shell.info.len().min(96)];
             let r = Rect::new(
@@ -506,6 +520,27 @@ pub(crate) unsafe fn draw(
                 {
                     continue;
                 }
+                let committed = &frames[i];
+                let owner = committed.info.owner;
+                let source = if scene.path == Path::PrimaryCpu && !is_external[i] &&
+                    window.kind() == crate::windows::window::Kind::App && !window.starting() &&
+                    window.close_requested().is_none() && committed.valid && !committed.commands.is_empty() &&
+                    committed.info.committed_generation != 0 && owner.instance_id == window.instance_id() &&
+                    owner.instance_id != 0 && owner.generation != 0 {
+                    let revision = fonts.revision();
+                    (revision != 0).then(|| software::WindowPixels {
+                        instance: owner.instance_id, process_generation: owner.generation,
+                        frame_generation: committed.info.committed_generation, decoration: window.decoration(),
+                        active: i == active, hover: input.hover, pressed: input.pressed,
+                        font: shell.font, font_revision: revision,
+                    })
+                } else { None };
+                if capture.place_window(i, source, bounds, d)? {
+                    if window.client_surface().rect.intersects(d) {
+                        stats.rendered_windows |= 1 << i;
+                    }
+                    continue;
+                }
                 layer(
                     capture,
                     64 + i as u32,
@@ -543,6 +578,7 @@ pub(crate) unsafe fn draw(
                         Ok(())
                     },
                 )?;
+                capture.remember_window(i, source, bounds, d);
                 if is_external[i] {
                     external_regions[n] = d;
                     n += 1;

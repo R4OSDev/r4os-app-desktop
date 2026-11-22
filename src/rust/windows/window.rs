@@ -49,6 +49,14 @@ impl ResizeHandle {
         matches!(self, Self::Bottom | Self::BottomLeft | Self::BottomRight)
     }
 }
+/// Values used by the classic window chrome, independent of placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Decoration {
+    title: [u8; TITLE_MAX + 1],
+    appearance: Option<TitleAppearance>,
+    maximized: bool,
+    fullscreen: bool,
+}
 #[derive(Clone, Debug)]
 pub struct Window {
     kind: Kind,
@@ -137,6 +145,9 @@ impl Window {
     }
     pub fn minimum_frame(&self) -> (i32, i32) {
         (self.min_frame_w, self.min_frame_h)
+    }
+    pub(crate) fn decoration(&self) -> Decoration {
+        Decoration { title: self.title, appearance: self.title_appearance, maximized: self.maximized, fullscreen: self.fullscreen }
     }
     pub fn title(&self) -> &CStr {
         CStr::from_bytes_until_nul(&self.title).expect("terminated window title")

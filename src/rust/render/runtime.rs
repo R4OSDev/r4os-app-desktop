@@ -89,6 +89,7 @@ impl Frames {
                 .map_err(|_| Error::OutOfMemory)?;
         }
         self.pixels.resize(count, 0);
+        self.software.invalidate_rasters();
         self.width = width;
         self.height = height;
         self.current = false;
