@@ -1,4 +1,4 @@
-//! Event-driven admission for a window dragged on the primary software
+//! Event-driven admission for window movement and resize on the primary software
 //! output. Managed outputs already own independent clocks and damage queues.
 use crate::render::geometry::{Dirty, Rect};
 const FALLBACK_NS: u64 = 16_666_667;
@@ -42,11 +42,14 @@ impl Pacing {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
+    pub fn due(&self, now: u64, tick_ns: u64) -> bool {
+        self.force || now.saturating_add(tick_ns) >= self.next
+    }
     pub fn stage(&self, dirty: &mut Dirty, now: u64, tick_ns: u64) -> bool {
         let Some(new) = self.desired else {
             return false;
         };
-        if !dirty.active() && !self.force && now.saturating_add(tick_ns) < self.next {
+        if !dirty.active() && !self.due(now, tick_ns) {
             return false;
         }
         if let Some(old) = self.last {
@@ -77,8 +80,8 @@ impl Pacing {
             self.next = self.next.saturating_add(period);
         }
     }
-    pub fn wait(&self, now: u64, hz: u32, delay: u64) -> u64 {
-        if self.desired.is_none() {
+    pub fn wait(&self, now: u64, hz: u32, delay: u64, resize_queued: bool) -> u64 {
+        if self.desired.is_none() && !resize_queued {
             return delay;
         }
         if self.force {
@@ -112,13 +115,16 @@ mod tests {
             p.motion(r(x - 1), r(x), Dirty::default());
         }
         assert!(!p.stage(&mut out, 8_000_000, 1));
-        assert!(p.wait(8_000_000, 1000, 500) <= 9);
+        assert!(p.wait(8_000_000, 1000, 500, false) <= 9);
         p.flush();
         assert!(p.stage(&mut out, 9_000_000, 1));
         assert_eq!(out.take(), Some(r(1).merged(r(4))));
         p.receipt(false, 9_000_000, None);
         assert!(p.stage(&mut out, 9_100_000, 1));
         p.receipt(true, 9_100_000, None);
-        assert_eq!(p.wait(10_000_000, 1000, 500), 500);
+        assert_eq!(p.wait(10_000_000, 1000, 500, false), 500);
+        assert!(!p.due(10_000_000, 1_000_000));
+        assert!(p.wait(10_000_000, 1000, 500, true) <= 7);
+        assert!(p.due(16_000_000, 1_000_000));
     }
 }

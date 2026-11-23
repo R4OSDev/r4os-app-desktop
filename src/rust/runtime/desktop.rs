@@ -111,6 +111,17 @@ struct DelegatedPointer {
     index: usize,
     token: a::DesktopActionToken,
 }
+/// Only absolute positions from the same held resize gesture are replaceable.
+struct ResizeMotion {
+    slot: usize,
+    instance: u32,
+    origin: Rect,
+    value: a::Mouse,
+    remote: bool,
+    motion: Option<[u32; 2]>,
+    remote_kind: u32,
+}
+
 struct Desktop<'a, 'input> {
     expected: &'static StartupInfo<'static>,
     shell: Owned<Shell<'input>>,
@@ -129,6 +140,7 @@ struct Desktop<'a, 'input> {
     input: input::runtime::State,
     delegated_pointer: Option<DelegatedPointer>,
     drag_pacing: super::drag_pacing::Pacing,
+    resize_motion: Option<ResizeMotion>,
     focus_observed: Option<usize>,
     router: Router,
     platform_input: input::platform::Owner,
@@ -207,6 +219,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             input: input::runtime::State::default(),
             delegated_pointer: None,
             drag_pacing: Default::default(),
+            resize_motion: None,
             focus_observed: None,
             router: Router::default(),
             platform_input: input::platform::Owner::default(),
@@ -358,6 +371,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             return;
         }
         self.drag_pacing.reset();
+        self.resize_motion = None;
         self.frames.software.invalidate_rasters();
         self.revision = revision.revision;
         let dimensions = self
@@ -1896,7 +1910,9 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .registry()
             .hit(value.x, value.y)
             .unwrap_or_default();
-        let drag = self.hosted.model.windows.dragged_window();
+        let drag = captured;
+        let resizing = captured.is_some() && self.hosted.model.windows.dragged_window().is_none()
+            && !self.outputs.active() && self.primary_admission == outputs::primary::Admission::Cpu;
         let previous_buttons = if remote {
             self.input.remote_buttons
         } else {
@@ -1940,8 +1956,8 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.drag_pacing.motion(old, new, moved);
             } else {
                 self.dirty.merge(&moved);
-                if self.hosted.model.windows.dragged_window().is_none()
-                    && self.drag_pacing.pending()
+                if self.hosted.model.windows.pointer_window().is_none()
+                    && (self.drag_pacing.pending() || (resizing && old != new))
                 {
                     self.drag_pacing.motion(old, new, Dirty::default());
                     self.drag_pacing.flush();
@@ -1984,6 +2000,30 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         delivered
     }
+    fn flush_resize_motion(
+        &mut self,
+        env: &Environment<'a>,
+        session: &mut Session<'_, '_>,
+        host: &mut Host<'_>,
+        programs: &Programs<'_>,
+        time: Time,
+    ) {
+        let Some(pending) = self.resize_motion.take() else { return };
+        let windows = &self.hosted.model.windows;
+        let window = &windows.windows()[pending.slot];
+        if windows.pointer_window() == Some(pending.slot)
+            && windows.dragged_window().is_none()
+            && windows.active() == pending.slot
+            && window.instance_id() == pending.instance
+            && window.visible()
+            && window.geometry() == pending.origin
+            && !self.input.pointer_capture.active()
+        {
+            self.route_mouse(env, session, host, programs, time, pending.value,
+                pending.remote, pending.motion, pending.remote_kind);
+        }
+    }
+
     fn poll_input(
         &mut self,
         env: &Environment<'a>,
@@ -2005,9 +2045,14 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     0 => self.input.remote(session),
                     1 => self.input.physical(session),
                     2 => self.input.keyboard(session),
-                    _ => self
-                        .input
-                        .mouse(session, &mut self.outputs, self.hosted.bounds),
+                    _ => {
+                        // Relative hardware totals accumulate from the newest queued position.
+                        let cursor = self.resize_motion.as_ref().filter(|p| !p.remote)
+                            .map_or(self.input.cursor, |p| output_geometry::topology::Point {
+                                x: p.value.x, y: p.value.y,
+                            });
+                        self.input.mouse(session, &mut self.outputs, self.hosted.bounds, cursor)
+                    }
                 };
                 let sample = match sample {
                     Poll::Empty => break,
@@ -2032,6 +2077,34 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 if waking {
                     continue;
                 }
+                if let Sample::Mouse { value, remote, motion, remote_kind } = sample {
+                    let buttons = if remote { self.input.remote_buttons } else { self.input.physical_buttons };
+                    let windows = &self.hosted.model.windows;
+                    if let Some(slot) = windows.pointer_window()
+                        && windows.dragged_window().is_none()
+                        && !self.outputs.active()
+                        && self.primary_admission == outputs::primary::Admission::Cpu
+                        && !self.input.pointer_capture.active()
+                        && buttons == 1 && value.buttons == 1 && value.wheel == 0
+                        && (!remote || remote_kind == a::remote_input_kind_mouse_move)
+                        && self.resize_motion.as_ref().is_none_or(|p| p.remote == remote)
+                    {
+                        let window = &windows.windows()[slot];
+                        self.resize_motion = Some(ResizeMotion {
+                            slot, instance: window.instance_id(), origin: window.geometry(),
+                            value, remote, motion, remote_kind,
+                        });
+                        continue;
+                    }
+                    // Up contains an authoritative absolute point, even without a last move.
+                    if buttons == 1 && value.buttons == 0 && value.wheel == 0
+                        && self.resize_motion.as_ref().is_some_and(|p| p.remote == remote)
+                    {
+                        self.resize_motion = None;
+                    }
+                }
+                // Deliver geometry before the following ordered key, focus or pointer event.
+                self.flush_resize_motion(env, session, host, programs, time);
                 match sample {
                     Sample::Activity => {}
                     Sample::ControlCenter => {
@@ -2091,6 +2164,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 }
             }
         }
+        let tick_ns = 1_000_000_000 / u64::from(time.hz.max(1));
+        if self.drag_pacing.due(time.nanoseconds, tick_ns) {
+            self.flush_resize_motion(env, session, host, programs, time);
+        }
         active
     }
     fn wait(
@@ -2127,7 +2204,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .outputs
             .capture_wait_ticks(time.nanoseconds, time.hz, delay);
         delay = self.primary.wait_ticks(time.nanoseconds, time.hz, delay);
-        delay = self.drag_pacing.wait(time.nanoseconds, time.hz, delay);
+        delay = self.drag_pacing.wait(time.nanoseconds, time.hz, delay, self.resize_motion.is_some());
         if let Some(recorder) = &self.capture.recorder {
             delay = recorder.wait_ticks(time.nanoseconds, time.hz, delay);
         }

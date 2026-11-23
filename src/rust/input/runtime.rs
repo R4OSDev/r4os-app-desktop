@@ -158,6 +158,7 @@ impl State {
         session: &mut Session<'_, '_>,
         outputs: &mut Manager<'_>,
         bounds: Rect,
+        cursor: Point,
     ) -> Poll {
         let mut value = empty_mouse();
         let mut sample = a::MouseMotion {
@@ -171,7 +172,7 @@ impl State {
         if Input::new(session).motion(&mut sample) == 0 {
             // Always establish a requested restore fence, even in an otherwise
             // unchanged packet. This is the normal single consuming read.
-            let point = outputs.pointer(sample, self.cursor, bounds);
+            let point = outputs.pointer(sample, cursor, bounds);
             if !self
                 .mouse
                 .changed(sample.mouse, Some([sample.motion_x, sample.motion_y]))
