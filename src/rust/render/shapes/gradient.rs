@@ -81,6 +81,10 @@ pub(super) fn parse(bytes: &[u8]) -> Option<Paint<'_>> {
     })
 }
 impl Paint<'_> {
+    pub(super) fn horizontal_opaque(self) -> bool {
+        self.kind == a::gui_gradient_kind_linear && self.start.y == self.end.y
+            && (0..self.stops.len() / 8).all(|i| self.stop(i).1 >> 24 == 255)
+    }
     fn stop(self, i: usize) -> (f32, u32) {
         (
             f32::from_bits(word(self.stops, i * 8).expect("admitted stop")),

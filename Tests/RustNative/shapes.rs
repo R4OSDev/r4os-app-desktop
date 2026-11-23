@@ -801,3 +801,51 @@ fn complex_shape_masks_keep_original_admission_and_upload_ownership() {
         );
     }
 }
+
+#[test]
+fn cpu_panel_borders_and_horizontal_gradient_match_coverage_over_patterned_pixels() {
+    let bounds = Rect::new(4, 3, 80, 52);
+    for (w, h, radius, border) in [(70, 42, 8.0, 1.0), (29, 25, 2.0, 4.0), (61, 39, 0.0, 0.0)] {
+        for (kind, fill) in [
+            (a::gui_frame_command_kind_rounded_rect, 0xff102030),
+            (a::gui_frame_command_kind_rounded_rect, 0x00102030),
+            (a::gui_frame_command_kind_gradient_rounded_rect, 0),
+        ] {
+            let mut resource = rounded(0.0, 0.0, w as f32, h as f32, [radius; 8], fill);
+            field!(&mut resource, stroke_argb, 0xff746da3);
+            scalar!(&mut resource, border_top_bits, border);
+            scalar!(&mut resource, border_left_bits, border);
+            scalar!(&mut resource, border_bottom_bits, border);
+            scalar!(&mut resource, border_right_bits, border);
+            if kind == a::gui_frame_command_kind_gradient_rounded_rect {
+                let mut gradient = gradient_resource(a::gui_gradient_kind_linear, 0xff194871, 0xffce073b);
+                let offset = core::mem::size_of::<a::GuiShapeResource>();
+                put(&mut gradient, offset + 28, 0);
+                resource.extend_from_slice(&gradient[offset..]);
+            }
+            let mut draw = command(kind, w, h, &resource);
+            draw.x = -3;
+            draw.y = 2;
+            for clip in [bounds, Rect::new(6, 8, 24, 26), Rect::new(43, 5, 30, 34)] {
+                let pattern: Vec<u32> = (0..90*60u32).map(|v| v * 239 & 0xffffff).collect();
+                let mut fast = pattern.clone();
+                let mut expected = pattern;
+                for (pixels, reference) in [(&mut expected, true), (&mut fast, false)] {
+                    let mut scene = CpuScene::new(pixels, 90, 60).unwrap();
+                    scene.set_paint_clip(clip);
+                    let mut painter = Painter::cpu(&mut scene);
+                    let mut renderer = Renderer::default();
+                    if reference {
+                        if let Some(area) = mask::area(painter.clip(), bounds, &draw, 0) {
+                            renderer.paint_raster(&mut painter, bounds, &draw,
+                                format::parse(&draw, &resource).unwrap(), area, 0).unwrap();
+                        }
+                    } else {
+                        renderer.paint(&mut painter, bounds, &draw, &resource).unwrap();
+                    }
+                }
+                assert_eq!(fast, expected, "kind {kind}, fill {fill}, border {border}, clip {clip:?}");
+            }
+        }
+    }
+}

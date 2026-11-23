@@ -4,6 +4,7 @@ mod format;
 mod geometry;
 mod gradient;
 mod mask;
+mod panel;
 #[cfg(any(test, feature = "render-probe"))]
 #[path = "../../../../Tests/RustNative/shapes.rs"]
 mod tests;
@@ -86,6 +87,9 @@ impl Renderer {
         let Some(area) = mask::area(painter.clip(), bounds, command, radius) else {
             return Ok(false);
         };
+        if let Some(result) = panel::paint(self, painter, bounds, command, p, area) {
+            return result;
+        }
         if let Some(result) = self.rounded_panel(painter, bounds, command, p) {
             return result;
         }
