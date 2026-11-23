@@ -15,6 +15,61 @@ fn small_integer(value: f32) -> Option<i32> {
     ((0..=64).contains(&integer) && integer as f32 == value).then_some(integer)
 }
 
+// Four quarter-pixel samples, matching mask::coverage. Small circular
+// corners repeat across controls. Keep their coverage counts in read-only
+// storage, independent of width, color and paint generation.
+const CORNER_LIMIT: usize = 16;
+const CORNER_COUNTS: [[[u8; CORNER_LIMIT]; CORNER_LIMIT]; CORNER_LIMIT + 1] = {
+    let mut counts = [[[0; CORNER_LIMIT]; CORNER_LIMIT]; CORNER_LIMIT + 1];
+    let mut radius = 1;
+    while radius <= CORNER_LIMIT {
+        let extent = (radius * 4) as i32;
+        let mut y = 0;
+        while y < radius {
+            let mut x = 0;
+            while x < radius {
+                let mut sample = 0;
+                while sample < 4 {
+                    let dx = extent - (x * 4 + 1 + 2 * (sample % 2)) as i32;
+                    let dy = extent - (y * 4 + 1 + 2 * (sample / 2)) as i32;
+                    counts[radius][y][x] += (dx * dx + dy * dy <= extent * extent) as u8;
+                    sample += 1;
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        radius += 1;
+    }
+    counts
+};
+
+fn samples(radius: i32, x: i32, y: i32) -> u8 {
+    if x < 0 || y < 0 {
+        0
+    } else if x < radius && y < radius {
+        CORNER_COUNTS[radius as usize][y as usize][x as usize]
+    } else {
+        4
+    }
+}
+
+fn corner_mask(mask: &mut [u8], area: Area, w: i32, h: i32, radius: i32, border: Option<i32>) {
+    for (row, target) in mask.chunks_exact_mut(area.w).enumerate() {
+        let y = (area.y + row) as i32;
+        let y = y.min(h - 1 - y);
+        for (column, value) in target.iter_mut().enumerate() {
+            let x = (area.x + column) as i32;
+            let x = x.min(w - 1 - x);
+            let mut count = samples(radius, x, y);
+            if let Some(inset) = border {
+                count -= samples((radius - inset).max(0), x - inset, y - inset);
+            }
+            *value = ((u16::from(count) * 255 + 2) / 4) as u8;
+        }
+    }
+}
+
 pub(super) fn paint(
     renderer: &mut Renderer,
     painter: &mut Painter<'_, '_>,
@@ -115,7 +170,25 @@ pub(super) fn paint(
                 w: r.w as usize,
                 h: r.h as usize,
             };
-            renderer.paint_raster(painter, bounds, cmd, p, corner, 0)?;
+            // Integer panel geometry and the complete command clip were
+            // checked above. Bounds keep quarter samples exactly representable.
+            if radius <= CORNER_LIMIT as i32 && w <= 65536 && h <= 65536 {
+                let mask = &mut renderer.pixels[..corner.w * corner.h];
+                if p.fill_argb >> 24 != 0 || p.gradient.is_some() {
+                    corner_mask(mask, corner, w, h, radius, None);
+                    if let Some(paint) = p.gradient {
+                        super::gradient::blend(painter, bounds, cmd, corner, mask, paint, &mut renderer.scratch)?;
+                    } else {
+                        super::mask::blend(painter, bounds, cmd, corner, mask, p.fill_argb)?;
+                    }
+                }
+                if border != 0 {
+                    corner_mask(mask, corner, w, h, radius, Some(border));
+                    super::mask::blend(painter, bounds, cmd, corner, mask, p.stroke_argb)?;
+                }
+            } else {
+                renderer.paint_raster(painter, bounds, cmd, p, corner, 0)?;
+            }
         }
         // The horizontal gradient has exactly the same color on each row.
         let row = if let Some(gradient) = p.gradient {
