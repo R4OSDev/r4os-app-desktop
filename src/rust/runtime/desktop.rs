@@ -963,7 +963,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
         if !software_primary {
             self.drag_pacing.flush();
         }
-        let paced = self.drag_pacing.stage(
+        let await_client = software_primary && !self.dirty.active()
+            && self.drag_pacing.expecting_client()
+            && self.drag_pacing.awaiting_client(time.nanoseconds, self.resize_client_frame());
+        let paced = !await_client && self.drag_pacing.stage(
             &mut self.dirty,
             time.nanoseconds,
             1_000_000_000 / u64::from(time.hz.max(1)),
@@ -1954,6 +1957,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let new = self.hosted.model.windows.windows()[i].geometry();
             if pacing && new != old {
                 self.drag_pacing.motion(old, new, moved);
+                if resizing {
+                    let source = self.resize_client_frame();
+                    self.drag_pacing.expect_client(source, time.nanoseconds, self.outputs.primary_interval_ns());
+                }
             } else {
                 self.dirty.merge(&moved);
                 if self.hosted.model.windows.pointer_window().is_none()
@@ -1999,6 +2006,25 @@ impl<'a, 'input> Desktop<'a, 'input> {
             }
         }
         delivered
+    }
+    fn resize_client_frame(&self) -> Option<super::drag_pacing::ClientFrame> {
+        let index = self.hosted.model.windows.pointer_window()?;
+        let window = &self.hosted.model.windows.windows()[index];
+        let client = &self.hosted.model.clients.slots()[index];
+        if window.kind() != Kind::App || !window.visible() || client.retiring() {
+            return None;
+        }
+        let frame = client.frames().view();
+        let owner = &frame.info.owner;
+        (frame.valid && owner.instance_id == window.instance_id() && owner.generation != 0
+            && crate::hosted::process::same(*owner, client.handle())).then(|| {
+            super::drag_pacing::ClientFrame {
+                instance: owner.instance_id,
+                process_generation: owner.generation,
+                frame_generation: frame.info.committed_generation,
+                geometry: window.geometry(),
+            }
+        })
     }
     fn flush_resize_motion(
         &mut self,

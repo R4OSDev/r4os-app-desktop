@@ -3,6 +3,22 @@
 use crate::render::geometry::{Dirty, Rect};
 const FALLBACK_NS: u64 = 16_666_667;
 
+/// Identifies the view present when a mouse resize was dispatched. A new
+/// generation is a wake-up hint; its contents still follow normal repaint
+/// and receipt handling even when the producer responds out of order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ClientFrame {
+    pub instance: u32,
+    pub process_generation: u64,
+    pub frame_generation: u64,
+    pub geometry: Rect,
+}
+
+struct ClientWait {
+    source: ClientFrame,
+    until: u64,
+}
+
 #[derive(Default)]
 pub(super) struct Pacing {
     last: Option<Rect>,
@@ -10,8 +26,25 @@ pub(super) struct Pacing {
     extras: Dirty,
     next: u64,
     force: bool,
+    client: Option<ClientWait>,
 }
 impl Pacing {
+    pub fn expect_client(&mut self, source: Option<ClientFrame>, now: u64, interval: Option<u64>) {
+        // Yield a small part of the current refresh period to a responsive
+        // producer. Replacing motion must never extend a stalled frame.
+        let grace = (interval.unwrap_or(FALLBACK_NS) / 8).min(2_000_000);
+        let until = now.saturating_add(grace);
+        let until = self.client.as_ref().map_or(until, |ack| ack.until.min(until));
+        self.client = source.map(|source| ClientWait { source, until });
+    }
+    pub fn expecting_client(&self) -> bool {
+        self.client.is_some()
+    }
+    pub fn awaiting_client(&self, now: u64, current: Option<ClientFrame>) -> bool {
+        !self.force && self.client.as_ref().is_some_and(|wait| {
+            now < wait.until && current == Some(wait.source)
+        })
+    }
     pub fn motion(&mut self, old: Rect, new: Rect, damage: Dirty) {
         if self.desired.is_none() {
             self.last = Some(old);
@@ -37,6 +70,7 @@ impl Pacing {
         }
     }
     pub fn flush(&mut self) {
+        self.client = None;
         self.force |= self.desired.is_some();
     }
     pub fn reset(&mut self) {
@@ -62,6 +96,7 @@ impl Pacing {
         true
     }
     pub fn receipt(&mut self, accepted: bool, now: u64, interval: Option<u64>) {
+        self.client = None;
         if !accepted {
             self.force = true;
             return;
@@ -87,8 +122,9 @@ impl Pacing {
         if self.force {
             return 1;
         }
+        let deadline = self.client.as_ref().map_or(self.next, |wait| wait.until);
         delay.min(
-            self.next
+            deadline
                 .saturating_sub(now)
                 .saturating_mul(u64::from(hz))
                 .div_ceil(1_000_000_000)
@@ -102,6 +138,32 @@ fn contains(outer: Rect, r: Rect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resize_wait_is_bounded_and_only_applies_to_the_requested_client() {
+        let mut pacing = Pacing::default();
+        let source = ClientFrame {
+            instance: 7,
+            process_generation: 20,
+            frame_generation: 42,
+            geometry: Rect::new(10, 20, 200, 100),
+        };
+        pacing.motion(Rect::new(10, 20, 199, 100), source.geometry, Dirty::default());
+        pacing.expect_client(Some(source), 1_000_000, Some(FALLBACK_NS));
+        assert!(pacing.awaiting_client(1_001_000, Some(source)));
+        assert!(!pacing.awaiting_client(1_001_000, None));
+        assert!(!pacing.awaiting_client(1_001_000, Some(ClientFrame { frame_generation: 43, ..source })));
+        assert!(!pacing.awaiting_client(1_001_000, Some(ClientFrame { process_generation: 21, ..source })));
+        let next = ClientFrame { geometry: Rect::new(10, 20, 201, 100), ..source };
+        assert!(!pacing.awaiting_client(1_001_000, Some(next)));
+        pacing.expect_client(Some(next), 2_900_000, Some(FALLBACK_NS));
+        assert!(!pacing.awaiting_client(3_000_000, Some(next)));
+        pacing.flush();
+        assert!(!pacing.awaiting_client(2_900_001, Some(next)));
+        pacing.receipt(false, 3_000_000, None);
+        assert!(pacing.pending() && pacing.due(3_000_000, 1));
+        pacing.receipt(true, 3_100_000, None);
+        assert_eq!(pacing.wait(4_000_000, 1_000, 500, false), 500);
+    }
     #[test]
     fn high_rate_keeps_accepted_origin_latest_position_and_release_after_rejection() {
         let mut p = Pacing::default();
