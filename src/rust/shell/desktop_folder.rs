@@ -80,21 +80,54 @@ impl DefaultLink {
             Self::Terminal => b"C:\\R4OS\\Media\\Icons\\Terminal.ico",
             Self::Notepad => b"C:\\R4OS\\Media\\Icons\\Notepad.ico",
             Self::Synth => b"C:\\R4OS\\Media\\Icons\\Synth.ico",
-            Self::Devices => b"C:\\R4OS\\Media\\Icons\\Config.ico",
             Self::Computer => b"C:\\R4OS\\Media\\Icons\\Computer.ico",
-            Self::Portex => b"C:\\R4OS\\Media\\Icons\\Application.ico",
-            Self::ControlCenter => b"INTERNAL",
+            Self::Devices | Self::Portex | Self::ControlCenter => b"INTERNAL",
         }
     }
     pub fn write<'out>(self, standard: &Standard<'_>, out: &'out mut [u8]) -> Result<&'out [u8]> {
+        self.write_with_icon(standard, self.icon(), out)
+    }
+    fn write_with_icon<'out>(
+        self,
+        standard: &Standard<'_>,
+        icon: &[u8],
+        out: &'out mut [u8],
+    ) -> Result<&'out [u8]> {
         let mut link = standard.shortcut(self.target())?;
         link.set_title(self.title())?;
         link.set_args(self.args())?;
         link.set_policy(self.policy())?;
-        if !self.icon().is_empty() {
-            link.set_icon(self.icon())?;
-        }
+        link.set_icon(icon)?;
         link.write(out)
+    }
+    pub fn previous_icon(self) -> Option<&'static [u8]> {
+        match self {
+            Self::Devices => Some(br"C:\R4OS\Media\Icons\Config.ico"),
+            Self::Portex => Some(br"C:\R4OS\Media\Icons\Application.ico"),
+            _ => None,
+        }
+    }
+    pub fn matches_previous(
+        self,
+        standard: &Standard<'_>,
+        bytes: &[u8],
+        previous_icon: &[u8],
+    ) -> Result<bool> {
+        // The old image used a plain header and doubled only the icon path separators.
+        const PORTEX_IMAGE: &str = r"R4S_FORMAT=1
+SCHEMA=R4LNK
+TARGET=C:\R4OS\SOFTWARE\DESKTOP\PORTEX.R4X
+TITLE=Portex
+POLICY=gui
+ICON=C:\\R4OS\\Media\\Icons\\Application.ico";
+        if self == Self::Portex
+            && core::str::from_utf8(bytes).is_ok_and(|text| text.lines().eq(PORTEX_IMAGE.lines()))
+        {
+            return Ok(true);
+        }
+        // A link created by Desktop is byte-for-byte the canonical R4STD document.
+        let mut canonical = [0; MAX_LINK_BYTES];
+        Ok(bytes == self.write_with_icon(standard, previous_icon, &mut canonical)?)
     }
     pub fn matches(self, link: &Shortcut<'_>) -> Result<bool> {
         let value = link.resolve()?;
@@ -150,6 +183,25 @@ mod tests {
             link.set_workdir(b"C:\\TEMP").unwrap();
             assert_eq!(link.resolve().unwrap().workdir, b"C:\\TEMP");
             assert!(link.write(&mut [0; 4]).is_err());
+        });
+    }
+    #[test]
+    fn only_stock_shortcuts_receive_the_internal_icon() {
+        crate::standard_fixture::with(|standard| {
+            for spec in [DefaultLink::Devices, DefaultLink::Portex] {
+                let old = spec.previous_icon().unwrap();
+                let mut buf = [0; MAX_LINK_BYTES];
+                let previous = spec.write_with_icon(standard, old, &mut buf).unwrap();
+                assert!(spec.matches_previous(standard, previous, old).unwrap());
+                let mut customized = previous.to_vec();
+                customized.extend_from_slice(b"WORKDIR=C:\\TEMP\r\n");
+                assert!(!spec.matches_previous(standard, &customized, old).unwrap());
+                let alternate = spec.write_with_icon(standard, br"C:\MY.ICO", &mut buf).unwrap();
+                assert!(!spec.matches_previous(standard, alternate, old).unwrap());
+                let current = spec.write(standard, &mut buf).unwrap();
+                assert!(!spec.matches_previous(standard, current, old).unwrap());
+                assert_eq!(standard.parse_shortcut(current).unwrap().icon().unwrap(), b"INTERNAL");
+            }
         });
     }
     #[test]

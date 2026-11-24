@@ -188,6 +188,7 @@ impl<'app, 'start> Store<'app, 'start> {
         let _ = files.create_directory(&path(desktop_folder::DIRECTORY)?);
         let mut name = [0; desktop_folder::MAX_LINK_PATH + 1];
         let mut bytes = [0; desktop_folder::MAX_LINK_BYTES];
+        let mut sequence = 0;
         for link in desktop_folder::DEFAULTS {
             // An update can deliver Desktop before these applications.
             if matches!(
@@ -201,13 +202,20 @@ impl<'app, 'start> Store<'app, 'start> {
                 continue;
             };
             let name = path(name)?;
-            // Exists and read failure both preserve the existing user file.
-            if !matches!(files.info(&name), Ok(None)) {
-                continue;
-            }
+            let missing = match files.info(&name) {
+                Ok(None) => true,
+                Ok(Some(info)) if info.is_dir == 0 && info.size <= bytes.len() as u64 => {
+                    let Some(icon) = link.previous_icon() else { continue };
+                    let Ok(Some(n)) = files.read(&name, &mut bytes) else { continue };
+                    if n as u64 != info.size || !link.matches_previous(standard, &bytes[..n], icon)? {
+                        continue;
+                    }
+                    false
+                }
+                _ => continue,
+            };
             let data = link.write(standard, &mut bytes)?;
-            let written = files.write(&name, data)?;
-            if written != data.len() {
+            if !files.save(&mut sequence, &name, data, missing).committed() {
                 return Err(Error::Sdk(SdkError::InvalidProvider));
             }
         }
