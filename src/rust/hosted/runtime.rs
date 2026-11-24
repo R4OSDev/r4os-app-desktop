@@ -16,8 +16,12 @@ use crate::{
         compositor,
         geometry::{Dirty, Rect},
     },
-    shell::{configuration::bytes_z, style::TASKBAR_H},
-    windows::{controller::Changes, service_mirror::Mirror, window::Kind},
+    shell::configuration::bytes_z,
+    windows::{
+        controller::{Changes, DisplayBounds},
+        service_mirror::Mirror,
+        window::Kind,
+    },
 };
 use alloc::vec::Vec;
 use core::ffi::CStr;
@@ -98,7 +102,7 @@ pub struct State<'input> {
     pub terminal_mode: bool,
     pub console: ConsoleLaunch,
     pub mirror: Mirror,
-    pub bounds: Rect,
+    pub bounds: DisplayBounds,
     reset: Option<crate::windows::service_mirror::ResetAcknowledged>,
     focus_dirty: bool,
     failed_spawns: Vec<a::ProgramProcessHandle>,
@@ -136,7 +140,7 @@ impl<'input> State<'input> {
             terminal_mode: false,
             console: ConsoleLaunch::default(),
             mirror: Mirror::default(),
-            bounds: Rect::new(0, 0, 1280, 720),
+            bounds: DisplayBounds::new(Rect::new(0, 0, 1280, 720), 1280, 720),
             reset: None,
             focus_dirty: false,
             failed_spawns,
@@ -168,26 +172,7 @@ impl<'input> State<'input> {
         tick: u64,
         dirty: &mut Dirty,
     ) {
-        if let Some(before) = change.previous_frame {
-            dirty.invalidate(before);
-        }
-        for (i, w) in self.model.windows.windows().iter().enumerate() {
-            if change.dirty & (1 << i) != 0 {
-                dirty.invalidate(w.frame_surface().rect);
-            }
-        }
-        if change.taskbar {
-            let area = self.bounds;
-            dirty.invalidate(Rect::new(
-                area.x,
-                area.bottom() - TASKBAR_H,
-                area.w,
-                TASKBAR_H,
-            ));
-        }
-        if change.full_damage {
-            dirty.invalidate(self.bounds);
-        }
+        change.invalidate(&self.model.windows, self.bounds, dirty);
         self.announce_changes(change, session, tick);
     }
     pub(crate) fn announce_changes(
@@ -363,7 +348,17 @@ impl<'input> State<'input> {
         let report = if lifecycle_due {
             unsafe {
                 self.model.synchronize(
-                    app, resources, programs, session, graphics, dirty, tick, hz, last, areas,
+                    app,
+                    resources,
+                    programs,
+                    session,
+                    graphics,
+                    dirty,
+                    tick,
+                    hz,
+                    last,
+                    areas,
+                    self.bounds,
                 )
             }
         } else {
@@ -372,7 +367,7 @@ impl<'input> State<'input> {
         self.focus_dirty |= report.focus_mirror.is_some();
         if report.leave_terminal_mode {
             self.terminal_mode = false;
-            dirty.invalidate(self.bounds);
+            dirty.invalidate(self.bounds.desktop);
         }
         for i in 0..4 {
             if report.retired[i].is_some() {
@@ -395,7 +390,7 @@ impl<'input> State<'input> {
             if win.kind() == Kind::Terminal {
                 if let Ok(revision) = Host::new(session).console_revision(handle.instance_id) {
                     let rect = if self.terminal_mode && i == 0 {
-                        self.bounds
+                        self.bounds.desktop
                     } else {
                         win.client_surface().rect
                     };
@@ -461,7 +456,7 @@ impl<'input> State<'input> {
                 continue;
             }
             let rect = if self.terminal_mode {
-                self.bounds
+                self.bounds.desktop
             } else {
                 win.client_surface().rect
             };
@@ -728,7 +723,7 @@ impl<'input> State<'input> {
             .set_title(c"Terminal Mode");
         self.terminal_mode = true;
         self.focus(0, session, app, tick, dirty);
-        dirty.invalidate(self.bounds);
+        dirty.invalidate(self.bounds.desktop);
         Ok(())
     }
     pub fn poll_failed_spawns(&mut self, programs: &Programs<'_>) {

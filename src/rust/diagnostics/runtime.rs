@@ -387,6 +387,7 @@ impl Owner {
                         env.app,
                         time.tick,
                         v.work_areas[index],
+                        v.hosted.bounds,
                         v.dirty,
                     )
                 } {

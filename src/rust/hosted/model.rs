@@ -13,7 +13,7 @@ use super::{
 use crate::{
     render::geometry::{Dirty, Rect},
     windows::{
-        controller::{Changes, Controller, SLOT_COUNT},
+        controller::{Changes, Controller, DisplayBounds, SLOT_COUNT},
         window::Kind,
     },
 };
@@ -100,6 +100,7 @@ impl Model {
         _app: &App2<'_>,
         now: u64,
         work: Rect,
+        bounds: DisplayBounds,
         dirty: &mut Dirty,
     ) -> bool {
         if let Some(bound) = self.clients.find(handle) {
@@ -146,7 +147,7 @@ impl Model {
             session,
             now,
         );
-        dirty.invalidate(self.windows.windows()[index].frame_surface().rect);
+        change.invalidate(&self.windows, bounds, dirty);
         true
     }
     /// # Safety
@@ -165,6 +166,7 @@ impl Model {
         tick_hz: u32,
         last_global_exit: i32,
         work_areas: &[Rect; SLOT_COUNT],
+        bounds: DisplayBounds,
     ) -> Report {
         let mut report = Report::default();
         if !self.inventory.refresh(app) {
@@ -212,7 +214,6 @@ impl Model {
                         report.report_error |= 1 << index;
                     }
                     window.bind_instance(0);
-                    dirty.invalidate(before);
                     if let Some(change) = self.windows.close_unbound(index) {
                         announce(
                             &self.windows,
@@ -222,7 +223,8 @@ impl Model {
                             session,
                             now,
                         );
-                        report.focus_mirror = change.focus_mirror;
+                        change.invalidate(&self.windows, bounds, dirty);
+                        report.focus_mirror = change.focus_mirror.or(report.focus_mirror);
                     }
                     report.changed = true;
                 }
@@ -325,7 +327,7 @@ impl Model {
             report.focus_mirror = Some(index);
             report.adopted |= 1 << index;
             report.changed = true;
-            dirty.invalidate(self.windows.windows()[index].frame_surface().rect);
+            change.invalidate(&self.windows, bounds, dirty);
         }
         report
     }

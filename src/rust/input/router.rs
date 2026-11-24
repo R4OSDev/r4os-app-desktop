@@ -204,8 +204,9 @@ impl Router {
         };
         if input.cursor != point {
             if software_cursor {
-                dirty.invalidate_cursor(output_geometry::cursor_rect(hosted.bounds, input.cursor));
-                dirty.invalidate_cursor(output_geometry::cursor_rect(hosted.bounds, point));
+                let bounds = hosted.bounds.desktop;
+                dirty.invalidate_cursor(output_geometry::cursor_rect(bounds, input.cursor));
+                dirty.invalidate_cursor(output_geometry::cursor_rect(bounds, point));
             }
             input.stats.cursor_moves = input.stats.cursor_moves.wrapping_add(1);
             input.cursor = point;

@@ -49,7 +49,7 @@ use crate::{
         tray_sync::Mirror,
     },
     windows::{
-        controller::{Changes, Controller as Windows},
+        controller::{Changes, Controller as Windows, DisplayBounds},
         layout,
         window::Kind,
     },
@@ -253,15 +253,10 @@ impl<'a, 'input> Desktop<'a, 'input> {
         })
     }
     fn bar(&mut self) {
-        self.dirty.invalidate(Rect::new(
-            0,
-            self.height - s::TASKBAR_H,
-            self.width,
-            s::TASKBAR_H,
-        ));
+        self.dirty.invalidate(self.hosted.bounds.taskbar);
     }
     fn full(&mut self) {
-        self.dirty.invalidate(self.hosted.bounds);
+        self.dirty.invalidate(self.hosted.bounds.desktop);
     }
     fn shell_damage(&mut self) {
         router::shell_damage(&self.shell, &mut self.dirty, self.width, self.height);
@@ -312,7 +307,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
         self.associations.load(&env.store);
         let _ = self.outputs.preferences.reload_layout(&env.store);
         let _ = self.outputs.reload_colors(&env.store);
-        self.hosted.bounds = Rect::new(0, 0, self.width, self.height);
+        self.hosted.bounds = DisplayBounds::new(
+            Rect::new(0, 0, self.width, self.height),
+            self.width,
+            self.height,
+        );
         for i in 0..4 {
             self.hosted
                 .model
@@ -323,7 +322,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         self.status.load(env);
         self.status.refresh(env, session, time.tick, time.hz);
-        self.input.initial(session, self.hosted.bounds);
+        self.input.initial(session, self.hosted.bounds.desktop);
         Input::new(session).hide_legacy_cursor();
         let _ = self
             .input
@@ -385,11 +384,12 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.width = w;
             self.height = h;
         }
-        self.hosted.bounds = if self.outputs.active() {
+        let desktop_bounds = if self.outputs.active() {
             self.outputs.desktop_bounds
         } else {
             Rect::new(0, 0, self.width, self.height)
         };
+        self.hosted.bounds = DisplayBounds::new(desktop_bounds, self.width, self.height);
         if changed {
             let shift = self.outputs.translation;
             for i in 0..4 {
@@ -433,7 +433,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         }
         self.publisher
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
-        reset_output_damage(&mut self.dirty, self.hosted.bounds);
+        reset_output_damage(&mut self.dirty, self.hosted.bounds.desktop);
     }
     fn refresh(
         &mut self,
@@ -821,7 +821,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 &mut input::pointer_capture::Native(session),
                 time.tick,
                 &mut self.input.cursor,
-                self.hosted.bounds,
+                self.hosted.bounds.desktop,
             );
             if was_relative {
                 self.restore_capture_cursor();
@@ -1644,7 +1644,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             owner,
             tick,
             &mut self.input.cursor,
-            self.hosted.bounds,
+            self.hosted.bounds.desktop,
         );
         let _ = self.hosted.model.gui_pending[held.index].cancel_for(
             &mut crate::hosted::gui_pending::Native(session),
@@ -1800,7 +1800,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                     input::pointer_capture::target(windows, clients, token, blocked)
                 }
             },
-            self.hosted.bounds,
+            self.hosted.bounds.desktop,
             &mut self.input.cursor,
             [self.input.physical_buttons, self.input.remote_buttons],
             tick,
@@ -1809,7 +1809,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.input.pointer_capture.unbind(
                 &mut input::pointer_capture::Native(session),
                 &mut self.input.cursor,
-                self.hosted.bounds,
+                self.hosted.bounds.desktop,
             );
         }
         if was_relative && !self.input.pointer_capture.relative() {
@@ -1844,7 +1844,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             remote_kind,
             motion,
             &mut self.input.cursor,
-            self.hosted.bounds,
+            self.hosted.bounds.desktop,
             time.tick,
         ) {
             if remote {
@@ -1864,7 +1864,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 self.input.stats.cursor_moves = self.input.stats.cursor_moves.wrapping_add(1);
                 self.cursor_queued_tick = time.tick;
                 for point in [before, self.input.cursor] {
-                    let rect = output_geometry::cursor_rect(self.hosted.bounds, point);
+                    let rect = output_geometry::cursor_rect(self.hosted.bounds.desktop, point);
                     self.publisher.cursor_damage.invalidate(rect);
                     if self.cursor.software() {
                         self.dirty.invalidate_cursor(rect);
@@ -1975,11 +1975,11 @@ impl<'a, 'input> Desktop<'a, 'input> {
             self.cursor_queued_tick = time.tick;
             self.publisher
                 .cursor_damage
-                .invalidate(output_geometry::cursor_rect(self.hosted.bounds, before));
+                .invalidate(output_geometry::cursor_rect(self.hosted.bounds.desktop, before));
             self.publisher
                 .cursor_damage
                 .invalidate(output_geometry::cursor_rect(
-                    self.hosted.bounds,
+                    self.hosted.bounds.desktop,
                     self.input.cursor,
                 ));
         }
@@ -2077,7 +2077,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             .map_or(self.input.cursor, |p| output_geometry::topology::Point {
                                 x: p.value.x, y: p.value.y,
                             });
-                        self.input.mouse(session, &mut self.outputs, self.hosted.bounds, cursor)
+                        self.input.mouse(session, &mut self.outputs, self.hosted.bounds.desktop, cursor)
                     }
                 };
                 let sample = match sample {
@@ -2272,7 +2272,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
         let _ = self.input.pointer_capture.unbind(
             &mut input::pointer_capture::Native(session),
             &mut self.input.cursor,
-            self.hosted.bounds,
+            self.hosted.bounds.desktop,
         );
         self.publisher
             .reset(env.app, &mut self.outputs, self.primary.output_mut());
@@ -2298,6 +2298,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             let diagnostic = if self.diagnostics.pending() {
                 if let Some(time) = time {
                     let areas = self.areas();
+                    let bounds = self.hosted.bounds;
                     unsafe {
                         self.hosted.model.synchronize(
                             env.app,
@@ -2310,6 +2311,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                             time.hz,
                             0,
                             &areas,
+                            bounds,
                         );
                     }
                     let mut view = diagnostics::runtime::View {

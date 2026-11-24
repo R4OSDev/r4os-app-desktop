@@ -41,7 +41,7 @@ impl State<'_> {
     pub fn invalidate_console(&mut self, i: usize, dirty: &mut Dirty) {
         self.consoles[i].invalidate();
         dirty.invalidate(if self.terminal_mode && i == 0 {
-            self.bounds
+            self.bounds.desktop
         } else {
             self.model.windows.windows()[i].client_surface().rect
         });

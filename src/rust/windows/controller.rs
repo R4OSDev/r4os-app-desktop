@@ -2,7 +2,11 @@
 //! returned damage, WINSVC updates and client events after this short borrow.
 //! Process handles, close acknowledgements and frame leases live with clients.
 use super::window::{self, Kind, ResizeHandle, Window};
-use crate::{input::event::Target, render::geometry::Rect};
+use crate::{
+    input::event::Target,
+    render::geometry::{self, Dirty, Rect},
+    shell::style::TASKBAR_H,
+};
 
 pub const SLOT_COUNT: usize = 4;
 const WINDOW_TARGETS: [Target; SLOT_COUNT] = [
@@ -59,6 +63,39 @@ pub struct Changes {
     pub full_damage: bool,
     pub client_pointer_down: Option<usize>,
 }
+/// The taskbar belongs to the primary output; windows can span the desktop.
+#[derive(Clone, Copy)]
+pub struct DisplayBounds {
+    pub desktop: Rect,
+    pub taskbar: Rect,
+}
+impl DisplayBounds {
+    pub fn new(desktop: Rect, primary_width: i32, primary_height: i32) -> Self {
+        Self {
+            desktop,
+            taskbar: geometry::taskbar(primary_width, primary_height, TASKBAR_H).rect,
+        }
+    }
+}
+impl Changes {
+    pub fn invalidate(&self, windows: &Controller, bounds: DisplayBounds, dirty: &mut Dirty) {
+        if let Some(before) = self.previous_frame {
+            dirty.invalidate(before);
+        }
+        for (i, window) in windows.windows().iter().enumerate() {
+            if self.dirty & (1 << i) != 0 {
+                dirty.invalidate(window.frame_surface().rect);
+            }
+        }
+        if self.taskbar {
+            dirty.invalidate(bounds.taskbar);
+        }
+        if self.full_damage {
+            dirty.invalidate(bounds.desktop);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Pointer {
     Drag {
@@ -298,6 +335,8 @@ impl Controller {
         }
         let mut change = Changes {
             dirty: 1 << index,
+            // Closing a fullscreen window restores its saved geometry.
+            previous_frame: Some(win.frame_surface().rect),
             taskbar: true,
             ..Changes::default()
         };
@@ -531,7 +570,17 @@ mod tests {
         assert_eq!(cycled.focus_mirror, None);
         assert!(windows.close_unbound(2).is_none());
         windows.window_mut(2).unwrap().unbind_instance();
-        windows.close_unbound(2).unwrap();
+        let closing = windows.windows()[2].geometry();
+        let remaining = windows.windows()[0].geometry();
+        let change = windows.close_unbound(2).unwrap();
+        let bounds = DisplayBounds::new(Rect::new(-1280, 0, 2560, 1080), 1280, 720);
+        let mut dirty = Dirty::default();
+        change.invalidate(&windows, bounds, &mut dirty);
+        assert_eq!(change.previous_frame, Some(closing));
+        for rect in [closing, remaining, Rect::new(0, 688, 1280, 32)] {
+            assert!(dirty.regions().contains(&rect));
+        }
+        assert_eq!(dirty.regions().len(), 3);
         assert_eq!(windows.active(), 0);
         windows.show_desktop();
         assert_eq!(windows.keyboard_focus(), Target::None);
