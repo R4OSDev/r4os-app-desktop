@@ -181,6 +181,18 @@ pub fn index_for_target(target: Target) -> Option<usize> {
         _ => None,
     }
 }
+/// Both the configured image path and DOS launch paths identify the same C: program.
+pub fn is_explorer(path: &[u8]) -> bool {
+    let path = match path {
+        [b'c' | b'C', b':', rest @ ..] => rest,
+        _ => path,
+    };
+    let explorer = &super::desktop_items::EXPLORER[2..];
+    path.len() == explorer.len() && path.iter().zip(explorer).all(|(&a, &b)| {
+        (a == b'/' && b == b'\\') || a.eq_ignore_ascii_case(&b)
+    })
+}
+
 pub fn bar_x() -> i32 {
     style::START_W + 6
 }

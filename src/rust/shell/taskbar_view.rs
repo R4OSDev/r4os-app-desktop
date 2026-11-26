@@ -57,6 +57,7 @@ pub trait Icons {
 }
 pub struct State<'a> {
     pub windows: &'a [Window],
+    pub explorer_open: bool,
     pub quick: Option<&'a Bar>,
     pub active: usize,
     pub clock: Option<&'a [u8]>,
@@ -179,7 +180,7 @@ pub fn paint<F: Fonts>(
     ui.text(28, top + 11, b"R4OS", s::TEXT, s::TASKBAR)?;
     let quick_count = state.quick.map_or(0, Bar::count);
     if let Some(bar) = state.quick {
-        quick_bar(ui, icons, h, bar, state.hover, state.pressed)?;
+        quick_bar(ui, icons, h, bar, state.hover, state.pressed, state.explorer_open)?;
     }
     let left = quick_launch::taskbar_window_start_x(quick_count);
     let right = state.tray.map_or_else(
@@ -384,6 +385,7 @@ fn quick_bar<F: Fonts>(
     bar: &Bar,
     hover: Target,
     pressed: Target,
+    explorer_open: bool,
 ) -> Result<()> {
     if bar.count() == 0 {
         return Ok(());
@@ -397,10 +399,15 @@ fn quick_bar<F: Fonts>(
     for (i, item) in bar.items().iter().enumerate() {
         let target = bar.target(i);
         let rect = quick_launch::button_rect(h, i);
-        let down = pressed == target;
-        let hot = hover == target && !down;
-        ui.bevel(rect, down)?;
-        ui.fill(rect.inset(2, 2), background(hot, down))?;
+        let over = hover == target;
+        let down = over && pressed == target;
+        let hot = over && !down;
+        let open = explorer_open && item.kind == quick_launch::Kind::Program
+            && quick_launch::is_explorer(item.path());
+        if over || open {
+            ui.bevel(rect, down || open)?;
+            ui.fill(rect.inset(2, 2), background(hot, down))?;
+        }
         if hot {
             focus(ui, rect.inset(3, 3))?;
         }

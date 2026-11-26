@@ -606,6 +606,11 @@ pub(crate) unsafe fn draw(
                             scene.height,
                             taskbar_view::State {
                                 windows,
+                                explorer_open: windows.iter().zip(hosted.clients.slots()).any(|(win, client)| {
+                                    win.visible() && client.bound() && !client.retiring()
+                                        && win.instance_id() == client.handle().instance_id
+                                        && crate::shell::quick_launch::is_explorer(client.launch_path())
+                                }),
                                 quick: Some(shell.quick),
                                 active,
                                 clock: if shell.config.taskbar_clock {

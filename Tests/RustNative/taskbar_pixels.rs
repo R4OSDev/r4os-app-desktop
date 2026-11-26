@@ -69,13 +69,13 @@ impl Icons for NoFileIcons {
 fn eight_original_complete_taskbar_canvases_include_tray_alpha_recording_narrow_and_dirty() {
     let expected = [
         "a8416a509bece3507cdb57062ff82d5b8d741f02e510a09a26ebfe04c3a9bea9",
-        "57aaa38c7d9b9e1aa418385e8eadee08b8482458492d26abef780abe2218bab9",
-        "c36fad8226a4a45dca83841c5e965efe443a07b0054d2362d74e7efba8574c7d",
-        "e45fc48d8c4a4f61721de46ea18575304c9e6069e84f5e9bb5c1673afc774766",
-        "737b546cc8db766cd8a397dc5da823b256f524e4890406754dd113b040c589f6",
-        "55b794e024b44dd8abf8d68cf4fe6f6a63b2a5da83f0d5a26627d1eeab55be3b",
-        "689af21d2a95024744f5dede3e7b648b632d27c766bc42b3859710444f5b1153",
-        "d4269bf6854e76d359ec828b5477e98edb6ea86ed5ec076b3a826789a6ec890f",
+        "4820ab51839ef3208d09b0256cf6ef5028e83bafc72bbd36412aee10ef5d1f58",
+        "2140eca47c29af587212268227dfc35b14edf18e43c36f0588cc524bf215183c",
+        "f60430a03be060137185c01cf65df91d4d187624639e7b584eb13b2bbbbaa23a",
+        "3746d145cbcef840182efca8d145b828cf9a83b862791a5add9e3947aefc90fa",
+        "89d5efc6193c31079cfe44769da47e5c199a49a6eb3adcbb863aed4f1104176d",
+        "bb431f56dae73dc66cdf60862d13d6e89766a0c51235355cc5e77232ab6a26c6",
+        "fb79d344ace88a30f2bb17c4ad620532d6bb29cb66fd12d25c426cd49fa2bdbd",
     ];
     for (case, expected) in expected.into_iter().enumerate() {
         let (w, h) = if case == 4 {
@@ -156,6 +156,7 @@ fn eight_original_complete_taskbar_canvases_include_tray_alpha_recording_narrow_
             h,
             State {
                 windows: if case == 0 { &[] } else { &windows },
+                explorer_open: case == 7,
                 quick: if case == 0 { None } else { Some(&quick) },
                 active: if case == 2 { 3 } else { 1 },
                 clock: if case == 0 { None } else { Some(b"12:34") },
