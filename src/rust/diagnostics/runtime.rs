@@ -845,13 +845,13 @@ fn volume_targets(v: &mut View<'_, '_>) -> bool {
     }
     let old = v.shell.audio.ui.popup_open;
     v.shell.audio.set_popup(true);
-    let popup =
-        shell::status_view::volume_popup_rect(v.width, v.height, v.shell.config.taskbar_clock);
+    let width = shell::taskbar_view::clock_width(Some(v.shell.clock.label()), 0);
+    let popup = shell::status_view::volume_popup_rect(v.width, v.height, width);
     let track = shell::volume::track_rect(popup);
     let mute = shell::volume::mute_rect(popup);
-    let icon = shell::taskbar_view::volume_rect(v.width, v.height, true);
-    let clock = shell::taskbar_view::clock_rect(v.width, v.height);
-    let keyboard = shell::taskbar_view::layout_rect(v.width, v.height, true, true);
+    let icon = shell::taskbar_view::volume_rect(v.width, v.height, width);
+    let clock = shell::taskbar_view::clock_rect(v.width, v.height, width);
+    let keyboard = shell::taskbar_view::layout_rect(v.width, v.height, width, true);
     let scene = crate::runtime::views::scene(
         v.width,
         v.height,

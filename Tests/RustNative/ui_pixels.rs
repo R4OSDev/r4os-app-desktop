@@ -45,9 +45,9 @@ fn original_eight_complete_chrome_menu_and_dirty_pixel_digests() {
         "be2db032768e4f593026387697a2360090b624f3a088596762f0aa4d3006b8ae",
         "66c754fe1daf3c36dee9d2f096855bd99bf1d55cf7cdd9d038cc18a928bc58eb",
         "9b648cfb92754b3934c05d3fd17f844591b60f1f79ab46135b181beb964c898f",
-        "6aec7f22703cf340d26c71c1201979f54ccdc31646799799c01749744fae3b63",
-        "3b0624cccc8a7dbce32e91c0bd137a0722cc2ca722a4a7024a1d5ce06afdf440",
-        "7bda941c164399f57e30ca6fc2c5eed0020f6a8cb0ae819f98b0a0ec484ee871",
+        "9a5c23080f8fe312ad7fd4096e7a8670d557e1efb90a2e78647a00b34676aba7",
+        "cb8d4106301c73f5599aa3de542caf1136c76965f98acbff16ecbb68f5da002b",
+        "499de988f2877de67377f336489bb84d8cfcd397b8ac7837840c90ee77cd30f3",
         "20509ba73503fb841e53637d5ad8343e581fdf0559752a06829fea7cd2d9fdb1",
     ];
     for (case, expected) in expected.into_iter().enumerate() {

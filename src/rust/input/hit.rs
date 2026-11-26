@@ -51,12 +51,13 @@ pub fn target(scene: &Scene<'_>, x: i32, y: i32) -> Target {
             Target::TimeMenuBackdrop
         };
     }
-    let volume_icon = bar::volume_rect(w, h, shell.clock.is_some());
+    let clock_width = bar::clock_width(shell.clock, input.recording);
+    let volume_icon = bar::volume_rect(w, h, clock_width);
     if shell.volume.popup_open {
         if volume_icon.contains(x, y) {
             return Target::TaskbarVolume;
         }
-        let popup = status_view::volume_popup_rect(w, h, shell.clock.is_some());
+        let popup = status_view::volume_popup_rect(w, h, clock_width);
         if volume::track_rect(popup).contains(x, y) {
             return Target::VolumePopupSlider;
         }
@@ -190,11 +191,11 @@ pub fn target(scene: &Scene<'_>, x: i32, y: i32) -> Target {
         return Target::TaskbarVolume;
     }
     if shell.keyboard.is_some()
-        && bar::layout_rect(w, h, shell.clock.is_some(), shell.volume.installed).contains(x, y)
+        && bar::layout_rect(w, h, clock_width, shell.volume.installed).contains(x, y)
     {
         return Target::TaskbarKeyboardLayout;
     }
-    if shell.clock.is_some() && bar::clock_rect(w, h).contains(x, y) {
+    if bar::clock_rect(w, h, clock_width).contains(x, y) {
         return Target::TaskbarClock;
     }
     let left = quick_launch::taskbar_window_start_x(shell.quick.count());

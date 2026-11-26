@@ -117,7 +117,7 @@ pub fn shell_damage(shell: &Shell<'_>, dirty: &mut Dirty, width: i32, height: i3
         dirty.invalidate(crate::shell::status_view::volume_popup_rect(
             width,
             height,
-            shell.config.taskbar_clock,
+            shell.clock_width,
         ));
     }
 }
@@ -216,7 +216,7 @@ impl Router {
                 dirty.invalidate(crate::shell::status_view::volume_tooltip_rect(
                     width,
                     height,
-                    shell.config.taskbar_clock,
+                    shell.clock_width,
                 ));
             }
             for identity in [input.tray_hover, identity] {

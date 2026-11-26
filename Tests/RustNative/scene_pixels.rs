@@ -48,16 +48,16 @@ fn moving_window_incremental_pixels_match_fresh_full_render() {
 }
 fn check_scene_sequence(movement: bool) {
     let expected = [
-        "24ea02cf8dfe6af45085bd6bbe611cc4cb11df69fa9f4e6e2e586452161a2ba8",
-        "b2367be750cafdd415c010a3e24191380281cbd11d5452857b9ef4104bf84ca6",
-        "df1c8085b1acb366d8964e569c97a142a0fb1ec2cf75ba1ef66f9050ae8686aa",
-        "8b4e0188b4fff921dbebfda340a7bef22937f0b01d581bf38f32cfab0c401241",
-        "e25f52fe2e0f237191941669855d0c453ce4896da9add9d62b344b487c640bfb",
+        "3b3530226f5b0f83e1749a7cc08f343de286b82492694cfc35dfce15d781538a",
+        "78269d232b43bf9ec996dfb1850978eb99582e2458238b01a9e13fea6fb493c0",
+        "ce1302dcf16232499aa6598d33bec094aea3fe4564440dd68927fe921ad23c6c",
+        "a8c1b435b21c6e66f95161114d3c043da0e567f7fe978888333de6fb0ef16118",
+        "5ccfc2c0a95b4ae2bf417ded65a3df709b68f1a42849c8368354d76daf7a2c12",
         "4f58dc7c0ff8f0b45c9d96564d3a996ad8be3dbade818a83c07261db98bb5eb3",
         "30a930d5a08f7999dfb3b28d07b18d5e59f1989a44b2a754ca00ab3c9e763bfe",
         "b61e7c5af5c7cf75fafec9202045d2beb9124f0f4f6cdc6b687b88b699e654fa",
         "29ea20fd22d313bce8fe5634d5cd9754d801fb096ef912a96e904e37a76fb176",
-        "5b1c2a415cd8f81eb029fd5c106560ba2ad2a3dd22a18e635a48994f171e1130",
+        "97c9a61e1761524f21e58635566573348b079249448209577120e359d135db96",
     ];
     for (case, expected) in expected.into_iter().enumerate() {
         if movement && case != 1 { continue; }

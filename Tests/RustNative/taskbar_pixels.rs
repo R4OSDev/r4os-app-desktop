@@ -1,6 +1,5 @@
-//! Eight whole-canvas references generated from unchanged Zig146 taskbar,
-//! before comparing this Rust painter. Custom file icon loading is excluded;
-//! its absence follows the same built-in icon path in both native fixtures.
+//! Whole-canvas references for the original taskbar cases with the compact clock.
+//! The fixture selects the built-in fallback for custom file icons.
 use super::*;
 use crate::render::{
     content_hash::Blake3,
@@ -43,6 +42,24 @@ fn clock_refresh_and_taskbar_paint_share_fullscreen_coverage() {
     assert!(visible(&[], usize::MAX, 1280, 720));
     assert!(!visible(&[], 0, 0, 720));
 }
+#[test]
+fn compact_clock_geometry_tracks_format_and_recording() {
+    for (time, recording, width) in [
+        (Some(b"23:59".as_slice()), 0, 48),
+        (Some(b"--:--".as_slice()), 0, 48),
+        (Some(b"11:59 PM".as_slice()), 0, 72),
+        (Some(b"00:00".as_slice()), 1, 48),
+        (Some(b"00:00".as_slice()), 2, 56),
+        (Some(b"12:00 AM".as_slice()), 2, 72),
+        (None, 2, 0),
+    ] {
+        assert_eq!(clock_width(time, recording), width);
+        let rect = clock_rect(1280, 720, width);
+        assert_eq!(rect.right(), 1280 - CLOCK_RIGHT_MARGIN);
+        let neighbor = volume_rect(1280, 720, width);
+        assert_eq!(neighbor.right(), rect.x - if width > 0 { volume::ICON_GAP } else { 0 });
+    }
+}
 impl Icons for NoFileIcons {
     fn quick<F: Fonts>(&mut self, _: &mut Ui<'_, '_, F>, _: &[u8], _: i32, _: i32) -> Result<bool> {
         Ok(false)
@@ -52,13 +69,13 @@ impl Icons for NoFileIcons {
 fn eight_original_complete_taskbar_canvases_include_tray_alpha_recording_narrow_and_dirty() {
     let expected = [
         "a8416a509bece3507cdb57062ff82d5b8d741f02e510a09a26ebfe04c3a9bea9",
-        "225e57fee57dda93fadae4af261c0a298eb020240dca84e50dfaea89b4f57cff",
-        "514570af878f599609ed7b7de310e1cfb45d1095d21c43c0b336b8d644959fb4",
-        "5ba284e62aad3686ad51783a544a1f3e279848f389d6ca9372da64bf65f201ec",
-        "af32e65ea3f2f48836156e1c8777989df0e57bc1ebf9023573d1b3d6d10cfb40",
-        "b9341ec7f6acf99b5b4faafa76723ad8e64515464da508935aaac3e9ceaf1fd8",
-        "6dea768e4dfffb22da6c9b1cb374e6f198553171f1dcd08fd7aa2e226c714451",
-        "7db8b23e18d8572a4c7244e05e09ab01708e04e3950d6067f25f15eb11a325e8",
+        "57aaa38c7d9b9e1aa418385e8eadee08b8482458492d26abef780abe2218bab9",
+        "c36fad8226a4a45dca83841c5e965efe443a07b0054d2362d74e7efba8574c7d",
+        "e45fc48d8c4a4f61721de46ea18575304c9e6069e84f5e9bb5c1673afc774766",
+        "737b546cc8db766cd8a397dc5da823b256f524e4890406754dd113b040c589f6",
+        "55b794e024b44dd8abf8d68cf4fe6f6a63b2a5da83f0d5a26627d1eeab55be3b",
+        "689af21d2a95024744f5dede3e7b648b632d27c766bc42b3859710444f5b1153",
+        "d4269bf6854e76d359ec828b5477e98edb6ea86ed5ec076b3a826789a6ec890f",
     ];
     for (case, expected) in expected.into_iter().enumerate() {
         let (w, h) = if case == 4 {
@@ -124,7 +141,7 @@ fn eight_original_complete_taskbar_canvases_include_tray_alpha_recording_narrow_
                 screen_h: h,
                 taskbar_h: 32,
                 item_y: 4,
-                system_left: layout_rect(w, h, true, true).x,
+                system_left: layout_rect(w, h, clock_width(Some(b"12:34"), 0), true).x,
                 window_start: 152,
                 visible_windows: 4,
             });

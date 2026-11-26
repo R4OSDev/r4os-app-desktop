@@ -21,7 +21,23 @@ use crate::{
     },
     windows::{controller::Controller, window::Window},
 };
-pub const CLOCK_W: i32 = 88;
+const CLOCK_CELL: i32 = crate::render::text::layout::CELL as i32;
+const CLOCK_PADDING: i32 = 4;
+
+fn clock_text(time: &[u8], recording: u32) -> &[u8] {
+    match recording {
+        1 => b"REC",
+        2 => b"Saving",
+        _ => time,
+    }
+}
+
+pub fn clock_width(time: Option<&[u8]>, recording: u32) -> i32 {
+    time.map_or(0, |time| {
+        let cells = time.len().max(clock_text(time, recording).len());
+        cells as i32 * CLOCK_CELL + 2 * CLOCK_PADDING
+    })
+}
 pub const CLOCK_RIGHT_MARGIN: i32 = 8;
 pub const LAYOUT_W: i32 = 34;
 pub const LAYOUT_GAP: i32 = 6;
@@ -53,27 +69,27 @@ pub struct State<'a> {
     pub pressed: Target,
     pub recording: u32,
 }
-pub fn clock_rect(w: i32, h: i32) -> Rect {
+pub fn clock_rect(w: i32, h: i32, width: i32) -> Rect {
     Rect::new(
-        w - CLOCK_RIGHT_MARGIN - CLOCK_W,
+        w - CLOCK_RIGHT_MARGIN - width,
         h - s::TASKBAR_H + 4,
-        CLOCK_W,
+        width,
         s::START_H,
     )
 }
-pub fn volume_rect(w: i32, h: i32, clock: bool) -> Rect {
-    let right = if clock {
-        clock_rect(w, h).x - volume::ICON_GAP
+pub fn volume_rect(w: i32, h: i32, clock_width: i32) -> Rect {
+    let right = if clock_width > 0 {
+        clock_rect(w, h, clock_width).x - volume::ICON_GAP
     } else {
         w - CLOCK_RIGHT_MARGIN
     };
     volume::icon_rect(right, h - s::TASKBAR_H + 4, s::START_H)
 }
-pub fn layout_rect(w: i32, h: i32, clock: bool, volume: bool) -> Rect {
+pub fn layout_rect(w: i32, h: i32, clock_width: i32, volume: bool) -> Rect {
     let right = if volume {
-        volume_rect(w, h, clock).x - LAYOUT_GAP
-    } else if clock {
-        clock_rect(w, h).x - LAYOUT_GAP
+        volume_rect(w, h, clock_width).x - LAYOUT_GAP
+    } else if clock_width > 0 {
+        clock_rect(w, h, clock_width).x - LAYOUT_GAP
     } else {
         w - CLOCK_RIGHT_MARGIN
     };
@@ -135,6 +151,7 @@ pub fn paint<F: Fonts>(
 ) -> Result<()> {
     let top = h - s::TASKBAR_H;
     ui.rect(0, top, w, s::TASKBAR_H, s::TASKBAR)?;
+    let clock_width = clock_width(state.clock, state.recording);
     let recording_color = if state.recording == 2 {
         0xb06000
     } else {
@@ -166,7 +183,7 @@ pub fn paint<F: Fonts>(
     }
     let left = quick_launch::taskbar_window_start_x(quick_count);
     let right = state.tray.map_or_else(
-        || layout_rect(w, h, state.clock.is_some(), state.volume.installed).x - tray::WINDOW_GAP,
+        || layout_rect(w, h, clock_width, state.volume.installed).x - tray::WINDOW_GAP,
         |r| r.window_right,
     );
     let count = state.windows.iter().filter(|w| w.visible()).count();
@@ -255,7 +272,7 @@ pub fn paint<F: Fonts>(
         }
     }
     if state.volume.installed {
-        let rect = volume_rect(w, h, state.clock.is_some());
+        let rect = volume_rect(w, h, clock_width);
         let pressed = state.pressed == Target::TaskbarVolume;
         let hovered = state.hover == Target::TaskbarVolume && !pressed;
         let bg = background(hovered, pressed);
@@ -275,7 +292,7 @@ pub fn paint<F: Fonts>(
         }
     }
     if let Some(value) = state.keyboard_layout {
-        let rect = layout_rect(w, h, state.clock.is_some(), state.volume.installed);
+        let rect = layout_rect(w, h, clock_width, state.volume.installed);
         let pressed = state.pressed == Target::TaskbarKeyboardLayout;
         let hovered = state.hover == Target::TaskbarKeyboardLayout && !pressed;
         let bg = background(hovered, pressed);
@@ -287,7 +304,8 @@ pub fn paint<F: Fonts>(
         ui.text(rect.x + (rect.w - 16) / 2, top + 11, value, s::TEXT, bg)?;
     }
     if let Some(value) = state.clock {
-        let rect = clock_rect(w, h);
+        let rect = clock_rect(w, h, clock_width);
+        let text = clock_text(value, state.recording);
         let pressed = state.pressed == Target::TaskbarClock;
         let hovered = state.hover == Target::TaskbarClock && !pressed;
         let bg = background(hovered, pressed);
@@ -297,15 +315,9 @@ pub fn paint<F: Fonts>(
             focus(ui, rect.inset(3, 3))?;
         }
         ui.text(
-            rect.x + 10,
+            rect.x + (rect.w - text.len() as i32 * CLOCK_CELL) / 2,
             top + 11,
-            if state.recording == 1 {
-                b"REC"
-            } else if state.recording == 2 {
-                b"Saving"
-            } else {
-                value
-            },
+            text,
             if state.recording != 0 {
                 recording_color
             } else {

@@ -54,9 +54,9 @@ impl desktop_view::Icons for NoIcons {
 #[test]
 fn original_twenty_four_desktop_modal_settings_audio_and_menu_pixels() {
     let expected = [
-        "02af1f498dae287805b58cdba66192deb0f83651e046eb09baa0b0dc38da7e19",
-        "ae844d71ecb865d2e6293426d1301055e529bad16ed15cacde094518150bf26c",
-        "f5bbbdffb93949ea845b035402fb0fa052e951a82cc6db8bafaed1d9b78e0ff1",
+        "91e884539162762ae928b750b78cad8fe1266fac1587f6987e92c3c551be64dd",
+        "a18f7be871b2289df30f37b7c568804261b3a3cea0c5dd3ef3f51965edbbc573",
+        "092c0ca286954c62f6e76f5e23c4f0b0d3862714cdb7c48a89a096627318adb5",
         "6d2a44b13859c7bd333049c62fdf5658834a240ac305873f51833509ac0804fc",
         "889e2fb794792eaacc82d4e4e80c99dffed38659d323cbe9c393bb3c83fdd186",
         "16bcb572406f0c35e10980e9bbdf2eb1c93597419c0d0cf9359742d45fcf974a",
@@ -232,13 +232,13 @@ fn original_twenty_four_desktop_modal_settings_audio_and_menu_pixels() {
                 ..volume::View::default()
             };
             if case < 19 {
-                status_view::volume_tooltip(&mut ui, w as i32, h as i32, true, view).unwrap();
+                status_view::volume_tooltip(&mut ui, w as i32, h as i32, 88, view).unwrap();
             } else {
                 status_view::volume_popup(
                     &mut ui,
                     w as i32,
                     h as i32,
-                    true,
+                    88, // Original fixture clock width.
                     view,
                     if case == 20 {
                         Target::VolumeOutput1

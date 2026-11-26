@@ -675,6 +675,21 @@ impl<'a, 'input> Desktop<'a, 'input> {
             .iter()
             .filter(|w| w.visible())
             .count();
+        let clock_width = shell::taskbar_view::clock_width(
+            self.shell.config.taskbar_clock.then(|| self.shell.clock.label()),
+            self.capture.recording_state(),
+        );
+        if clock_width != self.shell.clock_width {
+            for width in [self.shell.clock_width, clock_width] {
+                if self.shell.audio.ui.popup_open {
+                    self.dirty.invalidate(shell::status_view::volume_popup_rect(self.width, self.height, width));
+                } else if self.input.hover == Target::TaskbarVolume {
+                    self.dirty.invalidate(shell::status_view::volume_tooltip_rect(self.width, self.height, width));
+                }
+            }
+            self.shell.clock_width = clock_width;
+            self.bar();
+        }
         if self.tray.layout(shell::tray::Layout {
             screen_w: self.width,
             screen_h: self.height,
@@ -683,7 +698,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
             system_left: shell::taskbar_view::layout_rect(
                 self.width,
                 self.height,
-                self.shell.config.taskbar_clock,
+                clock_width,
                 self.shell.audio.ui.installed,
             )
             .x,
@@ -1442,7 +1457,7 @@ impl<'a, 'input> Desktop<'a, 'input> {
                 let popup = shell::status_view::volume_popup_rect(
                     self.width,
                     self.height,
-                    self.shell.config.taskbar_clock,
+                    self.shell.clock_width,
                 );
                 let percent = shell::volume::percent_at_x(shell::volume::track_rect(popup), x);
                 self.shell.audio.set_percent(percent, commit, time.tick);

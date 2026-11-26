@@ -15,19 +15,19 @@ use crate::{
     },
 };
 use core::fmt::{self, Write};
-pub fn volume_tooltip_rect(w: i32, h: i32, clock: bool) -> Rect {
-    let icon = taskbar::volume_rect(w, h, clock);
+pub fn volume_tooltip_rect(w: i32, h: i32, clock_width: i32) -> Rect {
+    let icon = taskbar::volume_rect(w, h, clock_width);
     Rect::new(icon.x - 74, icon.y - 34, 176, 28).clamp_inside(work_area(w, h, s::TASKBAR_H))
 }
-pub fn volume_popup_rect(w: i32, h: i32, clock: bool) -> Rect {
+pub fn volume_popup_rect(w: i32, h: i32, clock_width: i32) -> Rect {
     volume::popup_rect(
-        taskbar::volume_rect(w, h, clock),
+        taskbar::volume_rect(w, h, clock_width),
         work_area(w, h, s::TASKBAR_H),
     )
 }
 pub fn time_menu_rect(w: i32, h: i32) -> Rect {
-    let clock = taskbar::clock_rect(w, h);
-    Rect::new(clock.right() - 160, h - s::TASKBAR_H - 54, 160, 52).clamp_inside(work_area(
+    let right = w - taskbar::CLOCK_RIGHT_MARGIN;
+    Rect::new(right - 160, h - s::TASKBAR_H - 54, 160, 52).clamp_inside(work_area(
         w,
         h,
         s::TASKBAR_H,
@@ -66,13 +66,13 @@ pub fn volume_tooltip(
     ui: &mut Ui<'_, '_, impl Fonts>,
     w: i32,
     h: i32,
-    clock: bool,
+    clock_width: i32,
     view: View<'_>,
 ) -> Result<()> {
     if !view.installed {
         return Ok(());
     }
-    let r = volume_tooltip_rect(w, h, clock);
+    let r = volume_tooltip_rect(w, h, clock_width);
     tooltip(ui, r)?;
     let label: &[u8] = if !view.reachable {
         b"Audio service unavailable".as_slice()
@@ -134,7 +134,7 @@ pub fn volume_popup(
     ui: &mut Ui<'_, '_, impl Fonts>,
     w: i32,
     h: i32,
-    clock: bool,
+    clock_width: i32,
     view: View<'_>,
     hover: Target,
     pressed: Target,
@@ -142,7 +142,7 @@ pub fn volume_popup(
     if !view.installed || !view.popup_open {
         return Ok(());
     }
-    let r = volume_popup_rect(w, h, clock);
+    let r = volume_popup_rect(w, h, clock_width);
     let track = volume::track_rect(r);
     let mute = volume::mute_rect(r);
     ui.rect(r.x + 3, r.y + 3, r.w, r.h, s::SHADOW)?;

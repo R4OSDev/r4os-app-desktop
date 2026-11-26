@@ -593,6 +593,7 @@ pub(crate) unsafe fn draw(
                 )?;
             }
         }
+        let clock_width = taskbar_view::clock_width(shell.clock, input.recording);
         let taskbar = Rect::new(0, scene.height - s::TASKBAR_H, scene.width, s::TASKBAR_H);
         if taskbar_view::visible(windows, active, scene.width, scene.height) {
             for &d in regions {
@@ -649,7 +650,7 @@ pub(crate) unsafe fn draw(
             let r = status_view::volume_tooltip_rect(
                 scene.width,
                 scene.height,
-                shell.config.taskbar_clock,
+                clock_width,
             );
             for &d in regions {
                 if d.intersects(r) {
@@ -658,7 +659,7 @@ pub(crate) unsafe fn draw(
                             ui,
                             scene.width,
                             scene.height,
-                            shell.config.taskbar_clock,
+                            clock_width,
                             shell.volume,
                         )
                     })?;
@@ -723,7 +724,7 @@ pub(crate) unsafe fn draw(
             let r = status_view::volume_popup_rect(
                 scene.width,
                 scene.height,
-                shell.config.taskbar_clock,
+                clock_width,
             );
             for &d in regions {
                 if d.intersects(r) {
@@ -732,7 +733,7 @@ pub(crate) unsafe fn draw(
                             ui,
                             scene.width,
                             scene.height,
-                            shell.config.taskbar_clock,
+                            clock_width,
                             shell.volume,
                             input.hover,
                             input.pressed,
