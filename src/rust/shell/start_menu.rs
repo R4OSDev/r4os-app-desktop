@@ -6,7 +6,24 @@ use crate::{
     render::geometry::{self, Rect},
 };
 pub const MAX_ENTRIES: usize = 10;
-pub const MAX_SUBMENUS: usize = 3;
+pub const MAX_SUBMENUS: usize = 4;
+pub const DEFAULT_MENU: &[u8] = include_bytes!("default_menu.r4s");
+const LEGACY_MENU: &[u8] = include_bytes!("legacy_menu.r4s");
+
+fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
+    bytes
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(bytes)
+        .split(|&b| b == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+}
+
+/// These two shipped versions differ only by the retired Tasks action.
+pub fn is_previous_default(bytes: &[u8]) -> bool {
+    let previous = lines(LEGACY_MENU);
+    lines(bytes).eq(previous.clone())
+        || lines(bytes).eq(previous.filter(|line| *line != b"ACTION;title=Tasks;action=tasks"))
+}
 pub const MAX_CHILDREN: usize = 9;
 pub const SUBMENU_W: i32 = 196;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +38,7 @@ pub enum SubmenuId {
     Programs,
     Internet,
     Settings,
+    ShutDown,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
@@ -46,12 +64,6 @@ impl Policy {
             .into_iter()
             .find(|policy| eq(value, policy.label()))
     }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    Programs,
-    System,
-    Power,
 }
 #[derive(Clone, Copy)]
 pub struct Launch<'a> {
@@ -146,141 +158,95 @@ struct Known {
     target: Target,
     title: &'static [u8],
     path: &'static [u8],
-    policy: Policy,
-    args: &'static [u8],
 }
 const KNOWN: [Known; 17] = [
     Known {
         target: Target::MenuTerminal,
         title: b"Terminal",
         path: b"/R4OS/SOFTWARE/TERMINAL/TERMINAL.R4X",
-        policy: Policy::Console,
-        args: b"",
     },
     Known {
         target: Target::MenuNotepad,
         title: b"Notepad",
         path: b"/R4OS/SOFTWARE/DESKTOP/NOTEPAD.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuPaint,
         title: b"Paint",
         path: b"/R4OS/SOFTWARE/DESKTOP/PAINT.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuCalc,
         title: b"Calculator",
         path: b"/R4OS/SOFTWARE/DESKTOP/CALC.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSynth,
         title: b"R4Synth",
         path: b"/R4OS/SOFTWARE/TERMINAL/SYNTH.R4X",
-        policy: Policy::Console,
-        args: b"C:\\TEMP\\TADA.WAV",
     },
     Known {
         target: Target::MenuDevmgr,
         title: b"Device Manager",
         path: b"/R4OS/SOFTWARE/DESKTOP/DEVMGR.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuR4code,
         title: b"R4Code",
         path: b"/SOFTWARE/R4CODE/R4CODE.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuKlickifax,
         title: b"Klickifax",
         path: b"/R4OS/SOFTWARE/INTERNET/KLICKIFAX.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsDefaultApps,
         title: b"Default Apps",
         path: b"/R4OS/SOFTWARE/DESKTOP/APPDEF.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsRegistry,
         title: b"Registry Editor",
         path: b"/R4OS/SOFTWARE/DESKTOP/REGEDIT.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsNetwork,
         title: b"Network",
         path: b"/R4OS/SOFTWARE/DESKTOP/NETCFG.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsServices,
         title: b"Services",
         path: b"/R4OS/SOFTWARE/DESKTOP/SERVICES.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsLogCenter,
         title: b"Log Center",
         path: b"/R4OS/SOFTWARE/DESKTOP/LOGCENTER.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsTime,
         title: b"Time Settings",
         path: b"/R4OS/SOFTWARE/DESKTOP/TIMESET.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSettingsAppearance,
         title: b"Appearance",
         path: b"/R4OS/SOFTWARE/DESKTOP/APPEARANCE.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
     Known {
         target: Target::MenuSpectra,
         title: b"Spectra",
         path: b"/R4OS/SOFTWARE/TERMINAL/DIAG/SPECTRA.R4X",
-        policy: Policy::Gui,
-        args: b"/GUI",
     },
     Known {
         target: Target::MenuPortex,
         title: b"Portex",
         path: b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X",
-        policy: Policy::Gui,
-        args: b"",
     },
 ];
 impl Known {
-    fn entry(&self) -> Entry {
-        Entry::known(
-            self.target,
-            Kind::Item,
-            self.title,
-            self.policy,
-            self.path,
-            self.args,
-        )
-    }
     fn matches(&self, title: &[u8], path: &[u8]) -> bool {
         eq(title, self.title) || eq(path, self.path)
     }
@@ -323,6 +289,7 @@ pub struct Menu {
     submenus: [Submenu; MAX_SUBMENUS],
     count: usize,
     submenu_count: usize,
+    separators: u16,
     pub loaded_from_config: bool,
 }
 impl Default for Menu {
@@ -332,66 +299,15 @@ impl Default for Menu {
             submenus: core::array::from_fn(|_| Submenu::EMPTY),
             count: 0,
             submenu_count: 0,
+            separators: 0,
             loaded_from_config: false,
         }
     }
 }
 impl Menu {
-    #[cfg(test)]
-    pub(crate) fn original_pixel_fixture() -> Self {
-        // Zig146/Rust5b228db rendered these two immutable menu facts. Keep
-        // their pixel oracle independent of later product menu additions.
-        let mut menu = Self::defaults();
-        copy_z(&mut menu.entries[0].title, b"R4OS Update");
-        let programs = menu.ensure(SubmenuId::Programs).unwrap();
-        menu.submenus[programs].count = 8;
-        menu
-    }
     pub fn defaults() -> Self {
         let mut menu = Self::default();
-        menu.add(KNOWN[15].entry());
-        menu.add_submenu(b"Programs", SubmenuId::Programs);
-        let programs = menu
-            .ensure(SubmenuId::Programs)
-            .expect("bounded original programs");
-        for known in &KNOWN[0..7] {
-            menu.submenus[programs].add(known.entry());
-        }
-        menu.submenus[programs].add(Entry::child(
-            Target::MenuProgramsInternet,
-            b"Internet",
-            SubmenuId::Internet,
-        ));
-        let internet = menu
-            .ensure(SubmenuId::Internet)
-            .expect("bounded original internet");
-        menu.submenus[internet].add(KNOWN[7].entry());
-        menu.submenus[programs].add(KNOWN[16].entry());
-        menu.action(Target::MenuTerminalMode, b"Terminal Mode");
-        menu.action(Target::MenuRun, b"Run...");
-        menu.add_submenu(b"Settings", SubmenuId::Settings);
-        let settings = menu
-            .ensure(SubmenuId::Settings)
-            .expect("bounded original settings");
-        for index in [14, 8, 9, 10, 11, 12, 13] {
-            menu.submenus[settings].add(KNOWN[index].entry());
-        }
-        menu.submenus[settings].add(Entry::known(
-            Target::MenuSettingsDisplay,
-            Kind::Item,
-            b"Display",
-            Policy::Gui,
-            KNOWN[14].path,
-            b"/DISPLAY",
-        ));
-        for (target, title) in [
-            (Target::MenuRestart, b"Restart".as_slice()),
-            (Target::MenuPoweroff, b"Poweroff"),
-            (Target::MenuHalt, b"Halt"),
-            (Target::MenuScreenOff, b"Screen off"),
-        ] {
-            menu.action(target, title);
-        }
+        menu.parse(DEFAULT_MENU);
         menu
     }
     pub fn entries(&self) -> &[Entry] {
@@ -459,19 +375,20 @@ impl Menu {
     }
     pub fn load(&mut self, bytes: &[u8]) -> bool {
         let mut parsed = Self::default();
-        for line in bytes.split(|&b| b == b'\n') {
-            let line = trim(line);
-            if line.is_empty() || line[0] == b'#' {
-                continue;
-            }
-            parsed.add_line(line);
-        }
+        parsed.parse(bytes);
         if parsed.count == 0 {
             return false;
         }
         parsed.loaded_from_config = true;
         *self = parsed;
         true
+    }
+    fn parse(&mut self, bytes: &[u8]) {
+        for line in lines(bytes).map(trim) {
+            if !line.is_empty() && line[0] != b'#' {
+                self.add_line(line);
+            }
+        }
     }
     fn add(&mut self, entry: Entry) {
         if self.count == MAX_ENTRIES || entry.target == Target::None {
@@ -519,7 +436,11 @@ impl Menu {
         self.ensure(id);
     }
     fn add_line(&mut self, line: &[u8]) {
-        if line.starts_with(b"ITEM;") || line.starts_with(b"SUBITEM;") {
+        if line == b"SEPARATOR" {
+            if self.count > 0 && self.count < MAX_ENTRIES {
+                self.separators |= 1 << self.count;
+            }
+        } else if line.starts_with(b"ITEM;") || line.starts_with(b"SUBITEM;") {
             let Some(title) = value(line, b"title=") else {
                 return;
             };
@@ -586,64 +507,52 @@ impl Menu {
                 self.ensure(child);
             }
         } else if line.starts_with(b"SUBACTION;") {
-            // Current submenus define no action target. Preserve admission of
-            // the empty named submenu, without porting the obsolete stub.
-            let (Some(id), Some(_), Some(_)) = (
+            let (Some(id), Some(title), Some(action)) = (
                 value(line, b"menu="),
                 value(line, b"title="),
                 value(line, b"action="),
             ) else {
                 return;
             };
-            self.ensure(submenu_id(id));
+            let id = submenu_id(id);
+            let target = action_target(action);
+            if let Some(index) = self.ensure(id) {
+                if id == SubmenuId::ShutDown
+                    && matches!(target, Target::MenuRestart | Target::MenuPoweroff)
+                {
+                    self.submenus[index].add(Entry::known(
+                        target,
+                        Kind::Action,
+                        title,
+                        Policy::Action,
+                        b"",
+                        b"",
+                    ));
+                }
+            }
         }
     }
-    pub fn group(&self, index: usize) -> Group {
-        match self.target(index) {
-            Target::None => Group::System,
-            Target::MenuRestart
-            | Target::MenuPoweroff
-            | Target::MenuHalt
-            | Target::MenuScreenOff => Group::Power,
-            Target::MenuTerminalMode | Target::MenuRun | Target::MenuSettings => Group::System,
-            _ => Group::Programs,
-        }
+    pub fn has_separator(&self, index: usize) -> bool {
+        index < self.count && self.separators & (1 << index) != 0
     }
-    pub fn starts_group(&self, index: usize) -> bool {
-        index < self.count && (index == 0 || self.group(index - 1) != self.group(index))
+    fn separators_before(&self, end: usize) -> i32 {
+        let mask = (1u16 << end.min(self.count)) - 1;
+        (self.separators & mask).count_ones() as i32
     }
-    pub fn group_label(&self, index: usize) -> &'static [u8] {
-        if index >= self.count {
-            return b"";
-        }
-        match self.group(index) {
-            Group::Programs => b"Programs",
-            Group::System => b"System",
-            Group::Power => b"Power",
-        }
+    pub fn root_rect(&self, height: i32) -> Rect {
+        let h = 2 * style::MENU_PADDING
+            + self.count as i32 * style::MENU_ITEM_H
+            + self.separators_before(self.count) * style::MENU_SEPARATOR_H;
+        Rect::new(0, height - style::TASKBAR_H - h, style::MENU_W, h)
     }
     pub fn item_y(&self, height: i32, index: usize) -> i32 {
-        let mut y = height - style::TASKBAR_H - style::MENU_H + style::MENU_TOP_PAD;
-        let mut previous = None;
-        for i in 0..=index.min(self.count) {
-            if i == self.count {
-                break;
-            }
-            let group = self.group(i);
-            if previous != Some(group) {
-                y += style::MENU_GROUP_H
-            }
-            if i == index {
-                return y;
-            }
-            y += style::MENU_ITEM_H;
-            previous = Some(group);
-        }
-        y
+        self.root_rect(height).y
+            + style::MENU_PADDING
+            + index.min(self.count) as i32 * style::MENU_ITEM_H
+            + self.separators_before(index.saturating_add(1)) * style::MENU_SEPARATOR_H
     }
     pub fn hit(&self, height: i32, x: i32, y: i32) -> Option<usize> {
-        let top = height - style::TASKBAR_H - style::MENU_H;
-        if !(0..style::MENU_W).contains(&x) || y < top || y >= top + style::MENU_H {
+        if !self.root_rect(height).contains(x, y) {
             return None;
         }
         (0..self.count).find(|&i| {
@@ -756,6 +665,8 @@ fn submenu_id(value: &[u8]) -> SubmenuId {
         SubmenuId::Programs
     } else if eq(value, b"internet") {
         SubmenuId::Internet
+    } else if eq(value, b"shutdown") {
+        SubmenuId::ShutDown
     } else if eq(value, b"settings") {
         SubmenuId::Settings
     } else {
@@ -767,6 +678,7 @@ fn submenu_target(id: SubmenuId) -> Target {
         SubmenuId::Programs => Target::MenuPrograms,
         SubmenuId::Internet => Target::MenuProgramsInternet,
         SubmenuId::Settings => Target::MenuSettings,
+        SubmenuId::ShutDown => Target::MenuShutDown,
         SubmenuId::None => Target::None,
     }
 }
@@ -791,7 +703,7 @@ fn subitem_target(id: SubmenuId, title: &[u8], path: &[u8]) -> Target {
             }
             Target::None
         }
-        SubmenuId::None => Target::None,
+        SubmenuId::None | SubmenuId::ShutDown => Target::None,
     }
 }
 fn value<'a>(line: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
@@ -824,11 +736,10 @@ mod tests {
     #[test]
     fn current_defaults_keep_programs_and_retire_standalone_update() {
         let menu = Menu::defaults();
-        assert_eq!(menu.target(0), Target::MenuSpectra);
+        assert_eq!(menu.target(0), Target::MenuPortex);
         assert_eq!(menu.launch(0).unwrap().policy, Policy::Gui);
-        assert_eq!(menu.launch(0).unwrap().args, b"/GUI");
-        assert_eq!(menu.entries().len(), 9);
-        assert_eq!(menu.submenu_count(), 3);
+        assert_eq!(menu.entries().len(), 6);
+        assert_eq!(menu.submenu_count(), 4);
         assert_eq!(menu.target(1), Target::MenuPrograms);
         assert_eq!(menu.launch(1).unwrap().kind, Kind::Submenu);
         assert!(menu.has_submenu(1));
@@ -839,19 +750,19 @@ mod tests {
         assert_eq!(menu.submenu_target(1, 7), Target::MenuProgramsInternet);
         assert!(menu.submenu_has_submenu(1, 7));
         assert_eq!(menu.nested_target(1, 7, 0), Target::MenuKlickifax);
-        assert_eq!(menu.submenu_target(1, 8), Target::MenuPortex);
-        assert_eq!(
-            menu.submenu_launch(1, 8).unwrap().path,
-            b"/R4OS/SOFTWARE/DESKTOP/PORTEX.R4X"
-        );
-        assert_eq!(menu.target(2), Target::MenuTerminalMode);
-        assert_eq!(menu.target(4), Target::MenuSettings);
-        assert_eq!(menu.target(5), Target::MenuRestart);
-        assert_eq!(menu.target(7), Target::MenuHalt);
-        assert_eq!(menu.target(8), Target::MenuScreenOff);
-        assert_eq!(menu.submenu_target(4, 0), Target::MenuSettingsAppearance);
-        assert_eq!(menu.submenu_target(4, 7), Target::MenuSettingsDisplay);
-        assert_eq!(menu.submenu_launch(4, 7).unwrap().args, b"/DISPLAY");
+        assert_eq!(menu.submenu_target(1, 8), Target::MenuSpectra);
+        assert_eq!(menu.submenu_launch(1, 8).unwrap().args, b"/GUI");
+        assert_eq!(menu.submenu_launch(1, 8).unwrap().policy, Policy::Gui);
+        assert_eq!(menu.target(2), Target::MenuSettings);
+        assert_eq!(menu.target(3), Target::MenuRun);
+        assert_eq!(menu.target(4), Target::MenuTerminalMode);
+        assert_eq!(menu.target(5), Target::MenuShutDown);
+        assert_eq!(menu.submenu(5).unwrap().entries().len(), 2);
+        assert_eq!(menu.submenu_target(5, 0), Target::MenuRestart);
+        assert_eq!(menu.submenu_target(5, 1), Target::MenuPoweroff);
+        assert_eq!(menu.submenu_target(2, 0), Target::MenuSettingsAppearance);
+        assert_eq!(menu.submenu_target(2, 7), Target::MenuSettingsDisplay);
+        assert_eq!(menu.submenu_launch(2, 7).unwrap().args, b"/DISPLAY");
         assert!(
             menu.entries()
                 .iter()
@@ -885,8 +796,8 @@ mod tests {
     fn original_unknown_config_keeps_defaults() {
         let mut menu = Menu::defaults();
         assert!(!menu.load(b"ITEM;title=Unknown;path=/R4OS/SOFTWARE/DESKTOP/UNKNOWN.R4X;policy=gui\nACTION;title=Settings;action=settings\nACTION;title=Nope;action=unknown\n"));
-        assert_eq!(menu.entries().len(), 9);
-        assert_eq!(menu.target(0), Target::MenuSpectra);
+        assert_eq!(menu.entries().len(), 6);
+        assert_eq!(menu.target(0), Target::MenuPortex);
         assert!(
             !menu.load(
                 b"ITEM;title=R4OS Update;path=/R4OS/SOFTWARE/DESKTOP/UPDATE.R4X;policy=gui\n"
@@ -899,26 +810,35 @@ mod tests {
         );
     }
     #[test]
-    fn original_group_layout_and_nested_hits() {
+    fn shipped_and_embedded_menus_match_and_only_original_files_migrate() {
+        let template =
+            include_bytes!("../../../../../Distribution/Injection/R4OS/SOFTWARE/DESKTOP/MENU.R4S");
+        assert!(lines(DEFAULT_MENU).eq(lines(template)));
+        assert!(is_previous_default(LEGACY_MENU));
+        assert!(!is_previous_default(DEFAULT_MENU));
+        let mut custom = LEGACY_MENU.to_vec();
+        custom.extend_from_slice(b"# local setting\n");
+        assert!(!is_previous_default(&custom));
+    }
+    #[test]
+    fn root_separators_and_nested_hits() {
         let menu = Menu::defaults();
         let height = 720;
-        let top = height - style::TASKBAR_H - style::MENU_H;
-        assert!(menu.starts_group(0));
-        assert!(!menu.starts_group(3));
-        assert!(menu.starts_group(2));
-        assert!(menu.starts_group(5));
-        assert_eq!(menu.group_label(0), b"Programs");
-        assert_eq!(menu.group_label(2), b"System");
-        assert_eq!(menu.group_label(5), b"Power");
-        assert_eq!(
-            menu.item_y(height, 0),
-            top + style::MENU_TOP_PAD + style::MENU_GROUP_H
-        );
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, 1) + 3), Some(1));
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, 2) - 3), None);
-        assert!(menu.item_y(height, 9) + style::MENU_ITEM_H <= top + style::MENU_H);
+        let panel = menu.root_rect(height);
+        assert_eq!(menu.item_y(height, 0), panel.y + style::MENU_PADDING);
+        for i in 0..menu.entries().len() {
+            assert_eq!(menu.has_separator(i), matches!(i, 1 | 4));
+            let y = menu.item_y(height, i);
+            assert_eq!(menu.hit(height, 40, y + 3), Some(i));
+            if menu.has_separator(i) {
+                assert_eq!(menu.hit(height, 40, y - 3), None);
+            }
+        }
         let last = menu.entries().len() - 1;
-        assert_eq!(menu.hit(height, 40, menu.item_y(height, last) + 3), Some(last));
+        assert_eq!(
+            menu.hit(height, 40, menu.item_y(height, last) + 3),
+            Some(last)
+        );
         let rect = menu.submenu_rect(1280, height, 1).unwrap();
         assert_eq!(rect.x, style::MENU_W - 4);
         assert_eq!(

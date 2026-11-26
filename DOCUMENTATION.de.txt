@@ -1,6 +1,23 @@
 ﻿R4DESK.R4X - modularer Rust-Desktop ab0.86.86 /0.1.147
 ===================================================
 
+Startmenue und Taskleiste ab 0.95.50
+------------------------------------
+Portex steht an erster Stelle. Danach folgen Programs, Settings und Run...
+sowie unter dem zweiten Trennstrich Terminal Mode und Shut Down. Unter
+Programs startet Spectra mit /GUI. Unter Shut Down oeffnen Restart und
+Poweroff den jeweiligen Bestaetigungsdialog.
+
+MENU.R4S steuert Reihenfolge und Beschriftung. SEPARATOR setzt eine
+Trennlinie vor den naechsten Haupteintrag. SUBACTION verbindet Restart
+und Poweroff mit dem Untermenue shutdown. Beim Aktualisieren ersetzt der
+Desktop die beiden bekannten alten Standarddateien. Eigene Menues bleiben
+erhalten. Ohne lesbare Menuekonfiguration gilt derselbe eingebaute Standard.
+
+Die Uhr belegt je nach Format 48 oder 72 Pixel. Die Schnellstartsymbole
+zeigen ihren Rahmen beim Ueberfahren mit der Maus. Beim Explorer bleibt
+er sichtbar, solange ein Explorerfenster geoeffnet ist.
+
 Der produktive Einstieg liegt in src/rust/entry.rs. module.R4MF und der
 allgemeine SDK-Builder sind die einzige Modul-/Import-/Buildwahrheit;
 Cargo.toml/Cargo.lock besitzen den lokalen Crategraph. Es gibt keinen

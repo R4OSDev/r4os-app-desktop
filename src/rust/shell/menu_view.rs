@@ -20,27 +20,19 @@ pub fn paint(
     if !view.open {
         return Ok(());
     }
-    let top = height - s::TASKBAR_H - s::MENU_H;
-    ui.rect(0, top, s::MENU_W, s::MENU_H, s::WINDOW_BG)?;
-    ui.bevel(Rect::new(0, top, s::MENU_W, s::MENU_H), false)?;
-    ui.rect(4, top + 4, 28, s::MENU_H - 8, s::TITLE_ACTIVE)?;
-    ui.text(40, top + 14, b"Desktop", s::TEXT, s::WINDOW_BG)?;
+    let panel = menu.root_rect(height);
+    ui.fill(panel, s::WINDOW_BG)?;
+    ui.bevel(panel, false)?;
+    ui.rect(4, panel.y + 4, 28, panel.h - 8, s::TITLE_ACTIVE)?;
     for (i, entry) in menu.entries().iter().enumerate() {
         let target = entry.target();
         let down = target == pressed;
         let selected = i == view.selected || down || target == hover;
         let y = menu.item_y(height, i);
-        if menu.starts_group(i) {
-            let label_y = y - s::MENU_GROUP_H + 5;
-            ui.text(
-                42,
-                label_y,
-                menu.group_label(i),
-                s::TITLE_INACTIVE,
-                s::WINDOW_BG,
-            )?;
-            ui.rect(104, label_y + 5, s::MENU_W - 112, 1, s::TASKBAR_DARK)?;
-            ui.rect(104, label_y + 6, s::MENU_W - 112, 1, s::TASKBAR_LIGHT)?;
+        if menu.has_separator(i) {
+            let line = y - s::MENU_SEPARATOR_H / 2 - 1;
+            ui.rect(40, line, s::MENU_W - 48, 1, s::TASKBAR_DARK)?;
+            ui.rect(40, line + 1, s::MENU_W - 48, 1, s::TASKBAR_LIGHT)?;
         }
         let (fg, bg) = if selected {
             (s::TITLE_TEXT, s::SELECT_BG)
@@ -48,14 +40,13 @@ pub fn paint(
             (s::TEXT, s::WINDOW_BG)
         };
         if selected {
-            let rect = Rect::new(34, y - 2, s::MENU_W - 40, s::MENU_ITEM_H);
+            let rect = Rect::new(34, y, s::MENU_W - 40, s::MENU_ITEM_H);
             ui.fill(rect, bg)?;
             if down {
                 ui.bevel(rect, true)?;
             }
         }
         ui.text(44, y + 4, entry.title(), fg, bg)?;
-        ui.text(166, y + 4, entry.policy_label(), fg, bg)?;
         if menu.has_submenu(i) {
             ui.text(s::MENU_W - 18, y + 4, b">", fg, bg)?;
         }
@@ -115,14 +106,16 @@ fn submenu_view(
             (s::TEXT, s::WINDOW_BG)
         };
         if active {
-            let row = Rect::new(rect.x + 3, y - 2, rect.w - 6, s::MENU_ITEM_H);
+            let row = Rect::new(rect.x + 3, y, rect.w - 6, s::MENU_ITEM_H);
             ui.fill(row, bg)?;
             if down {
                 ui.bevel(row, true)?;
             }
         }
         ui.text(rect.x + 12, y + 4, entry.title(), fg, bg)?;
-        ui.text(rect.right() - 70, y + 4, entry.policy_label(), fg, bg)?;
+        if menu.id() != start_menu::SubmenuId::ShutDown {
+            ui.text(rect.right() - 70, y + 4, entry.policy_label(), fg, bg)?;
+        }
         if has_children(index) {
             ui.text(rect.right() - 18, y + 4, b">", fg, bg)?;
         }

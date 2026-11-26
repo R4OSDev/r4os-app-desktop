@@ -1,6 +1,6 @@
 .{
     .name = .r4os_r4desk,
-    .version = "0.1.243",
+    .version = "0.1.244",
     .fingerprint = 0xee287032789ba464,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

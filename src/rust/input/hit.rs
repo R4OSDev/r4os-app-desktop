@@ -168,6 +168,9 @@ pub fn target(scene: &Scene<'_>, x: i32, y: i32) -> Target {
         if let Some(i) = shell.menu.hit(h, x, y) {
             return shell.menu.target(i);
         }
+        if shell.menu.root_rect(h).contains(x, y) {
+            return Target::StartMenuPanel;
+        }
         return if Rect::new(2, h - s::TASKBAR_H + 4, s::START_W, s::START_H).contains(x, y) {
             Target::StartButton
         } else {

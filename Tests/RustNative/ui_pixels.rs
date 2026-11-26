@@ -45,9 +45,9 @@ fn original_eight_complete_chrome_menu_and_dirty_pixel_digests() {
         "be2db032768e4f593026387697a2360090b624f3a088596762f0aa4d3006b8ae",
         "66c754fe1daf3c36dee9d2f096855bd99bf1d55cf7cdd9d038cc18a928bc58eb",
         "9b648cfb92754b3934c05d3fd17f844591b60f1f79ab46135b181beb964c898f",
-        "9a5c23080f8fe312ad7fd4096e7a8670d557e1efb90a2e78647a00b34676aba7",
-        "cb8d4106301c73f5599aa3de542caf1136c76965f98acbff16ecbb68f5da002b",
-        "499de988f2877de67377f336489bb84d8cfcd397b8ac7837840c90ee77cd30f3",
+        "136fe0b2a7c9877481c556c74411b2b54634622c33688f6ab86296b187acbe24",
+        "027231b1cf6c68952d2710df33cc9e355081cbe0c10ba2f760162a7141dfcb5b",
+        "30f55a301b28bdfd08395d92d342cb86fbb61611c973e4357aaceaaa65de5baf",
         "20509ba73503fb841e53637d5ad8343e581fdf0559752a06829fea7cd2d9fdb1",
     ];
     for (case, expected) in expected.into_iter().enumerate() {
@@ -91,18 +91,18 @@ fn original_eight_complete_chrome_menu_and_dirty_pixel_digests() {
             )
             .unwrap();
         } else {
-            let menu = Menu::original_pixel_fixture();
+            let menu = Menu::defaults();
             let v = View {
                 open: true,
                 selected: if case == 4 {
                     0
                 } else if case == 5 {
-                    4
+                    2
                 } else {
                     1
                 },
                 submenu_open: case != 4,
-                submenu_parent: if case == 5 { 4 } else { 1 },
+                submenu_parent: if case == 5 { 2 } else { 1 },
                 submenu_selected: 7,
                 nested_open: case == 6,
                 nested_parent: 7,

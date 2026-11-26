@@ -50,7 +50,7 @@ fn check_scene_sequence(movement: bool) {
     let expected = [
         "63b3f22fb979f9213354088edb22f8da5a98f7504708ef435efd41ebec7cf81f",
         "d3233e6ee767d500feac7f7ac14eac324dbccb0237ec2dfae6bd84dafdcaf6e3",
-        "d42e27cbe965a194422f6150b6f1a0983c6bf084f057e3e6553a0fc2b88cc8e3",
+        "7207ac6e4ce0722b609683e4cffe87924f792a4b191589789718ac7918e586a8",
         "8f58503702f31bed0e504024a4ea4f6e75fce66c249cf0ada3e806f0ed03b01e",
         "b331861937cfc977f8a02c16ede97576e53cb1fd79aad9964ae2ffa6d4d19866",
         "4f58dc7c0ff8f0b45c9d96564d3a996ad8be3dbade818a83c07261db98bb5eb3",
@@ -103,7 +103,7 @@ fn check_scene_sequence(movement: bool) {
         items.layout(640, 480, 32);
         let config = Config::default();
         let quick = Bar::defaults();
-        let menu = Menu::original_pixel_fixture();
+        let menu = Menu::defaults();
         let tray = Registry::new().unwrap();
         let mut cache = Cache::new().unwrap();
         let wallpaper: [u32; 64] =

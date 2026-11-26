@@ -669,3 +669,21 @@ fn an_owned_logical_key_stays_gui_owned_when_the_actual_native_admission_is_busy
         );
     });
 }
+
+#[test]
+fn hovering_a_menu_parent_damages_its_new_popup_on_the_same_event() {
+    with_router(|app, session, shell, hosted, outputs| {
+        shell.menu_control.set_open(true);
+        let popup = shell.menu.submenu_rect(1280, 720, 1).unwrap();
+        let y = shell.menu.item_y(720, 1) + 10;
+        let registry = crate::shell::tray::Registry::new().unwrap();
+        let mut dirty = Dirty::default();
+        Router::default().pointer(
+            &mut State::default(), shell, hosted, outputs, app, session, &mut dirty,
+            Target::MenuPrograms, Identity::default(), &registry, sample(80, y, 0, 0),
+            false, false, 1280, 720, 100, 1000,
+        );
+        assert!(shell.menu_control.view().submenu_open);
+        assert!(dirty.regions().iter().any(|r| r.contains(popup.right() - 2, popup.y + 2)));
+    });
+}

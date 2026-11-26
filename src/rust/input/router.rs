@@ -86,12 +86,7 @@ pub fn shell_damage(shell: &Shell<'_>, dirty: &mut Dirty, width: i32, height: i3
     }
     let menu = shell.menu_control.view();
     if menu.open {
-        dirty.invalidate(Rect::new(
-            0,
-            height - s::TASKBAR_H - s::MENU_H,
-            s::MENU_W,
-            s::MENU_H,
-        ));
+        dirty.invalidate(shell.menu.root_rect(height));
         if menu.submenu_open {
             if let Some(r) = shell.menu.submenu_rect(width, height, menu.submenu_parent) {
                 dirty.invalidate(r);
@@ -225,8 +220,8 @@ impl Router {
                 }
             }
             target_damage(input.hover, hosted, shell, dirty, width, height);
-            target_damage(target, hosted, shell, dirty, width, height);
             shell.menu_control.hover(&shell.menu, target);
+            target_damage(target, hosted, shell, dirty, width, height);
             input.hover = target;
             input.tray_hover = identity;
         }

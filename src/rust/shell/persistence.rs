@@ -147,11 +147,42 @@ impl<'app, 'start> Store<'app, 'start> {
         }
     }
     pub fn load_menu(&self, menu: &mut Menu) -> Result<bool> {
-        let mut bytes = [0; 1024];
-        Ok(match self.read(MENU, &mut bytes)? {
-            Some(n) if n != 0 => menu.load(&bytes[..n]),
-            _ => false,
-        })
+        let system = System::new2(self.app)?;
+        let files = system.files();
+        let name = path(MENU)?;
+        let Some(info) = files.info(&name)? else {
+            return Ok(false);
+        };
+        if info.is_dir != 0 || info.size == 0 {
+            return Ok(false);
+        }
+        let len = u32::try_from(info.size).map_err(|_| Error::OutOfMemory)? as usize;
+        let mut bytes = alloc::vec::Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| Error::OutOfMemory)?;
+        bytes.resize(len, 0);
+        let mut offset = 0;
+        while offset < len {
+            let Some(n) = files.read_at(&name, offset as u32, &mut bytes[offset..])? else {
+                return Err(Error::Sdk(SdkError::InvalidProvider));
+            };
+            if n == 0 {
+                return Err(Error::Sdk(SdkError::InvalidProvider));
+            }
+            offset += n;
+        }
+        if super::start_menu::is_previous_default(&bytes) {
+            let current = super::start_menu::DEFAULT_MENU;
+            let mut sequence = 0;
+            if !files.save(&mut sequence, &name, current, false).committed() {
+                self.app
+                    .write("Desktop menu migration could not be saved; using new defaults\n");
+            }
+            Ok(menu.load(current))
+        } else {
+            Ok(menu.load(&bytes))
+        }
     }
     pub fn load_layout(&self, standard: &Standard<'_>) -> Result<LoadedLayout> {
         let recovery = self.recover(LAYOUT)?;

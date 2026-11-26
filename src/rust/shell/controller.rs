@@ -59,7 +59,7 @@ pub fn activate(state: &mut State<'_>, target: Target) -> Action {
             state.close_top();
             state.menu_control.set_open(open);
         }
-        Target::MenuPrograms | Target::MenuProgramsInternet => {
+        Target::MenuPrograms | Target::MenuProgramsInternet | Target::MenuShutDown => {
             state.menu_control.hover(&state.menu, target);
             state.menu_control.navigate(&state.menu, Direction::Right);
         }

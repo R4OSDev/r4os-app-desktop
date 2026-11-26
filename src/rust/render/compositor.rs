@@ -266,12 +266,7 @@ pub fn covered_by_higher(windows: &[Window], index: usize, active: usize, damage
 fn menu_bounds(scene: &Scene<'_>) -> Rect {
     let shell = &scene.shell;
     let view = shell.menu_view;
-    let mut bounds = Rect::new(
-        0,
-        scene.height - s::TASKBAR_H - s::MENU_H,
-        s::MENU_W,
-        s::MENU_H,
-    );
+    let mut bounds = shell.menu.root_rect(scene.height);
     if view.submenu_open {
         if let Some(r) = shell
             .menu
